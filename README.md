@@ -43,6 +43,30 @@ pipeline**, and every design choice below is backed by an eval run you can repro
   is streamed to the UI and logged as one JSON line. A semantic answer cache in Qdrant answers
   near-duplicate questions with zero LLM calls.
 
+## What this project demonstrates
+
+- **Eval-driven engineering, including negative results.** Every retrieval change is measured on
+  a held-out split and checked with paired bootstrap confidence intervals. The cross-encoder
+  reranker won on dev but lost on test. Overall its gain wasn't significant (+0.03 MRR,
+  CI crosses zero) and it cost 7× the latency, so it was removed rather than kept because it's
+  "best practice".
+- **An eval that doesn't depend on chunking.** Questions are scored against verbatim evidence
+  quotes, not chunk IDs, so completely different chunking strategies can be compared fairly.
+- **Data-quality work before model tuning.** Auditing the corpus turned up ~15% translated
+  duplicates and repeated web pages, which are removed by rule-based filtering and 5-shingle
+  near-duplicate detection.
+- **Quantified trade-offs.** The verifier ablation shows +0.11 faithfulness for 2.5× the
+  latency, which is why it runs only on the premium tier and can be switched off.
+- **MCP used as architecture.** A single FastMCP server is the agent's only tool layer. It is
+  called in-process by the web agent and served over authenticated Streamable HTTP and stdio to
+  external clients like Claude Desktop and Cursor.
+- **A cost-aware product.** Free and passcode tiers, one LLM call per free-tier message, a
+  semantic cache, an LLM-call budget, and fallback to the retrieved passages when the model's
+  quota runs out.
+- **Debugging production deployments.** Fixed ZeroGPU startup detection for a uvicorn-served
+  app, resolved a dependency conflict between `gradio[mcp]` and FastMCP 4, and made model loading
+  thread-safe under concurrent requests.
+
 ## Architecture
 
 ```
@@ -145,6 +169,14 @@ With the verifier, faithfulness goes up **+0.11** (95% CI [0.00, +0.21]) and cor
 pass on 61% of answers. It stays on for the premium tier (`VERIFY_ANSWERS=false` turns it off).
 *Caveat:* the judge is from the same model family as the generator, so compare scores between
 variants rather than treating them as absolute.
+
+### Limitations
+- The eval set is small (88 questions) and LLM-generated. The evidence quotes are verified
+  automatically, but the questions themselves haven't been reviewed by hand.
+- The answer judge is from the same model family as the generator. Compare variants with each
+  other rather than reading the scores as absolute quality.
+- The verifier is strict (it asks for a corrective pass on 61% of answers). Tuning that threshold
+  is the next experiment.
 
 ## Using the MCP server from Claude Desktop or Cursor
 
