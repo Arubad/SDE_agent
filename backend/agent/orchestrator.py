@@ -23,11 +23,12 @@ from typing import Awaitable, Callable
 import anthropic
 from fastmcp import Client
 
-from backend.agent import cache
+from backend.agent import cache, guard
 from backend.core import config
 from backend.agent.citations import render_citations, search_result_block
 from backend.agent.citations import source_label as _source_label
 from backend.core.llm import LLMUnavailable, gemini_generate, haiku_async_client, haiku_json
+from backend.agent.loop import run_tool_loop
 from backend.core.trace import Trace
 from backend.mcp_server import _retrieval_label, mcp
 from backend.tools.youtube import find_video_urls
@@ -47,6 +48,37 @@ GROUNDING_RULES = """Grounding rules:
   widely known background, but label that sentence "(general knowledge)".
 - If a source is a YouTube video, refer to timestamps when the passages give them.
 - Be concise and well structured: short sections, bullet points, code blocks where useful."""
+
+LOOP_INSTRUCTIONS = """You have tools for a software engineering knowledge base. Work like this:
+- Search before answering any factual question. For a question with several parts, issue the
+  searches together in one turn.
+- Read the results. If they do not cover part of the question, search again with different
+  wording, at most twice.
+- If the user shared a YouTube link, load it with analyze_youtube_video before answering.
+- If the knowledge base does not cover the question, say so plainly. Do not present
+  unsupported material as if it came from the sources.
+- When you have enough, answer the question and stop."""
+
+
+def system_prompt(mode: str) -> str:
+    parts = [TUTOR_PRINCIPLES, GROUNDING_RULES]
+    if mode == "loop":
+        parts.append(LOOP_INSTRUCTIONS)
+    if config.INJECTION_DEFENSE:
+        parts.append(guard.UNTRUSTED_RULE)
+    return "\n\n".join(parts)
+
+
+_URL = re.compile(r"https?://[^\s)>\]\"']+")
+
+
+def finalize_text(text: str, passages: list[dict], message: str) -> str:
+    """Strip links/images the answer was not given by a retrieved source or the user (injection exfiltration)."""
+    if not config.INJECTION_DEFENSE:
+        return text
+    allowed = {p["url"] for p in passages if p.get("url")} | set(_URL.findall(message))
+    return guard.sanitize_links(text, allowed)
+
 
 SMALL_TALK = re.compile(r"^\s*(hi|hello|hey|thanks|thank you|ok|okay|cool|great|bye|good (morning|evening))\W*$", re.I)
 
@@ -257,7 +289,7 @@ class Agent:
         with self.trace.span("generate", kind="llm", generator="haiku", passages=len(passages)) as span:
             try:
                 async with client.messages.stream(
-                    model=config.HAIKU_MODEL, max_tokens=8000, system=TUTOR_PRINCIPLES + "\n\n" + GROUNDING_RULES,
+                    model=config.HAIKU_MODEL, max_tokens=8000, system=system_prompt("pipeline"),
                     messages=messages, output_config={"effort": "low"},
                 ) as stream:
                     async for text in stream.text_stream:
@@ -340,6 +372,110 @@ def format_reply(text: str, sources: list[dict]) -> tuple[str, list[dict]]:
     return text + "\n".join(lines), merged
 
 
+async def mcp_tool_defs(client) -> list[dict]:
+    """Claude tool definitions discovered from the MCP server, restricted to the allow-list."""
+    return [{"name": t.name, "description": t.description or "", "input_schema": t.inputSchema}
+            for t in await client.list_tools() if t.name in guard.ALLOWED_TOOLS]
+
+
+async def _run_pipeline(agent: Agent, tools: Tools, message: str, history: list[dict]):
+    """Fixed pipeline: route -> gather -> generate [-> verify -> one corrective retry]."""
+    trace, emit, tier = agent.trace, agent.emit, agent.tier
+    with trace.span("route", kind="step") as span:
+        plan = await agent.route(message, history)
+        span.set(route=plan["route"], queries=plan["search_queries"])
+    await emit({"type": "thought", "stage": "planning", "title": f"Plan: {plan['route'].replace('_', ' ')}",
+                "detail": plan["reason"], "query": plan["standalone_question"] if plan["standalone_question"] != message else None})
+
+    passages = await agent.gather(tools, plan) if plan["route"] != "direct" else []
+    question = plan["standalone_question"] or message
+    await emit({"type": "thought", "stage": "synthesizing", "title": "Writing Answer",
+                "detail": f"{'Claude Haiku 5.5' if tier == 'premium' else 'Gemini'} over {len(passages)} sources"})
+    verification = None
+    try:
+        if tier == "premium":
+            text, sources = await agent.generate_claude(message, history, passages)
+            if config.VERIFY_ANSWERS and passages and agent._budget_left(1):
+                verification = await agent.verify(question, text, passages)
+                await emit({"type": "tool_done" if verification["verdict"] == "grounded" else "thought",
+                            "stage": "verify", "title": f"Fact-check: {verification['verdict'].replace('_', ' ')}",
+                            "detail": "; ".join(verification["unsupported_claims"][:3]) or "All claims supported by the cited sources"})
+                if verification["verdict"] != "grounded" and agent._budget_left(2):
+                    extra = [verification["follow_up_query"]] if verification["follow_up_query"] else None
+                    if extra:
+                        more = await agent.gather(tools, {**plan, "route": "knowledge_base"}, extra_queries=extra)
+                        passages = _merge_passages([passages, more], config.MAX_CONTEXT_CHUNKS + 3)
+                    await emit({"type": "reply_delta", "delta": "", "reset": True})
+                    text, sources = await agent.generate_claude(
+                        message, history, passages, correction="; ".join(verification["unsupported_claims"]))
+                    verification["retried"] = True
+        else:
+            text, sources = await agent.generate_gemini(message, history, passages)
+    except LLMUnavailable as e:
+        await emit({"type": "tool_error", "stage": "synthesizing", "title": "Model Unavailable",
+                    "detail": str(e)[:200]})
+        text = sources = None
+        if tier == "premium":  # paid tier: degrade to the free model before giving up
+            try:
+                await emit({"type": "reply_delta", "delta": "", "reset": True})
+                text, sources = await agent.generate_gemini(message, history, passages)
+            except LLMUnavailable:
+                pass
+        if text is None:
+            if not passages:
+                raise
+            text = ("**The language model is unavailable right now** (the free tier's daily quota may be used up), "
+                    "so here are the most relevant knowledge-base passages instead.\n\n" +
+                    "\n\n".join(f"**Passage {i}** ({_source_label(p)})\n\n> {p['text'][:600].strip()}…"
+                               for i, p in enumerate(passages[:3], 1)))
+            sources = [{**p, "n": i} for i, p in enumerate(passages[:3], 1)]
+    return text, sources, passages, verification, plan["route"]
+
+
+_LOOP_UI = {
+    "search_knowledge_base": lambda a: {"stage": "rag", "title": "Searching Knowledge Base", "tool": "MCP · search_knowledge_base",
+                                        "query": a.get("query"), "detail": _retrieval_label()},
+    "analyze_youtube_video": lambda a: {"stage": "youtube", "title": "Loading YouTube Video", "tool": "MCP · analyze_youtube_video",
+                                        "query": a.get("video_url"), "detail": "Stored copy → captions → Gemini video understanding"},
+    "get_document": lambda a: {"stage": "rag", "title": "Reading Document", "tool": "MCP · get_document",
+                               "query": a.get("doc_id"), "detail": "Fetching stored passages of one document"},
+}
+
+
+async def _run_loop(agent: Agent, client, tools: Tools, message: str, history: list[dict]):
+    """Tool-use loop: Claude chooses which MCP tools to call, in parallel, within a step budget."""
+    trace, emit = agent.trace, agent.emit
+    tool_defs = await mcp_tool_defs(client)
+    await emit({"type": "thought", "stage": "planning", "title": "Plan: agent loop",
+                "detail": f"Claude Haiku 5.5 chooses tools ({len(tool_defs)} available, at most {config.AGENT_MAX_STEPS} turns)"})
+    user_videos = guard.user_video_ids(message, history)
+
+    def check_call(name: str, args: dict, seen_doc_ids: set[str]) -> str | None:
+        if not config.INJECTION_DEFENSE:
+            return None if name in guard.ALLOWED_TOOLS else f"unknown tool: {name}"
+        return guard.allowed_tool_call(name, args, user_video_ids=user_videos, seen_doc_ids=seen_doc_ids)
+
+    async def call_tool(name: str, args: dict) -> dict:
+        timeout = config.VIDEO_TOOL_TIMEOUT_S if name == "analyze_youtube_video" else config.TOOL_TIMEOUT_S
+        res = await tools.call(name, args, timeout=timeout, ui=_LOOP_UI[name](args))
+        if res is None:
+            return {"error": "tool failed or timed out"}
+        passages = res.get("passages") or res.get("result") or []  # get_document returns a bare list
+        await emit({"type": "tool_done", "stage": _LOOP_UI[name](args)["stage"], "title": "Passages Retrieved",
+                    "detail": f"{len(passages)} passages from {name}",
+                    "sources": list(dict.fromkeys(_short(p) for p in passages))[:4]})
+        return {"passages": passages}
+
+    messages = _anthropic_history(history) + [{"role": "user", "content": message}]
+    res = await run_tool_loop(messages, system=system_prompt("loop"), tool_defs=tool_defs, call_tool=call_tool,
+                              check_call=check_call, trace=trace, emit=emit, max_steps=config.AGENT_MAX_STEPS)
+    refused = sum(c["refused"] for c in res.tool_calls)
+    await emit({"type": "thought", "stage": "synthesizing", "title": "Answer complete",
+                "detail": f"{res.steps} model turns, {len(res.tool_calls)} tool calls"
+                          + (f", {refused} refused by the guard" if refused else "") + f" ({res.stop})"})
+    return res.text, res.sources, res.passages, None, "agent_loop"
+
+
 async def run_agent(message: str, history: list[dict], tier: str, trace: Trace, emit: Emit) -> AgentResult:
     agent = Agent(tier, trace, emit)
     cacheable = not history and not find_video_urls(message)
@@ -352,62 +488,24 @@ async def run_agent(message: str, history: list[dict], tier: str, trace: Trace, 
             return AgentResult(reply=hit["reply"], tier=tier, route=hit.get("route", "cached"), cached=True,
                                sources=hit.get("sources", []))
 
-    with trace.span("route", kind="step") as span:
-        plan = await agent.route(message, history)
-        span.set(route=plan["route"], queries=plan["search_queries"])
-    await emit({"type": "thought", "stage": "planning", "title": f"Plan: {plan['route'].replace('_', ' ')}",
-                "detail": plan["reason"], "query": plan["standalone_question"] if plan["standalone_question"] != message else None})
-
     async with Client(mcp) as client:
         tools = Tools(client, trace, emit)
-        passages = await agent.gather(tools, plan) if plan["route"] != "direct" else []
+        if tier == "premium" and config.AGENT_MODE == "loop":
+            try:
+                text, sources, passages, verification, route = await _run_loop(agent, client, tools, message, history)
+            except LLMUnavailable as e:
+                await emit({"type": "tool_error", "stage": "planning", "title": "Agent loop unavailable",
+                            "detail": f"{str(e)[:160]} (falling back to the fixed pipeline)"})
+                await emit({"type": "reply_delta", "delta": "", "reset": True})
+                text, sources, passages, verification, route = await _run_pipeline(agent, tools, message, history)
+        else:
+            text, sources, passages, verification, route = await _run_pipeline(agent, tools, message, history)
 
-        question = plan["standalone_question"] or message
-        await emit({"type": "thought", "stage": "synthesizing", "title": "Writing Answer",
-                    "detail": f"{'Claude Haiku 5.5' if tier == 'premium' else 'Gemini'} over {len(passages)} sources"})
-        verification = None
-        try:
-            if tier == "premium":
-                text, sources = await agent.generate_claude(message, history, passages)
-                if config.VERIFY_ANSWERS and passages and agent._budget_left(1):
-                    verification = await agent.verify(question, text, passages)
-                    await emit({"type": "tool_done" if verification["verdict"] == "grounded" else "thought",
-                                "stage": "verify", "title": f"Fact-check: {verification['verdict'].replace('_', ' ')}",
-                                "detail": "; ".join(verification["unsupported_claims"][:3]) or "All claims supported by the cited sources"})
-                    if verification["verdict"] != "grounded" and agent._budget_left(2):
-                        extra = [verification["follow_up_query"]] if verification["follow_up_query"] else None
-                        if extra:
-                            more = await agent.gather(tools, {**plan, "route": "knowledge_base"}, extra_queries=extra)
-                            passages = _merge_passages([passages, more], config.MAX_CONTEXT_CHUNKS + 3)
-                        await emit({"type": "reply_delta", "delta": "", "reset": True})
-                        text, sources = await agent.generate_claude(
-                            message, history, passages, correction="; ".join(verification["unsupported_claims"]))
-                        verification["retried"] = True
-            else:
-                text, sources = await agent.generate_gemini(message, history, passages)
-        except LLMUnavailable as e:
-            await emit({"type": "tool_error", "stage": "synthesizing", "title": "Model Unavailable",
-                        "detail": str(e)[:200]})
-            text = sources = None
-            if tier == "premium":  # paid tier: degrade to the free model before giving up
-                try:
-                    await emit({"type": "reply_delta", "delta": "", "reset": True})
-                    text, sources = await agent.generate_gemini(message, history, passages)
-                except LLMUnavailable:
-                    pass
-            if text is None:
-                if not passages:
-                    raise
-                text = ("**The language model is unavailable right now** (the free tier's daily quota may be used up), "
-                        "so here are the most relevant knowledge-base passages instead.\n\n" +
-                        "\n\n".join(f"**Passage {i}** ({_source_label(p)})\n\n> {p['text'][:600].strip()}…"
-                                   for i, p in enumerate(passages[:3], 1)))
-                sources = [{**p, "n": i} for i, p in enumerate(passages[:3], 1)]
-
+    text = finalize_text(text, passages, message)
     reply, merged = format_reply(text, sources)
     slim_sources = [{k: s.get(k) for k in ("n", "title", "section", "url", "source_type", "timestamp", "chunk_id", "doc_id")} for s in merged]
-    result = AgentResult(reply=reply, tier=tier, route=plan["route"], sources=slim_sources, verification=verification,
-                         context_ids=[p["chunk_id"] for p in passages])
-    if cacheable and plan["route"] != "direct" and sources and (verification is None or verification["verdict"] != "ungrounded"):
-        await asyncio.to_thread(cache.store, message, tier, {"reply": reply, "sources": slim_sources, "route": plan["route"]})
+    result = AgentResult(reply=reply, tier=tier, route=route, sources=slim_sources, verification=verification,
+                         context_ids=list(dict.fromkeys(p["chunk_id"] for p in passages)))
+    if cacheable and route != "direct" and sources and (verification is None or verification["verdict"] != "ungrounded"):
+        await asyncio.to_thread(cache.store, message, tier, {"reply": reply, "sources": slim_sources, "route": route})
     return result
