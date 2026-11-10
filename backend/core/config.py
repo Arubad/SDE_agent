@@ -52,6 +52,9 @@ TOP_K = int(_env("TOP_K", "5"))
 PREMIUM_PASSCODE = _env("PREMIUM_PASSCODE")
 PASSCODE_MAX_FAILURES = int(_env("PASSCODE_MAX_FAILURES", "5"))  # per IP, per 15 minutes
 
+# Prompt-injection defenses (tool-call guard, link sanitizer, untrusted-content rule)
+INJECTION_DEFENSE = _env("INJECTION_DEFENSE", "true").lower() == "true"
+
 # --- Agent limits ---------------------------------------------------------------
 MAX_LLM_CALLS = int(_env("MAX_LLM_CALLS", "6"))
 REQUEST_TIMEOUT_S = float(_env("REQUEST_TIMEOUT_S", "150"))
