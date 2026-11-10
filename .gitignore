@@ -1,0 +1,27 @@
+# Python
+backend/venv/
+venv/
+ENV/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Secrets & Environment variables
+backend/.env
+.env
+*.env
+
+# OS / Editor files
+.DS_Store
+.vscode/
+.idea/
+
+# Distribution / Packaging
+build/
+dist/
+*.egg-info/
+*.zip
+*.pdf

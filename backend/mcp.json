@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "SDE_Knowledge_Agent": {
+      "command": "python",
+      "args": [
+        "/absolute/path/to/your/sde-mastery-hub/backend/mcp_server.py"
+      ]
+    }
+  }
+}
