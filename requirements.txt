@@ -1,20 +1,21 @@
-fastmcp>=2.0.0
+# Runtime dependencies for the Hugging Face Space (see backend/requirements.txt for dev/ingest/eval)
+fastapi>=0.115.0
+uvicorn>=0.30.0
 python-dotenv>=1.0.1
-playwright>=1.41.0
-beautifulsoup4>=4.12.3
-youtube-transcript-api>=0.6.2
-pymupdf>=1.23.21
-llama-index>=0.10.0
-llama-index-embeddings-huggingface>=0.1.4
-llama-index-readers-github>=0.1.7
-llama-index-readers-youtube-transcript>=0.1.4
-llama-index-readers-web>=0.1.6
-llama-index-readers-file>=0.1.11
-fastapi>=0.109.0
-uvicorn>=0.27.0
-google-generativeai>=0.4.0
-google-genai>=1.0.0
-yt-dlp>=2024.0.0
-requests>=2.31.0
+pydantic>=2.7
 gradio>=5.0.0
 spaces
+
+# LLMs
+anthropic>=2.7.0          # Claude Haiku 5.5 on Microsoft Foundry (premium tier)
+google-genai>=3.0.0       # Gemini: public tier + native YouTube video understanding
+
+# Retrieval
+qdrant-client>=1.20.0     # vector DB (dense + sparse, server-side RRF fusion)
+fastembed>=0.9.0          # BM25 sparse vectors (Qdrant/bm25)
+sentence-transformers>=6.0.0  # BAAI/bge-small-en-v1.5 embeddings (+ optional cross-encoder reranker)
+llama-index-core>=0.14.0  # SentenceSplitter used when chunking newly ingested videos
+
+# Tools / MCP
+fastmcp>=3.4,<4         # HF installs gradio[mcp], which requires mcp<2; fastmcp 4 needs mcp>=2
+youtube-transcript-api>=1.2.0

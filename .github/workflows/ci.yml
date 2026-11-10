@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main, hf-deploy, rag-upgrade]
+  pull_request:
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install (CPU-only torch keeps the install small)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt pytest
+      - name: Unit tests (offline: no LLM, no Qdrant)
+        run: python -m pytest backend/tests -q
+
+  retrieval-quality-gate:
+    # Free: retrieval eval makes no LLM calls. Needs QDRANT_URL / QDRANT_API_KEY repo secrets.
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    env:
+      QDRANT_URL: ${{ secrets.QDRANT_URL }}
+      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Skip when secrets are unavailable (e.g. PRs from forks)
+        id: check
+        run: echo "enabled=${{ env.QDRANT_URL != '' }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.enabled == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        if: steps.check.outputs.enabled == 'true'
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+      - name: Retrieval eval on the held-out test split (fail if hit@5 < 0.85)
+        if: steps.check.outputs.enabled == 'true'
+        run: python -m backend.eval.retrieval_eval --split test --configs v2_hybrid v2_dense --min-hit5 0.85 --no-save

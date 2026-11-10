@@ -1,252 +1,204 @@
 ---
-title: SDE Mastery Hub - Autonomous Agentic RAG Tutor
+title: SDE Mastery Hub - Agentic RAG Tutor
 emoji: 🧠
 colorFrom: indigo
 colorTo: purple
 sdk: gradio
-sdk_version: 5.20.0
+sdk_version: 6.31.0
+python_version: "3.12"
 app_file: app.py
 pinned: false
 license: mit
 ---
 
-# 🚀 SDE Mastery Hub — Autonomous Agentic RAG & Engineering Tutor
+# SDE Mastery Hub: an agentic RAG tutor for software engineering
 
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![LlamaIndex](https://img.shields.io/badge/LlamaIndex-0.10+-black.svg)](https://www.llamaindex.ai/)
-[![Gemini](https://img.shields.io/badge/Gemini_3.5_Flash-Google_AI-4285F4.svg?logo=google&logoColor=white)](https://ai.google.dev/)
-[![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-yellow)](https://huggingface.co/spaces)
-[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg?logo=docker&logoColor=white)](https://www.docker.com/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+A software engineering tutor that answers from a curated knowledge base (*Software Engineering at
+Google*, the System Design Primer, MIT Missing Semester, Google eng-practices) and from any YouTube
+video you paste. It is built as an **MCP tool server + an explicit agent loop + a measured RAG
+pipeline**, and every design choice below is backed by an eval run you can reproduce.
 
-An end-to-end, agentic full-stack Software Engineering tutor and system design assistant. Powered by **Google Gemini 3.5 Flash**, **LlamaIndex RAG**, and local Hugging Face embeddings (`BAAI/bge-small-en-v1.5`), this agent grounds its reasoning in over **1,500+ curated engineering knowledge chunks**—including MIT Missing Semester lectures, System Design Primer, Google SRE books, and live spoken YouTube video transcripts.
+**Live demo:** https://huggingface.co/spaces/Arushh1050/sde-mastery-hub
 
-Featuring a modern dark-mode UI with **real-time Server-Sent Events (SSE) streaming**, an **interactive reasoning timeline**, and a **half-landscape / full-maximize responsive layout**.
+## Highlights
 
----
+- **Hybrid retrieval on Qdrant.** Dense BGE embeddings + BM25 sparse vectors, fused server-side
+  with reciprocal rank fusion. Compared with the shipped baseline it raises **MRR from 0.64 to 0.78**
+  and **hit@1 from 0.51 to 0.69**, with a significant paired-bootstrap result ([results](#retrieval-results)).
+- **Eval-driven decisions.** An 88-question eval set with verbatim evidence quotes (scoring doesn't
+  depend on chunk boundaries) and a dev/test split. The cross-encoder reranker was *dropped*
+  because it added +0.03 MRR (not significant) at 7× the latency.
+- **MCP is the single tool layer.** The web agent calls its tools through an in-memory MCP
+  client. The same server is exposed over Streamable HTTP (`/mcp`, bearer-auth) and stdio for
+  Claude Desktop or Cursor, with tools, resources and prompts.
+- **An explicit orchestration loop.** Router (structured output) → parallel tool calls with
+  timeouts → generation with **API-native citations** → a verifier that triggers one corrective
+  retrieval. LLM-call budget, request timeout and a graceful fallback chain are built in.
+- **Live YouTube ingestion.** A pasted video is loaded (stored copy → captions → Gemini video
+  understanding), chunked with `[MM:SS]` section timestamps, and embedded into Qdrant, so
+  follow-up questions retrieve it through normal RAG and it survives restarts.
+- **Two access tiers.** Visitors use the free Gemini pipeline. A passcode unlocks Claude Haiku 5.5
+  (Microsoft Foundry) and the MCP endpoint, with constant-time comparison and per-IP lockout.
+- **Observability.** Every request produces a trace (spans, latency, tokens, LLM-call count). It
+  is streamed to the UI and logged as one JSON line. A semantic answer cache in Qdrant answers
+  near-duplicate questions with zero LLM calls.
 
-## 🌟 Key Highlights & Architectural Potential
-
-```
-                        +---------------------------------------------+
-                        |        Client Frontend (Web Browser)         |
-                        |   - Glassmorphic Responsive Dashboard       |
-                        |   - Half-Landscape & Full 94vw Maximize     |
-                        |   - Live SSE Animated Execution Timeline    |
-                        +----------------------+----------------------+
-                                               |
-                                     (SSE /chat POST Stream)
-                                               v
-+-----------------------------------------------------------------------------------------+
-|                               FastAPI Backend Agent Router                              |
-|   - Dynamic Port Binding ($PORT / 7860 / 8001)                                          |
-|   - Custom Private Network Access (PNA) & Wildcard CORS Middleware                      |
-|   - Thread-Safe ContextVars Event Streaming (thought -> tool_start -> tool_done -> reply)|
-+-----------------------------+-----------------------------+-----------------------------+
-                              |                             |
-                              v                             v
-           +-----------------------------------+   +-----------------------------------+
-           |    LlamaIndex RAG Knowledge Base  |   |   Dynamic YouTube & Web Tools     |
-           | - 1,591 Embedded Vector Chunks    |   | - Live YouTubeTranscriptApi Fetch |
-           | - BAAI/bge-small-en-v1.5 (CPU)    |   | - yt-dlp Video Caption Fallback   |
-           | - MIT Missing Semester Notes & Vids|  | - Disk Transcript Cache System    |
-           | - Donne Martin System Design Primer|  +-----------------------------------+
-           | - Google SRE & Testing Trophy     |
-           +-----------------------------------+
-                              \                             /
-                               \                           /
-                                v                         v
-                        +-----------------------------------------+
-                        |         Gemini 3.5 Flash Model          |
-                        |   - Google SRE & Toil Elimination Focus |
-                        |   - Algorithmic Rigor in C++            |
-                        |   - Function Calling Tool Execution     |
-                        +-----------------------------------------+
-```
-
-### 1. 📚 Multi-Source Curated Engineering Knowledge Base (1,500+ Chunks)
-Unlike generic chatbots prone to hallucination, SDE Mastery Hub retrieves strict context from:
-* **MIT's The Missing Semester of Your CS Education**: Written lecture notes, code samples, exercises, and full spoken lecture transcripts across Shell, Data Wrangling (`sed`/`awk`), Git, Security, and Debugging.
-* **The System Design Primer (Donne Martin)**: High-level architectural patterns, load balancing, caching strategies, replication, and sharding.
-* **Awesome System Design Resources**: Curated architectural case studies and conference lectures.
-* **Google Site Reliability Engineering (SRE) Book**: Error budgets, SLOs/SLIs, toil elimination, and distributed incident management.
-* **Google Engineering Practices**: Senior code review standards and engineering hygiene.
-* **Testing Trophy Methodology**: Integration-first testing strategies and end-to-end verification.
-
-### 2. 🎥 Autonomous YouTube Embed Detection & Transcript Extraction Pipeline
-* **Automated Scraper Detection**: When scraping web pages or GitHub documentation, the ingestion engine detects embedded YouTube videos and players via regex (`youtube.com/watch?v=`, `youtu.be/`, `/embed/`, and YAML `id: ...`).
-* **Spoken Transcript Indexing**: Discovered videos are automatically passed to the YouTube transcript pipeline, extracting the instructor's spoken dialogue into structured vector documents.
-* **Local Disk Caching (`backend/data/transcripts_cache/`)**: Fetched transcripts are cached locally on disk to protect against YouTube cloud IP rate limits and eliminate unnecessary network round-trips.
-
-### 3. ⏱️ Live Animated Agent Reasoning Timeline (Server-Sent Events)
-* **Real-Time Step Visualization**: Shows the agent's step-by-step thinking before the answer renders:
-  * 🧠 *Planning / Analyzing Query*
-  * 🔍 *Searching Vector Database* (displays exact query parameters)
-  * ✅ *Knowledge Context Retrieved* (displays interactive badge pills for retrieved sources)
-  * 🎬 *Fetching Live YouTube Transcript* (when dynamic video analysis is triggered)
-  * ⚡ *Synthesizing Architecture Solution*
-* **Live Timer & Collapsible Disclosure**: A real-time timer runs while the agent executes tasks. Once complete, the entire trace is preserved inside a collapsible disclosure card.
-
-### 4. 💻 Dynamic Live Video Analysis Tool
-* Users can provide any YouTube link in chat (e.g. `Can you explain the key takeaways from https://www.youtube.com/watch?v=sz_dsktIjt4 ?`).
-* The agent automatically triggers `get_live_youtube_transcript`, extracts the full captions in real time, and synthesizes an executive technical summary with timestamps and code snippets.
-
-### 5. 🛡️ Production Engineering Standards Built In
-* **Algorithmic Rigor**: All algorithmic queries require optimal, production-grade **C++** implementations with Big-O time and space complexity annotations.
-* **SRE Principles**: Emphasizes toil elimination, graceful degradation, circuit breakers, and telemetry.
-* **Testing Strategies**: Grounded in the Testing Trophy (integration testing focus) and Playwright E2E UI testing patterns.
-
----
-
-## 🗂️ Project Directory Structure
+## Architecture
 
 ```
-SDE_mastery_hub/
-├── .dockerignore                  # Docker build exclusions (keeps image small)
-├── .gitignore                     # Git exclusions (protects .env and venv)
-├── Dockerfile                     # Production container spec for Hugging Face Spaces
-├── README.md                      # Comprehensive project guide & HF metadata
-├── backend/
-│   ├── .env                       # Environment variables (GEMINI_API_KEY, GITHUB_TOKEN)
-│   ├── ingest.py                  # Knowledge ingestion, web crawler & YouTube extractor
-│   ├── mcp_server.py              # FastMCP Agent Server for Claude Desktop / Cursor
-│   ├── requirements.txt           # Python dependency specifications
-│   ├── server.py                  # FastAPI server with SSE streaming & CORS middleware
-│   ├── data/
-│   │   ├── swe_at_google.pdf      # Local Software Engineering PDFs
-│   │   └── transcripts_cache/     # Cached YouTube lecture transcripts
-│   └── storage/                   # Pre-indexed LlamaIndex vector store (1,591 nodes, 22MB)
-└── frontend/
-    └── index.html                 # Single-page responsive dashboard & resizable chat UI
+Browser (SSE: steps, streamed tokens, citations, trace)
+   │  X-Access-Code (optional)
+   ▼
+FastAPI /chat ──► Orchestrator ───────────────────────────────────────────────┐
+   │              1. semantic cache (Qdrant)        public: 1 Gemini call     │
+   │              2. router  (Haiku structured output | rules on public tier) │
+   │              3. tools in parallel  ──► in-memory MCP client              │
+   │              4. generator (Haiku + search_result citations | Gemini)     │
+   │              5. verifier → ≤1 corrective retrieval + regeneration        │
+   │                                                                          │
+   ├── /mcp  (Streamable HTTP, Bearer passcode) ─┐                            │
+   ▼                                              ▼                           │
+                     MCP server (FastMCP): search_knowledge_base, analyze_youtube_video,
+                     get_document · resources kb://stats, kb://sources, kb://eval/retrieval
+                     · prompts system_design_interview, explain_concept, code_review
+                                   │
+                    Qdrant Cloud: dense (bge-small, 384d) + sparse BM25 (IDF), RRF fusion
+                    collections: sde_kb_v2 (live), sde_kb_v1 (baseline), sde_answer_cache
 ```
 
----
+| Component | Choice |
+|---|---|
+| Embeddings | `BAAI/bge-small-en-v1.5` with its query instruction, CPU |
+| Sparse | `Qdrant/bm25` via fastembed, with IDF computed by Qdrant over the live collection |
+| Vector DB | Qdrant Cloud (embedded on-disk mode when `QDRANT_URL` is unset) |
+| Premium LLM | Claude Haiku 5.5 on Microsoft Foundry (router, generator, verifier, eval judge) |
+| Public LLM | Gemini (generator, YouTube video understanding) |
+| Agent tools | FastMCP 4, in-memory transport for the app, HTTP/stdio for external clients |
 
-## 🚀 Quickstart: Running Locally
+## Knowledge base and chunking
 
-### Prerequisites
-* **Python 3.10+** (Python 3.12 recommended)
-* A free **Google Gemini API Key** from [Google AI Studio](https://aistudio.google.com/)
-* A personal **GitHub Token** (optional, only needed if you wish to run `ingest.py` from scratch)
+The original index was 1,267 LlamaIndex chunks in JSON files, loaded into memory. Auditing it
+turned up problems that the v2 pipeline ([backend/rag/documents.py](backend/rag/documents.py)) fixes:
 
-### 1. Clone & Set Up Virtual Environment
+- **Translations.** Japanese and Chinese copies of the System Design Primer README made up ~15% of
+  all chunks. They are dropped.
+- **Duplicates.** Missing Semester web pages repeated the GitHub markdown. They are removed with
+  5-shingle Jaccard near-duplicate detection.
+- **Oversized chunks.** The median chunk was ~2.7k characters, beyond what the 512-token embedding
+  and reranker models read. v2 splits along markdown sections into ~320-token chunks and embeds
+  each one with a contextual header (`doc title > section path`).
+
+Documents are rebuilt from the legacy chunks by their character offsets: 2 of 1,267 failed to
+round-trip. v2 has 2,769 chunks across 668 documents, plus any YouTube videos users add.
+
+## Evaluation
+
+### Dataset
+[backend/eval/generate_questions.py](backend/eval/generate_questions.py) samples passages from the
+book, GitHub and web sources. Claude Haiku writes a natural question for each passage, a reference
+answer, and a **verbatim evidence quote**, which is checked programmatically against the passage.
+A retrieval hit means a returned chunk contains that quote (fuzzy-matched for PDF hyphenation), so
+different chunkings can be compared fairly. There are 88 questions, split 55 dev / 33 test.
+
+### Retrieval results
+`python -m backend.eval.retrieval_eval` (no LLM calls, so it's free):
+
+| config (all 88 questions) | hit@1 | hit@5 | MRR@10 | doc hit@5 | p50 latency |
+|---|---|---|---|---|---|
+| legacy LlamaIndex (shipped baseline) | 0.51 | 0.78 | 0.64 | 0.81 | 17 ms* |
+| v1 chunks, hybrid | 0.64 | 0.88 | 0.73 | 0.88 | 174 ms |
+| v2 chunks, dense only | 0.64 | 0.88 | 0.74 | 0.90 | 173 ms |
+| **v2 chunks, hybrid (production)** | **0.69** | **0.90** | **0.78** | **0.93** | 172 ms |
+| v2 hybrid + bge-reranker-base | 0.70 | 0.91 | 0.80 | 0.94 | 1203 ms |
+
+\*In-memory, with no network hop. Qdrant latencies include the round trip to Qdrant Cloud.
+
+Paired bootstrap (10k resamples), B − A with 95% CI:
+
+| A → B | MRR | hit@1 | hit@5 |
+|---|---|---|---|
+| legacy → v2 hybrid | **+0.142** [+0.053, +0.232] | **+0.182** [+0.068, +0.307] | **+0.114** [+0.023, +0.216] |
+| v2 hybrid → + reranker | +0.027 [−0.034, +0.087] | +0.011 [−0.091, +0.114] | +0.011 [−0.034, +0.068] |
+
+Findings:
+- The full upgrade is significant on every metric.
+- No single component is significant on its own (v1→v2 chunking, dense→hybrid). The gain comes
+  from stacking them.
+- The reranker won on dev (MRR 0.82 vs 0.74) but lost on the held-out test split (0.79 vs 0.85).
+  It isn't significant overall and costs 7× the latency, so production uses hybrid only
+  (`RETRIEVAL_MODE=hybrid_rerank` turns it back on).
+- On the old long chunks the reranker even *hurt* (v1 hybrid → +rerank on dev: hit@1 0.62 → 0.56),
+  because the cross-encoder truncates at 512 tokens.
+
+### Answer quality and the verifier ablation
+`python -m backend.eval.answer_eval` runs the real agent end to end, and Claude Haiku judges
+correctness against the reference answer and faithfulness to the retrieved sources.
+Test split, n=33:
+
+| variant | correctness | faithfulness | gold source cited | LLM calls | tokens in/out | p50 latency |
+|---|---|---|---|---|---|---|
+| premium (with verifier) | 0.86 | **0.89** | **0.88** | 3.6 | 13.0k / 2.8k | 19.0 s |
+| premium, no verifier | 0.89 | 0.79 | 0.79 | 2.0 | 5.6k / 1.2k | 7.7 s |
+
+With the verifier, faithfulness goes up **+0.11** (95% CI [0.00, +0.21]) and correctness changes
+−0.03 ([−0.08, 0.00]), at 2.5× the latency. The verifier is strict: it asks for a corrective
+pass on 61% of answers. It stays on for the premium tier (`VERIFY_ANSWERS=false` turns it off).
+*Caveat:* the judge is from the same model family as the generator, so compare scores between
+variants rather than treating them as absolute.
+
+## Using the MCP server from Claude Desktop or Cursor
+
+Remote, over Streamable HTTP (needs the passcode):
+```json
+{ "mcpServers": { "sde-knowledge": {
+    "url": "https://arushh1050-sde-mastery-hub.hf.space/mcp/",
+    "headers": { "Authorization": "Bearer <passcode>" } } } }
+```
+Local, over stdio: `python -m backend.mcp_server` (see [backend/mcp.json](backend/mcp.json)).
+
+## Running locally
 
 ```bash
-git clone https://github.com/<your-username>/SDE_mastery_hub.git
-cd SDE_mastery_hub
-
-# Create and activate virtual environment
-python3 -m venv backend/venv
-source backend/venv/bin/activate  # On Windows: backend\venv\Scripts\activate
-
-# Install dependencies with CPU-only PyTorch (fast and lightweight)
+python -m venv backend/venv && source backend/venv/bin/activate
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -r backend/requirements.txt
+cp backend/.env.example backend/.env           # fill in keys (see below)
+python -m backend.rag.build_index               # builds sde_kb_v1 + sde_kb_v2 in Qdrant
+uvicorn backend.server:app --port 8001          # UI at http://localhost:8001
+python -m pytest backend/tests -q               # offline unit tests
 ```
 
-### 2. Configure Environment Variables
+| Variable | Purpose |
+|---|---|
+| `QDRANT_URL`, `QDRANT_API_KEY` | Qdrant Cloud. Leave both unset for embedded local mode |
+| `GEMINI_API_KEY` | Public tier and YouTube video understanding |
+| `TESTFORGE_FOUNDRY_ENDPOINT`, `TESTFORGE_FOUNDRY_API_KEY`, `FOUNDRY_HAIKU_DEPLOYMENT` | Claude Haiku 5.5 on Foundry |
+| `PREMIUM_PASSCODE` | Unlocks the Claude tier and `/mcp`. Unset disables both |
+| `RETRIEVAL_MODE`, `VERIFY_ANSWERS`, `SEMANTIC_CACHE`, `MAX_LLM_CALLS`, ... | Tunables in [backend/core/config.py](backend/core/config.py) |
 
-Create a `backend/.env` file:
+CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the unit tests on every push. When
+the Qdrant secrets are present, it also runs the retrieval eval on the test split and fails the
+build if hit@5 drops below 0.85.
 
-```env
-GEMINI_API_KEY=your_gemini_api_key_here
-GITHUB_TOKEN=your_github_token_here       # Optional: only for re-running ingest.py
+## Deployment
+The app runs as a Gradio-SDK Space: [app.py](app.py) mounts a small Gradio page inside the FastAPI
+app. The Space runs on ZeroGPU hardware (free accounts can no longer run Gradio Spaces on
+`cpu-basic`), so `app.py` registers a `@spaces.GPU` function and runs ZeroGPU's startup hook
+itself. Everything actually runs on CPU. Deploy with `python deploy_to_hf.py`.
+
+## Project layout
+```
+app.py                     HF entrypoint (FastAPI + Gradio mount + ZeroGPU shim)
+backend/server.py          /chat (SSE), /auth, /health, /api/stats, /mcp mount
+backend/mcp_server.py      MCP tools, resources, prompts
+backend/agent/             orchestrator, access tiers, semantic cache
+backend/rag/               documents & chunking, Qdrant store & retrieval, index builder
+backend/tools/youtube.py   video loading + live ingestion
+backend/core/              config, LLM clients (Foundry / Gemini), tracing
+backend/eval/              question generation, retrieval eval, answer eval, results/
+backend/tests/             offline unit tests
+backend/ingest.py          original scraping pipeline (GitHub, web, PDF) that built the legacy index
 ```
 
-> **Note on Gemini API Keys:** When creating your key on Google AI Studio, select **"Create API key in new project"** to ensure it is assigned to the Free Tier (15 RPM, 1500 RPD).
-
-### 3. Start the Server
-
-```bash
-# Run the FastAPI server (serves both API and Frontend)
-python backend/server.py
-```
-
-Open your browser and navigate to:
-👉 **[http://localhost:8001](http://localhost:8001)**
-
-*(Alternatively, you can run a local HTTP server in `frontend/` on port 3000: `python3 -m http.server 3000 --directory frontend` and browse to [http://localhost:3000](http://localhost:3000).)*
-
----
-
-## 🔄 (Optional) Rebuilding the Vector Knowledge Base
-
-The repository includes a pre-indexed vector store in `backend/storage/` (1,591 chunks, 22MB), so you can run the application immediately without re-ingesting!
-
-If you wish to add new repositories, documentation sites, or lecture series:
-
-1. Edit the sources list in `backend/ingest.py`.
-2. Run the ingestion pipeline:
-   ```bash
-   python backend/ingest.py
-   ```
-3. The crawler will scrape all pages, detect any embedded YouTube links, fetch their transcripts, compute local embeddings, and persist the updated index to `backend/storage/`.
-
----
-
-## ☁️ Deployment: 100% Free on Hugging Face Spaces
-
-This project is configured out of the box for **Hugging Face Spaces** using their free **2-vCPU / 16GB RAM Gradio SDK** tier (100% free, no credit card required).
-
-### Step 1: Create a New Space
-1. Log in to [Hugging Face](https://huggingface.co).
-2. Click your profile avatar $\rightarrow$ **New Space**.
-3. Fill in:
-   * **Space name**: `sde-mastery-hub`
-   * **License**: `mit`
-   * **Space SDK**: Select **Gradio**
-   * **Space hardware**: Select **Free (2 vCPU · 16GB RAM)**
-   * **Visibility**: Public (or Private)
-4. Click **Create Space**.
-
-### Step 2: Configure Secret (`GEMINI_API_KEY`)
-1. In your newly created Space, navigate to **Settings** $\rightarrow$ **Variables and secrets**.
-2. Under **Secrets**, click **New secret**:
-   * **Name**: `GEMINI_API_KEY`
-   * **Value**: *Paste your Google Gemini API key*
-3. Click **Save**.
-
-### Step 3: Push the Repository to Hugging Face
-In your local repository:
-
-```bash
-# Initialize git if not already initialized
-git init
-git add .
-git commit -m "Deploy SDE Mastery Hub to Hugging Face Spaces"
-
-# Add Hugging Face Space as a remote and push
-git remote add space https://huggingface.co/spaces/<your-hf-username>/<your-space-name>
-git push --force space main
-```
-
-*(Alternatively, you can connect your Space to your GitHub repository under Space Settings for automatic CI/CD deployment on every `git push`!)*
-
-### Step 4: Access Your Live App
-Hugging Face will automatically build the `Dockerfile`, download CPU-only PyTorch, load the pre-built vector database, and start Uvicorn on port `7860`. Within 2-3 minutes, your interactive AI tutor is live on the internet!
-
----
-
-## 🛠️ FastMCP Agent Setup (Claude Desktop & Cursor)
-
-This project also includes a standalone FastMCP server in [`backend/mcp_server.py`](file:///Users/arushlalitkumarbadhe/Desktop/SDE_mastery_hub/backend/mcp_server.py) to give your IDE or Claude Desktop direct access to your local knowledge base.
-
-Add this snippet to your `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "sde-knowledge-agent": {
-      "command": "/path/to/SDE_mastery_hub/backend/venv/bin/python",
-      "args": ["/path/to/SDE_mastery_hub/backend/mcp_server.py"]
-    }
-  }
-}
-```
-
----
-
-## 🛡️ License
-
-This project is licensed under the [MIT License](LICENSE).
-Feel free to fork, customize, and build upon this project for study groups, interview preparation, and production engineering practices.
+## License
+MIT
