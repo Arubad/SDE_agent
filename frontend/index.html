@@ -7,7 +7,8 @@
     <!-- Tailwind CSS with Typography Plugin for Markdown rendering -->
     <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
     <!-- Marked.js for parsing Markdown -->
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
     <script>
         tailwind.config = {
@@ -147,17 +148,20 @@
                 <div>
                     <div class="flex items-center gap-2">
                         <h3 class="font-bold text-slate-100 text-base leading-tight">AI SDE Tutor</h3>
-                        <span class="text-[10px] font-mono text-indigo-300 bg-indigo-500/15 border border-indigo-500/30 px-2 py-0.5 rounded-full">gemini-3.5-flash</span>
+                        <span id="model-badge" class="text-[10px] font-mono text-indigo-300 bg-indigo-500/15 border border-indigo-500/30 px-2 py-0.5 rounded-full">Free · Gemini</span>
                     </div>
                     <div class="flex items-center gap-1.5 mt-0.5">
                         <span class="w-2 h-2 rounded-full bg-emerald-400 inline-block animate-pulse"></span>
-                        <p class="text-xs text-slate-400">Agentic RAG Knowledge Base Connected</p>
+                        <p id="kb-status" class="text-xs text-slate-400">Hybrid RAG · Qdrant · MCP tools</p>
                     </div>
                 </div>
             </div>
 
             <!-- Controls (Clear, Maximize/Restore, Close) -->
             <div class="flex items-center gap-1">
+                <button id="unlock-toggle" title="Unlock the Claude Haiku tier with a passcode" class="text-slate-400 hover:text-amber-300 transition-colors p-2 rounded-xl hover:bg-slate-700/50">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
+                </button>
                 <button id="clear-chat" title="Clear conversation history" class="text-slate-400 hover:text-slate-200 transition-colors p-2 rounded-xl hover:bg-slate-700/50">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
                 </button>
@@ -168,6 +172,17 @@
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
             </div>
+        </div>
+
+        <!-- Passcode panel (hidden until the lock button is pressed) -->
+        <div id="unlock-panel" class="hidden px-6 py-3 bg-slate-900/90 border-b border-slate-700/80 shrink-0">
+            <form id="unlock-form" class="flex flex-wrap items-center gap-2">
+                <label for="passcode-input" class="text-xs text-slate-400">Claude Haiku tier passcode</label>
+                <input id="passcode-input" type="password" autocomplete="current-password" class="flex-1 min-w-[140px] bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-sm text-slate-200 outline-none focus:border-amber-400/60">
+                <button type="submit" class="bg-amber-500/90 hover:bg-amber-400 text-slate-950 text-xs font-semibold px-3 py-1.5 rounded-lg">Unlock</button>
+                <button type="button" id="lock-btn" class="hidden text-xs text-slate-400 hover:text-slate-200 px-2 py-1.5">Use free tier</button>
+            </form>
+            <p id="unlock-msg" class="text-[11px] text-slate-500 mt-1.5">Visitors use the free Gemini tier. The passcode unlocks the Claude pipeline (router, citations, fact-check).</p>
         </div>
 
         <!-- Chat History Container -->
@@ -259,29 +274,83 @@
             }
         });
 
+        // ---------- helpers ----------
+        const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        function renderMarkdown(md) {
+            let html;
+            try { html = (window.marked && marked.parse) ? marked.parse(md) : esc(md).replace(/\n/g, '<br>'); }
+            catch (e) { html = esc(md).replace(/\n/g, '<br>'); }
+            // LLM output and retrieved passages are untrusted: never let them run as HTML
+            return window.DOMPurify ? DOMPurify.sanitize(html, {ADD_ATTR: ['target']}) : esc(md);
+        }
+        const storage = {
+            get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+            set(k, v) { try { v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {} },
+        };
+        const apiBase = (window.location.protocol === 'file:' || window.location.port === '3000') ? 'http://127.0.0.1:8001' : '';
+
+        // ---------- access tier ----------
+        const badge = document.getElementById('model-badge');
+        const unlockPanel = document.getElementById('unlock-panel');
+        const unlockMsg = document.getElementById('unlock-msg');
+        const lockBtn = document.getElementById('lock-btn');
+        let accessCode = storage.get('sde_access_code');
+
+        function setTier(tier) {
+            const premium = tier === 'premium';
+            badge.textContent = premium ? 'Claude Haiku 5.5' : 'Free · Gemini';
+            badge.className = premium
+                ? 'text-[10px] font-mono text-amber-200 bg-amber-500/15 border border-amber-400/40 px-2 py-0.5 rounded-full'
+                : 'text-[10px] font-mono text-indigo-300 bg-indigo-500/15 border border-indigo-500/30 px-2 py-0.5 rounded-full';
+            lockBtn.classList.toggle('hidden', !premium);
+        }
+        setTier(accessCode ? 'premium' : 'public');
+
+        document.getElementById('unlock-toggle').addEventListener('click', () => unlockPanel.classList.toggle('hidden'));
+        lockBtn.addEventListener('click', () => {
+            accessCode = null; storage.set('sde_access_code', null); setTier('public');
+            unlockMsg.textContent = 'Switched to the free Gemini tier.';
+        });
+        document.getElementById('unlock-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const code = document.getElementById('passcode-input').value.trim();
+            if (!code) return;
+            try {
+                const r = await fetch(apiBase + '/auth', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({passcode: code})});
+                const j = await r.json();
+                if (r.ok && j.premium) {
+                    accessCode = code; storage.set('sde_access_code', code); setTier('premium');
+                    unlockMsg.textContent = 'Unlocked: answers now use Claude Haiku 5.5 with native citations and a fact-check pass.';
+                    document.getElementById('passcode-input').value = '';
+                    setTimeout(() => unlockPanel.classList.add('hidden'), 1200);
+                } else {
+                    unlockMsg.textContent = j.detail || 'Wrong passcode.';
+                }
+            } catch (err) { unlockMsg.textContent = 'Could not reach the server.'; }
+        });
+
+        // ---------- chat rendering ----------
         function appendUserMessage(text) {
             const div = document.createElement('div');
             div.className = "flex justify-end gap-3 pl-8 animate-fade-in";
-            div.innerHTML = `
-                <div class="bg-indigo-600 text-white px-5 py-3.5 rounded-2xl rounded-tr-sm text-sm shadow-md leading-relaxed max-w-[85%]">
-                    ${text.replace(/\n/g, '<br>')}
-                </div>
-            `;
+            div.innerHTML = `<div class="bg-indigo-600 text-white px-5 py-3.5 rounded-2xl rounded-tr-sm text-sm shadow-md leading-relaxed max-w-[85%] whitespace-pre-wrap">${esc(text)}</div>`;
             chatHistory.appendChild(div);
             chatHistory.scrollTop = chatHistory.scrollHeight;
         }
 
-        // Live Thinking Animation Element Controller
+        const STAGES = {
+            planning: ['🧭', 'text-sky-400'], rag: ['📚', 'text-emerald-400'], youtube: ['🎥', 'text-rose-400'],
+            synthesizing: ['✍️', 'text-amber-400'], verify: ['🔎', 'text-violet-400'], cache: ['⚡', 'text-cyan-400'],
+        };
+
         function createThinkingCard() {
             const container = document.createElement('div');
-            container.className = "flex gap-3.5 pr-8 animate-fade-in";
-            
+            container.className = "flex gap-3.5 animate-fade-in";
             container.innerHTML = `
                 <div class="w-9 h-9 rounded-xl bg-indigo-500/20 border border-indigo-500/30 flex-shrink-0 flex items-center justify-center mt-0.5 pulse-glow">
                     <svg class="w-5 h-5 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
                 </div>
-                <div class="w-full max-w-[85%]">
-                    <!-- Active Thinking Box -->
+                <div class="w-full max-w-[85%] min-w-0">
                     <div class="active-agent-box bg-slate-900/90 border border-indigo-500/30 rounded-2xl p-4 shadow-xl backdrop-blur-md space-y-3">
                         <div class="flex items-center justify-between border-b border-slate-800 pb-2.5">
                             <div class="flex items-center gap-2.5">
@@ -289,17 +358,14 @@
                                     <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
                                     <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-indigo-500"></span>
                                 </span>
-                                <span class="text-xs font-semibold text-indigo-300 tracking-wider uppercase">Agent Reasoning & Background Tasks</span>
+                                <span class="text-xs font-semibold text-indigo-300 tracking-wider uppercase">Agent steps</span>
                             </div>
                             <span class="live-timer text-[11px] font-mono text-indigo-400 bg-indigo-950/70 border border-indigo-500/30 px-2.5 py-0.5 rounded-full">0.0s</span>
                         </div>
                         <div class="live-steps-container space-y-2 text-xs"></div>
                     </div>
-
-                    <!-- Final AI Response Box (Hidden initially) -->
-                    <div class="final-reply-box hidden mt-3 bg-slate-900 border border-slate-800 p-5 rounded-2xl rounded-tl-sm text-sm text-slate-300 shadow-lg leading-relaxed prose prose-invert prose-indigo max-w-none w-full overflow-x-hidden"></div>
-                </div>
-            `;
+                    <div class="final-reply-box hidden mt-3 bg-slate-900 border border-slate-800 p-5 rounded-2xl rounded-tl-sm text-sm text-slate-300 shadow-lg leading-relaxed prose prose-invert prose-indigo max-w-none w-full overflow-x-auto"></div>
+                </div>`;
             chatHistory.appendChild(container);
             chatHistory.scrollTop = chatHistory.scrollHeight;
 
@@ -307,199 +373,136 @@
             const stepsEl = container.querySelector('.live-steps-container');
             const agentBox = container.querySelector('.active-agent-box');
             const replyBox = container.querySelector('.final-reply-box');
-
             const startTime = Date.now();
-            const timerInterval = setInterval(() => {
-                const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-                timerEl.textContent = elapsed + 's';
-            }, 100);
+            const timer = setInterval(() => { timerEl.textContent = ((Date.now() - startTime) / 1000).toFixed(1) + 's'; }, 100);
+            let steps = 0, streamed = '', trace = null;
 
-            const recordedSteps = [];
-
-            function addOrUpdateStep(event) {
-                recordedSteps.push(event);
-
-                let icon = '⚡';
-                let iconColor = 'text-indigo-400';
-                if (event.stage === 'rag') { icon = '📚'; iconColor = 'text-emerald-400'; }
-                if (event.stage === 'youtube') { icon = '🎥'; iconColor = 'text-rose-400'; }
-                if (event.stage === 'synthesizing') { icon = '✍️'; iconColor = 'text-amber-400'; }
-
-                const stepDiv = document.createElement('div');
-                stepDiv.className = "flex items-start gap-2.5 p-2 rounded-xl bg-slate-800/50 border border-slate-700/50 animate-fade-in";
-
-                let indicatorHTML = `<div class="w-3.5 h-3.5 rounded-full border-2 border-indigo-400 border-t-transparent animate-spin shrink-0 mt-0.5"></div>`;
-                if (event.type === 'tool_done') {
-                    indicatorHTML = `<div class="w-3.5 h-3.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 flex items-center justify-center shrink-0 mt-0.5 text-[9px] font-bold">✓</div>`;
-                }
-
-                let sourcesTags = '';
-                if (event.sources && event.sources.length > 0) {
-                    sourcesTags = `
-                        <div class="flex flex-wrap gap-1 mt-1.5">
-                            ${event.sources.map(s => `<span class="px-2 py-0.5 rounded-md bg-slate-900 border border-slate-700/80 text-[10px] font-mono text-emerald-300 font-medium">📄 ${s}</span>`).join('')}
-                        </div>
-                    `;
-                }
-
-                let queryBadge = '';
-                if (event.query) {
-                    queryBadge = `<div class="text-[11px] font-mono text-indigo-300 bg-slate-900/80 px-2 py-0.5 rounded border border-slate-700/60 mt-1 inline-block truncate max-w-full">🔍 ${event.query}</div>`;
-                }
-
-                stepDiv.innerHTML = `
-                    ${indicatorHTML}
+            function addStep(event) {
+                steps++;
+                const [icon, color] = STAGES[event.stage] || ['⚙️', 'text-indigo-400'];
+                let indicator = `<div class="w-3.5 h-3.5 rounded-full border-2 border-indigo-400 border-t-transparent animate-spin shrink-0 mt-0.5"></div>`;
+                if (event.type === 'tool_done') indicator = `<div class="w-3.5 h-3.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 flex items-center justify-center shrink-0 mt-0.5 text-[9px] font-bold">✓</div>`;
+                if (event.type === 'tool_error') indicator = `<div class="w-3.5 h-3.5 rounded-full bg-rose-500/20 text-rose-400 border border-rose-500/40 flex items-center justify-center shrink-0 mt-0.5 text-[9px] font-bold">!</div>`;
+                if (event.type === 'thought') indicator = `<div class="w-3.5 h-3.5 rounded-full bg-sky-500/20 border border-sky-500/40 shrink-0 mt-0.5"></div>`;
+                const sources = (event.sources || []).map(x => `<span class="px-2 py-0.5 rounded-md bg-slate-900 border border-slate-700/80 text-[10px] font-mono text-emerald-300">📄 ${esc(x)}</span>`).join('');
+                const div = document.createElement('div');
+                div.className = "flex items-start gap-2.5 p-2 rounded-xl bg-slate-800/50 border border-slate-700/50 animate-fade-in";
+                div.innerHTML = `${indicator}
                     <div class="flex-1 overflow-hidden">
-                        <div class="flex items-center gap-1.5 font-medium text-slate-200">
-                            <span>${icon}</span>
-                            <span>${event.title || 'Task Execution'}</span>
-                        </div>
-                        <div class="text-slate-400 text-[11px] mt-0.5">${event.detail || ''}</div>
-                        ${queryBadge}
-                        ${sourcesTags}
-                    </div>
-                `;
-
-                stepsEl.appendChild(stepDiv);
+                        <div class="flex items-center gap-1.5 font-medium text-slate-200"><span class="${color}">${icon}</span><span>${esc(event.title || 'Step')}</span></div>
+                        ${event.detail ? `<div class="text-slate-400 text-[11px] mt-0.5 break-words">${esc(event.detail)}</div>` : ''}
+                        ${event.query ? `<div class="text-[11px] font-mono text-indigo-300 bg-slate-900/80 px-2 py-0.5 rounded border border-slate-700/60 mt-1 inline-block truncate max-w-full">🔍 ${esc(event.query)}</div>` : ''}
+                        ${sources ? `<div class="flex flex-wrap gap-1 mt-1.5">${sources}</div>` : ''}
+                    </div>`;
+                stepsEl.appendChild(div);
                 chatHistory.scrollTop = chatHistory.scrollHeight;
             }
 
-            function finalize(replyText) {
-                clearInterval(timerInterval);
-                const totalSeconds = ((Date.now() - startTime) / 1000).toFixed(1);
+            function stream(delta, reset) {
+                if (reset) streamed = '';
+                streamed += delta || '';
+                replyBox.classList.remove('hidden');
+                replyBox.innerHTML = renderMarkdown(streamed);
+                chatHistory.scrollTop = chatHistory.scrollHeight;
+            }
 
-                // Convert active thinking card into a collapsible details disclosure
+            function traceHTML(t) {
+                if (!t) return '';
+                const rows = t.spans.filter(s => ['llm', 'tool', 'retrieval', 'cache'].includes(s.kind)).map(s =>
+                    `<tr><td class="pr-3 font-mono">${esc(s.name)}</td><td class="pr-3 text-right">${s.duration_ms} ms</td>` +
+                    `<td class="pr-3 text-slate-500">${s.input_tokens ? esc(s.input_tokens + '→' + s.output_tokens + ' tok') : ''}</td>` +
+                    `<td class="${s.status === 'ok' ? 'text-emerald-400' : 'text-rose-400'}">${esc(s.status)}</td></tr>`).join('');
+                return `<div class="mt-3 pt-2 border-t border-slate-700/50 text-[11px] text-slate-400">
+                    <div class="mb-1">Trace <span class="font-mono">${esc(t.trace_id)}</span> · ${t.llm_calls} LLM calls · ${t.input_tokens}/${t.output_tokens} tokens</div>
+                    <table class="w-full">${rows}</table></div>`;
+            }
+
+            function complete(replyText, meta) {
+                clearInterval(timer);
+                const total = ((Date.now() - startTime) / 1000).toFixed(1);
+                const tierLabel = meta && meta.tier === 'premium' ? 'Claude Haiku 5.5' : 'Gemini (free)';
                 agentBox.className = "transition-all";
                 agentBox.innerHTML = `
-                    <details class="group bg-slate-800/40 hover:bg-slate-800/70 border border-slate-700/60 rounded-xl p-3 transition-all cursor-pointer">
-                        <summary class="flex items-center justify-between text-xs font-medium text-slate-300 list-none select-none">
-                            <div class="flex items-center gap-2">
+                    <details class="group bg-slate-800/40 hover:bg-slate-800/70 border border-slate-700/60 rounded-xl p-3 transition-all">
+                        <summary class="flex items-center justify-between text-xs font-medium text-slate-300 list-none select-none cursor-pointer">
+                            <div class="flex items-center gap-2 flex-wrap">
                                 <span class="text-indigo-400">🧠</span>
-                                <span>Agent completed <b>${recordedSteps.length} background tasks & tool calls</b></span>
-                                <span class="text-[10px] text-indigo-400 bg-indigo-500/10 border border-indigo-500/20 px-2 py-0.5 rounded-full font-mono">${totalSeconds}s</span>
+                                <span><b>${steps}</b> agent steps</span>
+                                <span class="text-[10px] text-indigo-400 bg-indigo-500/10 border border-indigo-500/20 px-2 py-0.5 rounded-full font-mono">${total}s</span>
+                                <span class="text-[10px] text-slate-400 font-mono">${esc(tierLabel)}${meta && meta.cached ? ' · cached' : ''}</span>
                             </div>
                             <span class="text-slate-400 group-open:rotate-180 transition-transform text-[11px]">▼</span>
                         </summary>
-                        <div class="mt-3 pt-3 border-t border-slate-700/50 space-y-2 text-xs">
-                            ${stepsEl.innerHTML}
-                        </div>
-                    </details>
-                `;
-
-                // Render Markdown into final reply box
-                let parsedHTML = replyText;
-                try {
-                    if (typeof marked !== 'undefined' && marked && typeof marked.parse === 'function') {
-                        parsedHTML = marked.parse(replyText);
-                    } else {
-                        parsedHTML = replyText.replace(/\n/g, '<br>');
-                    }
-                } catch (e) {
-                    parsedHTML = replyText.replace(/\n/g, '<br>');
-                }
-
-                replyBox.innerHTML = parsedHTML;
+                        <div class="mt-3 pt-3 border-t border-slate-700/50 space-y-2 text-xs">${stepsEl.innerHTML}</div>
+                        ${traceHTML(trace)}
+                    </details>`;
+                replyBox.innerHTML = renderMarkdown(replyText);
+                replyBox.querySelectorAll('a').forEach(a => { a.target = '_blank'; a.rel = 'noopener noreferrer'; });
                 replyBox.classList.remove('hidden');
                 chatHistory.scrollTop = chatHistory.scrollHeight;
             }
 
-            return {
-                addStep: addOrUpdateStep,
-                complete: finalize
-            };
+            return { addStep, stream, complete, setTrace: (t) => { trace = t; } };
         }
 
         async function sendMessage() {
             const message = chatInput.value.trim();
             if (!message) return;
-
-            // Reset Input UI
             chatInput.value = '';
             chatInput.style.height = 'auto';
             appendUserMessage(message);
 
-            const safeHistory = JSON.parse(JSON.stringify(conversationHistory));
-            const requestBody = {
-                message: message,
-                history: safeHistory,
-                stream: true
-            };
-
+            const history = JSON.parse(JSON.stringify(conversationHistory));
             conversationHistory.push({ role: "user", parts: [{ text: message }] });
-
-            // Create live thinking card
-            const thinkingCard = createThinkingCard();
+            const card = createThinkingCard();
+            const headers = { 'Content-Type': 'application/json' };
+            if (accessCode) headers['X-Access-Code'] = accessCode;
 
             try {
-                let chatEndpoint = '/chat';
-                if (window.location.protocol === 'file:' || window.location.port === '3000') {
-                    chatEndpoint = 'http://127.0.0.1:8001/chat';
-                }
-
-                const response = await fetch(chatEndpoint, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(requestBody)
-                });
-
+                const response = await fetch(apiBase + '/chat', { method: 'POST', headers, body: JSON.stringify({ message, history, stream: true }) });
                 if (!response.ok) {
-                    const errJson = await response.json().catch(() => ({}));
-                    thinkingCard.complete("⚠️ **Backend Error:** " + (errJson.detail || response.statusText));
+                    const err = await response.json().catch(() => ({}));
+                    card.complete("⚠️ **Error:** " + (err.detail || response.statusText));
                     conversationHistory.pop();
                     return;
                 }
-
-                // Stream response using ReadableStream
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder("utf-8");
-                let buffer = "";
-                let finalReply = "";
-
+                let buffer = "", finalReply = "", meta = null;
                 while (true) {
                     const { done, value } = await reader.read();
                     if (done) break;
                     buffer += decoder.decode(value, { stream: true });
-
-                    const lines = buffer.split("\n\n");
-                    buffer = lines.pop(); // keep last unfinished piece
-
-                    for (const chunk of lines) {
-                        const trimmed = chunk.trim();
-                        if (!trimmed.startsWith("data:")) continue;
-                        const jsonStr = trimmed.replace(/^data:\s*/, "").trim();
-                        if (!jsonStr) continue;
-
-                        try {
-                            const event = JSON.parse(jsonStr);
-                            if (event.type === 'thought' || event.type === 'tool_start' || event.type === 'tool_done' || event.type === 'tool_error') {
-                                thinkingCard.addStep(event);
-                            } else if (event.type === 'reply') {
-                                finalReply = event.reply;
-                            } else if (event.type === 'error') {
-                                finalReply = "❌ **Error:** " + event.detail;
-                            }
-                        } catch (parseErr) {
-                            console.warn("SSE JSON parse err:", parseErr);
+                    const chunks = buffer.split("\n\n");
+                    buffer = chunks.pop();
+                    for (const chunk of chunks) {
+                        const line = chunk.trim();
+                        if (!line.startsWith("data:")) continue;
+                        let event;
+                        try { event = JSON.parse(line.slice(5)); } catch (e) { continue; }
+                        switch (event.type) {
+                            case 'session': setTier(event.tier); if (accessCode && event.tier !== 'premium') { accessCode = null; storage.set('sde_access_code', null); } break;
+                            case 'thought': case 'tool_start': case 'tool_done': case 'tool_error': card.addStep(event); break;
+                            case 'reply_delta': card.stream(event.delta, event.reset); break;
+                            case 'reply': finalReply = event.reply; meta = event; break;
+                            case 'trace': card.setTrace(event.trace); break;
+                            case 'error': finalReply = "❌ **Error:** " + event.detail; break;
                         }
                     }
                 }
-
-                thinkingCard.complete(finalReply || "I processed your request.");
-                conversationHistory.push({ role: "model", parts: [{ text: finalReply }] });
-
+                card.complete(finalReply || "No answer was produced.", meta);
+                if (meta) conversationHistory.push({ role: "model", parts: [{ text: finalReply.split('\n---\n**Sources**')[0] }] });
+                else conversationHistory.pop();
             } catch (error) {
-                console.error("Fetch Error: ", error);
-                thinkingCard.complete("⚠️ **Network Error:** Could not reach the backend server. Make sure it is running on `http://127.0.0.1:8001`.");
+                console.error("Fetch error:", error);
+                card.complete("⚠️ **Network error:** could not reach the backend.");
                 conversationHistory.pop();
             }
         }
 
         sendBtn.addEventListener('click', sendMessage);
-        chatInput.addEventListener('keydown', (e) => { 
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                sendMessage(); 
-            }
+        chatInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
         });
     </script>
 </body>

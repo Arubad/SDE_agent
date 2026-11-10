@@ -1,10 +1,13 @@
 {
   "mcpServers": {
-    "SDE_Knowledge_Agent": {
-      "command": "python",
-      "args": [
-        "/absolute/path/to/your/sde-mastery-hub/backend/mcp_server.py"
-      ]
+    "sde-knowledge-remote": {
+      "url": "https://arushh1050-sde-mastery-hub.hf.space/mcp/",
+      "headers": { "Authorization": "Bearer <PREMIUM_PASSCODE>" }
+    },
+    "sde-knowledge-local": {
+      "command": "/absolute/path/to/SDE_mastery_hub/backend/venv/bin/python",
+      "args": ["-m", "backend.mcp_server"],
+      "cwd": "/absolute/path/to/SDE_mastery_hub"
     }
   }
 }
