@@ -57,6 +57,9 @@ LOOP_INSTRUCTIONS = """You have tools for a software engineering knowledge base.
 - If the user shared a YouTube link, load it with analyze_youtube_video before answering.
 - If the knowledge base does not cover the question, say so plainly. Do not present
   unsupported material as if it came from the sources.
+- Every factual sentence in your answer must be supported by a search result. Do not pad the
+  answer with advice, examples or framings the results do not contain; if you add brief
+  background they do not state, label that sentence "(general knowledge)".
 - When you have enough, answer the question and stop."""
 
 

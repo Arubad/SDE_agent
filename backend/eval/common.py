@@ -59,3 +59,17 @@ def load_questions_v2(split: str | None = None, kind: str | None = None) -> list
     items = [json.loads(l) for l in QUESTIONS_V2_PATH.read_text().splitlines() if l.strip()]
     return [i for i in items
             if (split in (None, "all") or i["split"] == split) and (kind is None or i["kind"] == kind)]
+
+
+def paired_bootstrap_delta(a, b, n_boot: int = 10000, seed: int = 0) -> dict:
+    """95% CI for mean(b - a) by resampling paired items (same questions answered by both variants)."""
+    import random
+
+    if len(a) != len(b) or not a:
+        raise ValueError("paired_bootstrap_delta needs two non-empty sequences of equal length")
+    diffs = [float(y) - float(x) for x, y in zip(a, b)]
+    rng = random.Random(seed)
+    boots = sorted(sum(rng.choice(diffs) for _ in diffs) / len(diffs) for _ in range(n_boot))
+    lo, hi = boots[int(0.025 * n_boot)], boots[int(0.975 * n_boot) - 1]
+    return {"delta": round(sum(diffs) / len(diffs), 3), "ci95": [round(lo, 3), round(hi, 3)],
+            "significant": lo > 0 or hi < 0}
