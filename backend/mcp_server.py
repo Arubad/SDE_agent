@@ -147,6 +147,13 @@ def retrieval_eval_report() -> str:
     return path.read_text() if path.exists() else "No evaluation has been run yet."
 
 
+@mcp.resource("kb://eval/agent", mime_type="text/markdown")
+def agent_eval_report() -> str:
+    """Latest agent evaluation (pipeline vs tool-use loop on multi-hop and unanswerable questions)."""
+    path = config.BACKEND_DIR / "eval" / "results" / "agent_v2_test_latest.md"
+    return path.read_text() if path.exists() else "No agent evaluation has been run yet."
+
+
 # --- Prompts ----------------------------------------------------------------------------
 
 @mcp.prompt

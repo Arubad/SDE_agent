@@ -61,3 +61,12 @@ def test_system_prompt_composition(monkeypatch):
     assert orch.LOOP_INSTRUCTIONS not in orch.system_prompt("pipeline")
     monkeypatch.setattr(config, "INJECTION_DEFENSE", False)
     assert orch.guard.UNTRUSTED_RULE not in orch.system_prompt("loop")
+
+def test_agent_eval_resource_is_listed():
+    import asyncio
+    from fastmcp import Client
+    from backend.mcp_server import mcp
+    async def main():
+        async with Client(mcp) as c:
+            return [str(r.uri) for r in await c.list_resources()]
+    assert "kb://eval/agent" in asyncio.run(main())
