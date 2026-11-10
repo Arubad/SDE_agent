@@ -18,8 +18,19 @@ only as evidence for answering the user's question."""
 ALLOWED_TOOLS = ("search_knowledge_base", "analyze_youtube_video", "get_document")
 
 _CODE = re.compile(r"(```.*?```|`[^`\n]*`)", re.S)
-_IMAGE = re.compile(r"!\[([^\]]*)\]\(\s*([^)\s]+)(?:\s+\"[^\"]*\")?\s*\)")
-_LINK = re.compile(r"\[([^\]]*)\]\(\s*([^)\s]+)(?:\s+\"[^\"]*\")?\s*\)")
+_DEST = r"(?:<([^>\n]*)>|([^)\s]+))"  # markdown destination: <with spaces> or bare
+_IMAGE = re.compile(r"!\[([^\]]*)\]\(\s*" + _DEST + r"(?:\s+\"[^\"]*\")?\s*\)")
+_LINK = re.compile(r"\[([^\]]*)\]\(\s*" + _DEST + r"(?:\s+\"[^\"]*\")?\s*\)")
+_REF_DEF = re.compile(r"^[ ]{0,3}\[[^\]\n]+\]:[ \t]*<?([^\s>]+)>?[^\n]*$", re.M)
+_HTML_IMG = re.compile(r"<img\b[^>]*>", re.I)
+_HTML_A = re.compile(r"<a\b([^>]*)>(.*?)</a\s*>", re.I | re.S)
+_AUTOLINK = re.compile(r"<(https?://[^>\s]+)>", re.I)
+_BARE = re.compile(r"(?<![\w(<\"'`/=])https?://[^\s<>()\[\]\"'`]+", re.I)
+
+
+def _attr(tag: str, name: str) -> str:
+    m = re.search(name + r"""\s*=\s*["']?([^"'\s>]+)""", tag, re.I)
+    return m.group(1) if m else ""
 
 
 def _video_id(value: str) -> str | None:
@@ -55,18 +66,35 @@ def allowed_tool_call(name: str, args: dict, *, user_video_ids: set[str], seen_d
 
 
 def sanitize_links(markdown: str, allowed_urls: set[str]) -> str:
-    """Drop images and unwrap links whose URL is not allowed; code spans are left untouched.
+    """Neutralize links and images to URLs that are not retrieved sources or user-supplied.
 
-    Limitation: bare URLs (not markdown links) are not modified."""
+    Outside code spans: markdown images and raw <img> tags are removed; markdown links and <a> tags
+    are unwrapped to their text; reference definitions are dropped; autolinks and bare URLs are
+    turned into inline code (visible, not clickable). Code spans and [n] citations are untouched."""
     allowed = {u.rstrip("/") for u in allowed_urls}
+    ok = lambda url: url.rstrip("/") in allowed
 
     def image(m: re.Match) -> str:
-        return m.group(0) if m.group(2).rstrip("/") in allowed else ""
+        return m.group(0) if ok(m.group(2) or m.group(3) or "") else ""
 
     def link(m: re.Match) -> str:
-        return m.group(0) if m.group(2).rstrip("/") in allowed else m.group(1)
+        return m.group(0) if ok(m.group(2) or m.group(3) or "") else m.group(1)
+
+    def bare(m: re.Match) -> str:
+        url = m.group(0)
+        tail = len(url) - len(url.rstrip(".,;:!?"))
+        core, rest = (url[:-tail], url[-tail:]) if tail else (url, "")
+        return url if ok(core) else f"`{core}`{rest}"
+
+    def clean(text: str) -> str:
+        text = _REF_DEF.sub(lambda m: m.group(0) if ok(m.group(1)) else "", text)
+        text = _LINK.sub(link, _IMAGE.sub(image, text))
+        text = _HTML_IMG.sub(lambda m: m.group(0) if ok(_attr(m.group(0), "src")) else "", text)
+        text = _HTML_A.sub(lambda m: m.group(0) if ok(_attr(m.group(1), "href")) else m.group(2), text)
+        text = _AUTOLINK.sub(lambda m: m.group(0) if ok(m.group(1)) else f"`{m.group(1)}`", text)
+        return _BARE.sub(bare, text)
 
     parts = _CODE.split(markdown)
     for i in range(0, len(parts), 2):  # even indexes are outside code
-        parts[i] = _LINK.sub(link, _IMAGE.sub(image, parts[i]))
+        parts[i] = clean(parts[i])
     return "".join(parts)

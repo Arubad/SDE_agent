@@ -70,3 +70,11 @@ def test_agent_eval_resource_is_listed():
         async with Client(mcp) as c:
             return [str(r.uri) for r in await c.list_resources()]
     assert "kb://eval/agent" in asyncio.run(main())
+
+def test_public_tier_answers_are_sanitized_too(monkeypatch):
+    # Ruling: the free tier has the same injection surface (it renders retrieved text), so the
+    # sanitizer applies to both tiers; the tier's LLM calls and prompt are unchanged.
+    monkeypatch.setattr(config, "INJECTION_DEFENSE", True)
+    monkeypatch.setattr(orch, "_run_pipeline", fake("knowledge_base", "see ![x](https://evil.example/p.png) ok[1]"))
+    reply = go(tier="public").reply
+    assert "evil.example" not in reply and "https://good.example/doc" in reply

@@ -232,9 +232,11 @@ Defenses (`INJECTION_DEFENSE`, on by default):
 - A system-prompt rule that source text is data, never instructions.
 - A **tool-call guard**: videos only if the user pasted them, documents only if a search
   already returned them.
-- A **link sanitizer**: outside code, markdown links and images to URLs that are not retrieved
-  sources or in the user's message lose the URL, and images are removed. Bare URLs are not
-  modified, which is a known limitation.
+- A **link sanitizer** on every answer, free and passcode tier alike: outside code, links and
+  images to URLs that are not retrieved sources or in the user's message are neutralized. That
+  covers markdown and reference-style links, raw `<img>`/`<a>` HTML, autolinks, and bare URLs
+  (shown as code, not clickable). The frontend's markdown renderer would otherwise auto-load an
+  injected image.
 
 `python -m backend.eval.injection_eval`: 10 attacks × 5 questions, one poisoned passage among 5,
 run against both the pipeline generator and the loop:
