@@ -1,0 +1,47 @@
+[
+  {
+    "variant": "premium",
+    "n": 2,
+    "errors": 0,
+    "correctness": 1,
+    "faithfulness": 0.5,
+    "gold_cited": 1,
+    "retry_rate": 0.5,
+    "avg_llm_calls": 2.5,
+    "avg_input_tokens": 13742,
+    "avg_output_tokens": 2736,
+    "p50_latency_s": 28.2,
+    "rows": [
+      {
+        "id": "909d56ddd0",
+        "correctness": 1,
+        "faithfulness": 0.5,
+        "rationale": "The answer covers the reference's core points (in-place evolution is cheaper once turndown costs are included, and deprecation costs are hard to evaluate because maintenance and ecosystem costs are diffuse), but many of its claims, including Hyrum's Law, Code Search/Kythe, organizational limits, and test-suite exit checks, are not in the single retrieved TL;DR source.",
+        "gold_cited": true,
+        "n_sources": 1,
+        "route": "knowledge_base",
+        "verdict": "grounded",
+        "retried": false,
+        "latency_ms": 26409,
+        "llm_calls": 2,
+        "input_tokens": 10556,
+        "output_tokens": 2703
+      },
+      {
+        "id": "fa2cb46b81",
+        "correctness": 1,
+        "faithfulness": 0.5,
+        "rationale": "The answer captures the reference's core points (drafts withheld until publishing, atomic complete review after reading the whole change), but its claim that publishing lets authors and reviewers check their wording is not in the cited source, which only says publishing gives reviewers a complete atomic thought.",
+        "gold_cited": true,
+        "n_sources": 1,
+        "route": "knowledge_base",
+        "verdict": "partially_grounded",
+        "retried": true,
+        "latency_ms": 29916,
+        "llm_calls": 3,
+        "input_tokens": 16928,
+        "output_tokens": 2769
+      }
+    ]
+  }
+]

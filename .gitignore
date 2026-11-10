@@ -25,3 +25,6 @@ dist/
 *.egg-info/
 *.zip
 *.pdf
+
+# Local embedded Qdrant data
+backend/qdrant_local/
