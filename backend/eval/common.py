@@ -7,6 +7,7 @@ from backend.core import config
 
 EVAL_DIR = config.BACKEND_DIR / "eval"
 QUESTIONS_PATH = EVAL_DIR / "data" / "questions.jsonl"
+QUESTIONS_V2_PATH = EVAL_DIR / "data" / "questions_v2.jsonl"  # multi_hop + unanswerable
 RESULTS_DIR = EVAL_DIR / "results"
 
 
@@ -52,3 +53,9 @@ def _longest_run(q: list[str], c: list[str]) -> int:
 def load_questions(split: str | None = None) -> list[dict]:
     items = [json.loads(l) for l in QUESTIONS_PATH.read_text().splitlines() if l.strip()]
     return [i for i in items if split in (None, "all") or i["split"] == split]
+
+
+def load_questions_v2(split: str | None = None, kind: str | None = None) -> list[dict]:
+    items = [json.loads(l) for l in QUESTIONS_V2_PATH.read_text().splitlines() if l.strip()]
+    return [i for i in items
+            if (split in (None, "all") or i["split"] == split) and (kind is None or i["kind"] == kind)]
