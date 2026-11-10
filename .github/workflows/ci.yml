@@ -18,7 +18,7 @@ jobs:
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt pytest
-      - name: Unit tests (offline: no LLM, no Qdrant)
+      - name: "Unit tests (offline: no LLM, no Qdrant)"
         run: python -m pytest backend/tests -q
 
   retrieval-quality-gate:
