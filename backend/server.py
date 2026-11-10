@@ -34,7 +34,7 @@ def emit_agent_event(event: dict):
         loop.call_soon_threadsafe(queue.put_nowait, event)
 
 # 3. Initialize RAG Database as a pure retriever (no external LLM needed)
-Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
+Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5", device="cpu")
 storage_path = BASE_DIR / "storage"
 
 if storage_path.exists():
@@ -126,52 +126,113 @@ def query_sde_knowledge_base(query: str) -> str:
         })
         return f"Error: {str(e)}"
 
-def get_live_youtube_transcript(video_id: str) -> str:
-    """Fetches full text transcripts dynamically from a YouTube video URL or video ID. Use this whenever the user shares a YouTube link or asks to summarize, analyze, or explain content from a YouTube video."""
-    print(f"   [TOOL TRIGGERED] Fetching YouTube transcript for: {video_id}")
-    video_id = video_id.strip()
-    if "v=" in video_id:
-        video_id = video_id.split("v=")[1].split("&")[0]
-    elif "youtu.be/" in video_id:
-        video_id = video_id.split("youtu.be/")[1].split("?")[0].split("/")[0]
-    elif "/embed/" in video_id:
-        video_id = video_id.split("/embed/")[1].split("?")[0].split("/")[0]
-    elif "/shorts/" in video_id:
-        video_id = video_id.split("/shorts/")[1].split("?")[0].split("/")[0]
+YOUTUBE_FAILURE_NOTE = (
+    "TOOL FAILED: the video content could not be loaded. Do NOT describe, summarize or guess what this "
+    "video contains, even if you think you recognize it. Tell the user plainly that the video could not "
+    "be retrieved (and why, if known), then offer to help another way."
+)
 
+# Low media resolution ~ 100 tokens/sec of video, so even ~1h videos fit in the context window
+VIDEO_ANALYSIS_MODEL = "gemini-3.5-flash"
+
+
+def _extract_youtube_id(value: str) -> str:
+    value = value.strip()
+    if "v=" in value:
+        return value.split("v=")[1].split("&")[0]
+    for marker in ("youtu.be/", "/embed/", "/shorts/", "/live/"):
+        if marker in value:
+            return value.split(marker)[1].split("?")[0].split("/")[0]
+    return value
+
+
+def _fetch_transcript(video_id: str) -> str:
+    if hasattr(YouTubeTranscriptApi, "get_transcript"):
+        return " ".join(seg["text"] for seg in YouTubeTranscriptApi.get_transcript(video_id))
+    return " ".join(snippet.text for snippet in YouTubeTranscriptApi().fetch(video_id))
+
+
+def _analyze_video_with_gemini(video_id: str, question: str) -> str:
+    from google import genai as genai_v2
+    from google.genai import types
+
+    client = genai_v2.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    prompt = (
+        "Watch this YouTube video and produce a detailed, faithful account of its content for a software "
+        "engineering tutor: main topics in order, key technical claims, definitions, examples, code or "
+        "diagrams shown on screen, and notable quotes with approximate timestamps (MM:SS). "
+        "Only report what is actually in the video."
+    )
+    if question:
+        prompt += f"\n\nThe user specifically wants to know: {question}"
+    response = client.models.generate_content(
+        model=VIDEO_ANALYSIS_MODEL,
+        contents=types.Content(parts=[
+            types.Part(file_data=types.FileData(file_uri=f"https://www.youtube.com/watch?v={video_id}")),
+            types.Part(text=prompt),
+        ]),
+        config=types.GenerateContentConfig(media_resolution=types.MediaResolution.MEDIA_RESOLUTION_LOW),
+    )
+    if not response.text:
+        raise RuntimeError("Gemini returned no analysis for this video")
+    return response.text
+
+
+def analyze_youtube_video(video_url: str, question: str = "") -> str:
+    """Loads the actual content of a YouTube video (by URL or video ID) so you can summarize, analyze, or answer questions about it. Use this whenever the user shares a YouTube link or asks about a YouTube video. Pass the user's specific question about the video in `question` (or an empty string for a general summary)."""
+    video_id = _extract_youtube_id(video_url)
+    print(f"   [TOOL TRIGGERED] Loading YouTube video: {video_id}")
+
+    # 1) Captions: fast and exact, but YouTube blocks this from most cloud IPs (e.g. HF Spaces)
     emit_agent_event({
         "type": "tool_start",
         "stage": "youtube",
         "title": "Fetching YouTube Transcript",
         "tool": "YouTube Transcript API",
         "query": video_id,
-        "detail": f"Fetching live transcript for video ID: {video_id}"
+        "detail": f"Fetching captions for video ID: {video_id}"
     })
-
     try:
-        if hasattr(YouTubeTranscriptApi, "get_transcript"):
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-            text = " ".join([segment['text'] for segment in transcript_list])
-        else:
-            transcript = YouTubeTranscriptApi().fetch(video_id)
-            text = " ".join([snippet.text for snippet in transcript])
-
+        text = _fetch_transcript(video_id)
         emit_agent_event({
             "type": "tool_done",
             "stage": "youtube",
             "title": "Transcript Loaded",
             "tool": "YouTube Transcript API",
-            "detail": f"Successfully loaded video transcript ({len(text.split())} words)"
+            "detail": f"Loaded video transcript ({len(text.split())} words)"
         })
-        return text
+        return f"[Transcript of https://www.youtube.com/watch?v={video_id}]\n{text}"
+    except Exception as e:
+        transcript_error = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
+        print(f"   [YOUTUBE] Transcript unavailable, falling back to Gemini video input: {transcript_error}")
+
+    # 2) Fallback: Gemini watches the public video directly (audio + frames), no scraping involved
+    emit_agent_event({
+        "type": "tool_start",
+        "stage": "youtube",
+        "title": "Watching Video with Gemini",
+        "tool": "Gemini Video Understanding",
+        "query": video_id,
+        "detail": "Captions unavailable from this server, so Gemini is analysing the video directly..."
+    })
+    try:
+        analysis = _analyze_video_with_gemini(video_id, question)
+        emit_agent_event({
+            "type": "tool_done",
+            "stage": "youtube",
+            "title": "Video Analysed",
+            "tool": "Gemini Video Understanding",
+            "detail": f"Gemini analysed the video ({len(analysis.split())}-word breakdown)"
+        })
+        return f"[Gemini analysis of the video content of https://www.youtube.com/watch?v={video_id}]\n{analysis}"
     except Exception as e:
         emit_agent_event({
             "type": "tool_error",
             "stage": "youtube",
-            "title": "YouTube Fetch Failed",
-            "detail": f"Failed to retrieve transcript: {str(e)}"
+            "title": "YouTube Video Unavailable",
+            "detail": f"Transcript failed ({transcript_error}); Gemini video analysis failed ({e})"
         })
-        return f"Error: {str(e)}"
+        return f"{YOUTUBE_FAILURE_NOTE}\nTranscript error: {transcript_error}\nVideo analysis error: {e}"
 
 # 5. Setup FastAPI
 app = FastAPI()
@@ -215,6 +276,10 @@ You are an elite Software Engineering AI Tutor. Base your answers heavily on the
 2. SRE: Apply Google SRE principles (error budgets, toil elimination).
 3. Testing: Emphasize 'The Testing Trophy' and end-to-end testing (e.g., Playwright).
 4. Algorithms: The user already knows core concepts. Whenever writing Data Structures or Algorithms code, ONLY use C++ syntax. 
+
+Grounding rules:
+- When the user shares a YouTube link, ALWAYS call analyze_youtube_video and base your answer only on what it returns.
+- If a tool returns an error or says "TOOL FAILED", tell the user it failed. Never fill the gap from your own memory or guess what a video or document contains.
 """
 
 def execute_chat_sync(model, formatted_history, message):
@@ -247,7 +312,7 @@ async def chat_endpoint(req: ChatRequest):
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(
         model_name="gemini-3.5-flash",
-        tools=[query_sde_knowledge_base, get_live_youtube_transcript],
+        tools=[query_sde_knowledge_base, analyze_youtube_video],
         system_instruction=SYSTEM_INSTRUCTION
     )
 
