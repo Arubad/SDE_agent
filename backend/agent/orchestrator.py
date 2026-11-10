@@ -25,7 +25,9 @@ from fastmcp import Client
 
 from backend.agent import cache
 from backend.core import config
-from backend.core.llm import LLMUnavailable, gemini_generate, haiku_json
+from backend.agent.citations import render_citations, search_result_block
+from backend.agent.citations import source_label as _source_label
+from backend.core.llm import LLMUnavailable, gemini_generate, haiku_async_client, haiku_json
 from backend.core.trace import Trace
 from backend.mcp_server import _retrieval_label, mcp
 from backend.tools.youtube import find_video_urls
@@ -123,13 +125,6 @@ def _merge_passages(groups: list[list[dict]], limit: int) -> list[dict]:
                 seen.add(g[rank]["chunk_id"])
                 merged.append(g[rank])
     return merged[:limit]
-
-
-def _source_label(p: dict) -> str:
-    label = p["title"] + (f" › {p['section']}" if p.get("section") else "")
-    if p.get("timestamp"):
-        label += f" @ {p['timestamp']}"
-    return label
 
 
 def _short(p: dict) -> str:
@@ -251,22 +246,14 @@ class Agent:
     # ---- generation: premium (Claude, API-native citations) ----
     async def generate_claude(self, question: str, history: list[dict], passages: list[dict],
                               correction: str | None = None) -> tuple[str, list[dict]]:
-        from backend.core.llm import haiku_client  # sync client for config; async client below
-        content: list[dict] = [
-            {"type": "search_result", "source": p["url"] or p["chunk_id"], "title": _source_label(p),
-             "content": [{"type": "text", "text": p["text"]}], "citations": {"enabled": True}}
-            for p in passages
-        ]
+        content: list[dict] = [search_result_block(p) for p in passages]
         ask = question if passages else question + "\n\n(No knowledge-base passages were retrieved for this message.)"
         if correction:
             ask += f"\n\nA fact-check of your previous draft found these claims unsupported by the sources: {correction}\n" \
                    "Rewrite the answer so every factual claim is supported by the sources (or clearly labeled general knowledge)."
         content.append({"type": "text", "text": ask})
         messages = _anthropic_history(history) + [{"role": "user", "content": content}]
-        haiku_client()  # validates credentials early
-        client = anthropic.AsyncAnthropicFoundry(api_key=config.FOUNDRY_API_KEY,
-                                                 base_url=config.FOUNDRY_ENDPOINT.split("/v1/")[0].rstrip("/") + "/",
-                                                 max_retries=2, timeout=120)
+        client = haiku_async_client()
         with self.trace.span("generate", kind="llm", generator="haiku", passages=len(passages)) as span:
             try:
                 async with client.messages.stream(
@@ -285,27 +272,7 @@ class Agent:
                      stop_reason=final.stop_reason)
         if final.stop_reason == "refusal":
             return "I can't help with that request.", []
-        return self._render_claude_citations(final, passages)
-
-    @staticmethod
-    def _render_claude_citations(message, passages: list[dict]) -> tuple[str, list[dict]]:
-        numbers: dict[int, int] = {}
-        parts = []
-        for block in message.content:
-            if block.type != "text":
-                continue
-            marks = []
-            for c in block.citations or []:
-                if getattr(c, "type", "") == "search_result_location":
-                    idx = c.search_result_index
-                    if 0 <= idx < len(passages):
-                        n = numbers.setdefault(idx, len(numbers) + 1)
-                        if n not in marks:
-                            marks.append(n)
-            parts.append(block.text + "".join(f"[{n}]" for n in marks))
-        text = "".join(parts).strip()
-        sources = [{**passages[idx], "n": n} for idx, n in sorted(numbers.items(), key=lambda x: x[1])]
-        return text, sources
+        return render_citations(final, passages)
 
     # ---- generation: public (Gemini, prompt-level numbered citations) ----
     async def generate_gemini(self, question: str, history: list[dict], passages: list[dict]) -> tuple[str, list[dict]]:

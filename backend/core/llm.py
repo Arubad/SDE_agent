@@ -30,6 +30,14 @@ def haiku_client() -> AnthropicFoundry:
     return AnthropicFoundry(api_key=config.FOUNDRY_API_KEY, base_url=_foundry_base_url(), max_retries=3, timeout=120)
 
 
+def haiku_async_client() -> anthropic.AsyncAnthropicFoundry:
+    """A new async client per call (streaming generation, agent loop); the caller closes it."""
+    if not config.FOUNDRY_API_KEY or not config.FOUNDRY_ENDPOINT:
+        raise LLMUnavailable("Foundry credentials missing (TESTFORGE_FOUNDRY_API_KEY / TESTFORGE_FOUNDRY_ENDPOINT)")
+    return anthropic.AsyncAnthropicFoundry(api_key=config.FOUNDRY_API_KEY, base_url=_foundry_base_url(),
+                                           max_retries=2, timeout=120)
+
+
 def _record_usage(span, response) -> None:
     usage = getattr(response, "usage", None)
     if span is not None and usage is not None:

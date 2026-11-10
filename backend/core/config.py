@@ -56,6 +56,9 @@ PASSCODE_MAX_FAILURES = int(_env("PASSCODE_MAX_FAILURES", "5"))  # per IP, per 1
 INJECTION_DEFENSE = _env("INJECTION_DEFENSE", "true").lower() == "true"
 
 # --- Agent limits ---------------------------------------------------------------
+AGENT_MODE = _env("AGENT_MODE", "pipeline").lower()  # premium tier: "pipeline" | "loop"
+AGENT_MAX_STEPS = int(_env("AGENT_MAX_STEPS", "4"))   # model turns in loop mode; the last one cannot call tools
+AGENT_EFFORT = _env("AGENT_EFFORT", "low")
 MAX_LLM_CALLS = int(_env("MAX_LLM_CALLS", "6"))
 REQUEST_TIMEOUT_S = float(_env("REQUEST_TIMEOUT_S", "150"))
 TOOL_TIMEOUT_S = float(_env("TOOL_TIMEOUT_S", "45"))
