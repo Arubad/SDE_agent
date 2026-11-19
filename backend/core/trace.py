@@ -13,6 +13,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
+from backend.core.cost import span_cost
+
 _current: contextvars.ContextVar["Trace | None"] = contextvars.ContextVar("current_trace", default=None)
 
 
@@ -65,13 +67,21 @@ class Trace:
 
     def summary(self) -> dict:
         spans = [s.to_dict(self.t0) for s in self.spans]
+        input_tokens = sum(s.get("input_tokens", 0) for s in spans)
+        cache_read = sum(s.get("cache_read_tokens", 0) for s in spans)
+        cache_write = sum(s.get("cache_write_tokens", 0) for s in spans)
+        prompt_tokens = cache_read + cache_write + input_tokens
         return {
             "trace_id": self.id,
             "name": self.name,
             "total_ms": round((time.perf_counter() - self.t0) * 1000),
             "llm_calls": self.llm_calls,
-            "input_tokens": sum(s.get("input_tokens", 0) for s in spans),
+            "input_tokens": input_tokens,
             "output_tokens": sum(s.get("output_tokens", 0) for s in spans),
+            "cache_read_tokens": cache_read,
+            "cache_write_tokens": cache_write,
+            "cache_hit_rate": round(cache_read / prompt_tokens, 3) if prompt_tokens else 0.0,
+            "cost_usd": round(sum(span_cost(s) for s in spans if s["kind"] == "llm"), 6),
             "spans": spans,
         }
 

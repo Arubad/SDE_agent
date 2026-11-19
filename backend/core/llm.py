@@ -72,11 +72,36 @@ def haiku_async_client():
     raise _unknown_provider()
 
 
+def system_param(text: str) -> str | list[dict]:
+    """The `system` argument: one text block with a 1-hour cache breakpoint when caching is on, else the string."""
+    if not config.PROMPT_CACHE:
+        return text
+    return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
+
+
+def stable_tools(tools: list[dict]) -> list[dict]:
+    """Tools sorted by name (a copy), so the cached prefix doesn't change with discovery order."""
+    return sorted(tools, key=lambda t: t["name"])
+
+
+def cache_kwargs() -> dict:
+    """Top-level automatic caching of the conversation tail (5-minute TTL), or nothing when caching is off."""
+    return {"cache_control": {"type": "ephemeral"}} if config.PROMPT_CACHE else {}
+
+
 def _record_usage(span, response) -> None:
+    """Token usage onto the span. The SDK leaves cache fields as None when absent; those count as 0."""
     usage = getattr(response, "usage", None)
-    if span is not None and usage is not None:
-        span.set(model=getattr(response, "model", None), input_tokens=usage.input_tokens,
-                 output_tokens=usage.output_tokens)
+    if span is None or usage is None:
+        return
+    span.set(model=getattr(response, "model", None), input_tokens=usage.input_tokens,
+             output_tokens=usage.output_tokens,
+             cache_read_tokens=getattr(usage, "cache_read_input_tokens", None) or 0,
+             cache_write_tokens=getattr(usage, "cache_creation_input_tokens", None) or 0)
+    split = getattr(usage, "cache_creation", None)
+    if split is not None:
+        span.set(cache_write_5m_tokens=getattr(split, "ephemeral_5m_input_tokens", None) or 0,
+                 cache_write_1h_tokens=getattr(split, "ephemeral_1h_input_tokens", None) or 0)
 
 
 def haiku_json(*, system: str, prompt: str | list, schema: dict, effort: str = "low",
@@ -88,9 +113,10 @@ def haiku_json(*, system: str, prompt: str | list, schema: dict, effort: str = "
             response = haiku_client().messages.create(
                 model=config.HAIKU_MODEL,
                 max_tokens=max_tokens,
-                system=system,
+                system=system_param(system),
                 messages=[{"role": "user", "content": prompt}],
                 output_config={"effort": effort, "format": {"type": "json_schema", "schema": schema}},
+                **cache_kwargs(),
             )
         except (anthropic.RateLimitError, anthropic.APIConnectionError, anthropic.InternalServerError) as e:
             raise LLMUnavailable(f"Haiku unavailable: {e}") from e

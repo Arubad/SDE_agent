@@ -27,7 +27,8 @@ from backend.agent import cache, guard
 from backend.core import config
 from backend.agent.citations import render_citations, search_result_block
 from backend.agent.citations import source_label as _source_label
-from backend.core.llm import LLMUnavailable, gemini_generate, haiku_async_client, haiku_json
+from backend.core.llm import (LLMUnavailable, _record_usage, cache_kwargs, gemini_generate, haiku_async_client,
+                              haiku_json, system_param)
 from backend.agent.loop import run_tool_loop
 from backend.core.trace import Trace
 from backend.mcp_server import _retrieval_label, mcp
@@ -292,8 +293,8 @@ class Agent:
         with self.trace.span("generate", kind="llm", generator="haiku", passages=len(passages)) as span:
             try:
                 async with client.messages.stream(
-                    model=config.HAIKU_MODEL, max_tokens=8000, system=system_prompt("pipeline"),
-                    messages=messages, output_config={"effort": "low"},
+                    model=config.HAIKU_MODEL, max_tokens=8000, system=system_param(system_prompt("pipeline")),
+                    messages=messages, output_config={"effort": "low"}, **cache_kwargs(),
                 ) as stream:
                     async for text in stream.text_stream:
                         await self.emit({"type": "reply_delta", "delta": text, "reset": False})
@@ -303,8 +304,8 @@ class Agent:
             finally:
                 await client.close()
             self.trace.count_llm_call()
-            span.set(model=final.model, input_tokens=final.usage.input_tokens, output_tokens=final.usage.output_tokens,
-                     stop_reason=final.stop_reason)
+            _record_usage(span, final)
+            span.set(stop_reason=final.stop_reason)
         if final.stop_reason == "refusal":
             return "I can't help with that request.", []
         return render_citations(final, passages)

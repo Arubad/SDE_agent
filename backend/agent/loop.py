@@ -16,7 +16,8 @@ import anthropic
 
 from backend.agent.citations import render_citations, search_result_block
 from backend.core import config
-from backend.core.llm import LLMUnavailable, haiku_async_client
+from backend.core.llm import (LLMUnavailable, _record_usage, cache_kwargs, haiku_async_client, stable_tools,
+                              system_param)
 from backend.core.trace import Trace
 
 ToolCaller = Callable[[str, dict], Awaitable[dict]]          # {"passages": [...]} or {"error": "..."}
@@ -39,14 +40,16 @@ class LoopResult:
 
 
 def default_model_turn(*, system: str, tool_defs: list[dict], trace: Trace, emit: Emit) -> ModelTurn:
+    tools = stable_tools(tool_defs) if config.PROMPT_CACHE else tool_defs  # off: today's order, byte for byte
+
     async def turn(messages: list[dict], allow_tools: bool):
         client = haiku_async_client()
         with trace.span("agent_turn", kind="llm", allow_tools=allow_tools) as span:
             try:
                 async with client.messages.stream(
-                    model=config.HAIKU_MODEL, max_tokens=8000, system=system, messages=messages, tools=tool_defs,
-                    tool_choice={"type": "auto"} if allow_tools else {"type": "none"},
-                    output_config={"effort": config.AGENT_EFFORT},
+                    model=config.HAIKU_MODEL, max_tokens=8000, system=system_param(system), messages=messages,
+                    tools=tools, tool_choice={"type": "auto"} if allow_tools else {"type": "none"},
+                    output_config={"effort": config.AGENT_EFFORT}, **cache_kwargs(),
                 ) as stream:
                     async for text in stream.text_stream:
                         await emit({"type": "reply_delta", "delta": text, "reset": False})
@@ -56,8 +59,8 @@ def default_model_turn(*, system: str, tool_defs: list[dict], trace: Trace, emit
             finally:
                 await client.close()
             trace.count_llm_call()
-            span.set(model=final.model, input_tokens=final.usage.input_tokens, output_tokens=final.usage.output_tokens,
-                     stop_reason=final.stop_reason)
+            _record_usage(span, final)
+            span.set(stop_reason=final.stop_reason)
         if final.stop_reason == "tool_use":
             await emit({"type": "reply_delta", "delta": "", "reset": True})  # text before tool calls is not the answer
         return final

@@ -32,6 +32,11 @@ GENERATOR = _env("GENERATOR", "haiku").lower()
 LLM_PROVIDER = _env("LLM_PROVIDER", "foundry").lower()
 LLM_RECORDINGS_DIR = _env("LLM_RECORDINGS_DIR", str(BACKEND_DIR / "eval" / "recordings"))
 
+# Prompt caching on Claude calls (1h breakpoint on the system prompt + automatic 5m tail). false = legacy requests
+PROMPT_CACHE = _env("PROMPT_CACHE", "true").lower() == "true"
+# Optional JSON price overrides, USD per million tokens: {"model": {"input": .., "output": .., "cache_read": ..}}
+PRICE_TABLE_JSON = _env("PRICE_TABLE_JSON")
+
 # --- Retrieval ----------------------------------------------------------------
 QDRANT_URL = _env("QDRANT_URL")
 QDRANT_API_KEY = _env("QDRANT_API_KEY")

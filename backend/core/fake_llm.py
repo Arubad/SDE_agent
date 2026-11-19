@@ -1,10 +1,12 @@
 """Offline stand-in for the Anthropic client (LLM_PROVIDER=fake): scripted or schema-shaped replies, no network.
 
 Replies are real `anthropic.types.Message` objects, so code under test (and the record provider) sees exactly
-the shape the SDK returns. Every call's keyword arguments are kept in `requests` for assertions.
+the shape the SDK returns. A deep copy of every call's keyword arguments is kept in `requests` for assertions
+(a copy, because the tool loop keeps appending to the same `messages` list after the call).
 """
 from __future__ import annotations
 
+import copy
 import itertools
 import json as _json
 from collections import deque
@@ -15,6 +17,8 @@ from typing import Any, Iterator
 from anthropic.types import Message
 
 DEFAULT_TEXT = "Fake answer."
+DEFAULT_USAGE = {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 0,
+                 "cache_creation_input_tokens": 0}
 
 @dataclass
 class FakeReply:
@@ -22,9 +26,10 @@ class FakeReply:
     json: dict | None = None
     tool_uses: list[tuple[str, dict]] = field(default_factory=list)
     stop_reason: str | None = None  # None: "tool_use" if there are tool uses, else "end_turn"
+    usage: dict | None = None  # merged over the default usage (any `anthropic.types.Usage` field)
 
 
-requests: list[dict] = []  # every call's keyword arguments, in order
+requests: list[dict] = []  # a snapshot of every call's keyword arguments, in order
 _queue: deque[FakeReply] = deque()
 _ids = itertools.count(1)
 
@@ -69,7 +74,7 @@ def _default_text(kwargs: dict) -> str:
 
 
 def _reply(kwargs: dict) -> Message:
-    requests.append(kwargs)
+    requests.append(copy.deepcopy(kwargs))
     reply = _queue.popleft() if _queue else FakeReply()
     text = reply.text if reply.text is not None else (_json.dumps(reply.json) if reply.json is not None else None)
     if text is None and not reply.tool_uses:
@@ -83,8 +88,7 @@ def _reply(kwargs: dict) -> Message:
     return Message.model_validate({
         "id": f"msg_fake_{next(_ids)}", "type": "message", "role": "assistant", "model": "fake",
         "content": content, "stop_reason": stop, "stop_sequence": None,
-        "usage": {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 0,
-                  "cache_creation_input_tokens": 0},
+        "usage": {**DEFAULT_USAGE, **(reply.usage or {})},
     })
 
 
