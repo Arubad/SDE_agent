@@ -75,3 +75,30 @@ def test_unstorable_characters_rejected_and_session_usable(session, kwargs):
         create_roadmap(session, **args)
     r = create_roadmap(session, slug="after-bad", title="Fine", source_text="fine")
     assert r.slug == "after-bad"
+
+
+def test_create_database_if_missing(db_url):
+    import uuid
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+
+    from backend.tutor.db import create_database_if_missing
+
+    name = f"tutor_create_{uuid.uuid4().hex[:8]}"
+    url = make_url(db_url).set(database=name).render_as_string(hide_password=False)
+    admin = create_engine(make_url(db_url).set(database="postgres"), isolation_level="AUTOCOMMIT")
+    exists = text("SELECT 1 FROM pg_database WHERE datname = :n")
+    try:
+        assert create_database_if_missing(url) is True
+        assert create_database_if_missing(url) is False  # idempotent
+        with admin.connect() as c:
+            assert c.execute(exists, {"n": name}).scalar() == 1
+        probe = create_engine(url)
+        with probe.connect() as c:
+            assert c.execute(text("SELECT 1")).scalar() == 1
+        probe.dispose()
+    finally:
+        with admin.connect() as c:
+            c.execute(text(f'DROP DATABASE IF EXISTS "{name}"'))
+        admin.dispose()
