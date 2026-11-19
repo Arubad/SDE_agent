@@ -852,8 +852,9 @@ so the queue's idempotency, politeness and crash safety still apply.
     - creates a `Resource` with status `proposed` and `proposed_by="agent"`, and **no jobs**: only the user can
       approve it;
     - at most 3 proposals per round.
-  - **Untrusted wrapping:** web text is returned inside `<untrusted_web_content>…</untrusted_web_content>`, as
-    `backend/agent/guard.py` does for retrieved text. Reuse that helper if one exists.
+  - **Untrusted wrapping:** web text is returned inside `<untrusted_web_content>…</untrusted_web_content>`, with
+    any occurrence of that tag inside the text escaped. Both system prompts include
+    `backend/agent/guard.py`'s `UNTRUSTED_RULE` verbatim.
 - **Produces, in `agent.py`:**
   - `run_ingest_agent(ctx, roadmap_id, mode: str, round: int = 0) -> AgentRun`, with
     `AgentRun(stop: str, steps: int, actions: int, cost_usd: float, notes: str)`:
