@@ -27,9 +27,24 @@ def test_redacts_pii_and_keys(monkeypatch):
     "see [3]",
     "in 2026",
     "used 1884 tokens on v1.2.3",
+    "2026-11-19 10:30",
+    "2026-11-19",
+    "tokens 1884 2000 3000 4000",
+    "ids 12345 67890",
+    "ts 1731974400123",
+    "v1.2.3",
+    "1884",
 ])
 def test_redact_leaves_ordinary_text(text):
     assert redact(text) == text
+
+
+@pytest.mark.parametrize("text", [
+    "+1 (415) 555-0199", "415-555-0199", "415.555.0199", "+14155550199",
+    "4155550199", "+44 20 7946 0958", "(415) 555-0199",
+])
+def test_redact_phone_shapes(text):
+    assert redact("call " + text + " now") == "call [phone] now"
 
 
 def test_longer_secret_replaced_first(monkeypatch):

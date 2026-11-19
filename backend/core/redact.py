@@ -27,8 +27,17 @@ _KEYS = re.compile(
     r"|AIza[0-9A-Za-z_\-]{35})"
 )
 _BEARER = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=\-]+")
-# Digits with optional + and space/dot/dash/paren separators; must not start or end inside a word.
-_PHONE = re.compile(r"(?<![\w.+])\+?\d[\d\s.()\-]{5,}\d(?![\w])")
+# Recognizable phone shapes only (never bridge unrelated numbers such as dates or token lists):
+#   +<country> then 2-4 digit groups; +<10-15 digits>; (area) groups; dash/dot groups; exactly 10 digits.
+_PHONE = re.compile(
+    r"(?<![\w.+\-])(?:"
+    r"\+\d{1,3}[ .\-]?\(?\d{2,4}\)?(?:[ .\-]\d{2,4}){1,3}"
+    r"|\+\d{10,15}"
+    r"|\(\d{2,4}\)[ .\-]?\d{2,4}[ .\-]\d{2,4}"
+    r"|\d{3,4}([.\-])\d{3,4}\1\d{3,4}"
+    r"|\d{10}"
+    r")(?![\w:])"
+)
 
 
 def _phone_sub(m: re.Match) -> str:
