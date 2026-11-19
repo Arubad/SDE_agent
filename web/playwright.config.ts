@@ -41,7 +41,8 @@ export default defineConfig({
     server(8765, "tutor_e2e_main", { PUBLIC_MODE: "false" }),
     // Wrong-passcode lockout lives in the server's memory (5 failures per IP per 15 minutes). A reused
     // public server (reuseExistingServer, local only) keeps that state between runs; passcode.spec.ts
-    // makes exactly one wrong attempt per run.
+    // makes two wrong attempts per run, so a reused server stays under the limit for two runs only.
+    // Stop it (or wait 15 minutes) before a third.
     server(8766, "tutor_e2e_public", { PUBLIC_MODE: "true", PREMIUM_PASSCODE: "e2e-pass-123" }),
   ],
 });

@@ -19,6 +19,10 @@ services:
       PLATFORM_QDRANT_URL: http://qdrant:6333
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://phoenix:6006/v1/traces
       SKIP_DOTENV: "1"
+      # pinned so a HOST/PORT/WEB_DIST in backend/.env cannot break the port mapping or the SPA path
+      HOST: 0.0.0.0
+      PORT: "8000"
+      WEB_DIST: /app/web/dist
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:

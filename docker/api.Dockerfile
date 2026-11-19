@@ -1,4 +1,5 @@
-# Roadmap tutor platform API + built web app (local stack; the HF Space uses the root Dockerfile).
+# Roadmap tutor platform API + built web app, for the local stack only. The HF Space is a Gradio SDK Space
+# and uses neither this file nor the root Dockerfile.
 # Build from the repo root: docker build -f docker/api.Dockerfile .
 
 FROM node:22-slim AS web
