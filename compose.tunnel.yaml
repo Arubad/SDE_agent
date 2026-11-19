@@ -1,0 +1,15 @@
+# Publishes the local app at a public trycloudflare.com HTTPS URL. Owner only.
+#   docker compose -f compose.yaml -f compose.tunnel.yaml up -d --wait
+# PUBLIC_MODE=true makes the API refuse to start without PREMIUM_PASSCODE (set it in backend/.env).
+services:
+  api:
+    environment:
+      PUBLIC_MODE: "true"
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.11.1
+    command: tunnel --no-autoupdate --url http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped

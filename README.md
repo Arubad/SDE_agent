@@ -304,6 +304,12 @@ app. The Space runs on ZeroGPU hardware (free accounts can no longer run Gradio 
 `cpu-basic`), so `app.py` registers a `@spaces.GPU` function and runs ZeroGPU's startup hook
 itself. Everything actually runs on CPU. Deploy with `python deploy_to_hf.py`.
 
+## Roadmap Tutor platform (in development)
+The next version is a roadmap tutor that runs as a local Docker Compose stack (API and web app, Postgres,
+Qdrant, optional Phoenix tracing), separate from the Space above. `docker compose up -d --wait` starts it at
+http://127.0.0.1:8000, and an optional Cloudflare Tunnel shares it behind the passcode. Setup, the tunnel and
+"Why not hosted?" are in [docs/platform/running-locally.md](docs/platform/running-locally.md).
+
 ## Project layout
 ```
 app.py                     HF entrypoint (FastAPI + Gradio mount + ZeroGPU shim)

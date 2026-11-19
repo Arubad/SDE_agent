@@ -1,0 +1,69 @@
+# Local roadmap-tutor stack. Every published port binds to 127.0.0.1 only.
+#   docker compose up -d --wait                          api + postgres + qdrant
+#   docker compose --profile observability up -d --wait  adds Phoenix at http://127.0.0.1:6006
+# See docs/platform/running-locally.md.
+name: roadmap-tutor
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    image: roadmap-tutor-api:local
+    env_file:
+      - path: backend/.env
+        required: false
+    # `environment` overrides anything of the same name in backend/.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://tutor:tutor@postgres:5432/tutor
+      PLATFORM_QDRANT_URL: http://qdrant:6333
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://phoenix:6006/v1/traces
+      SKIP_DOTENV: "1"
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: tutor
+      POSTGRES_PASSWORD: tutor
+      POSTGRES_DB: tutor
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tutor -d tutor"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.20.2
+    volumes:
+      - qdrant_data:/qdrant/storage
+    ports:
+      - "127.0.0.1:6333:6333"
+    restart: unless-stopped
+
+  phoenix:
+    image: arizephoenix/phoenix:version-21.2.1
+    profiles: ["observability"]
+    # Phoenix 21 turns auth on for a non-loopback bind (0.0.0.0 inside the container), which would reject
+    # the API's unauthenticated OTLP export. The host port is loopback-only, so run it as a local dev tool.
+    environment:
+      PHOENIX_ENABLE_AUTH: "false"
+      PHOENIX_TELEMETRY_ENABLED: "false"
+      PHOENIX_DISABLE_AGENT_ASSISTANT: "true"
+    ports:
+      - "127.0.0.1:6006:6006"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  qdrant_data:
