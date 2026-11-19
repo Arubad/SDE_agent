@@ -1,6 +1,5 @@
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { ApiError, createRoadmap, getHealth, type Health, listRoadmaps, type Roadmap } from "./api";
-import { setCode } from "./storage";
 
 type HealthState = Health | "down" | null;
 
@@ -20,18 +19,27 @@ function HealthBadge({ health }: { health: HealthState }) {
   );
 }
 
-function PasscodeScreen({ onUnlocked }: { onUnlocked: (roadmaps: Roadmap[]) => void }) {
+function isAuthError(err: unknown): err is ApiError {
+  return err instanceof ApiError && (err.status === 401 || err.status === 429);
+}
+
+function PasscodeScreen({
+  initialError,
+  onUnlocked,
+}: {
+  initialError: string | null;
+  onUnlocked: (roadmaps: Roadmap[]) => void;
+}) {
   const [code, setCodeInput] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(initialError);
   const [busy, setBusy] = useState(false);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError(null);
-    setCode(code.trim());
     try {
-      onUnlocked(await listRoadmaps());
+      onUnlocked(await listRoadmaps(code.trim()));
     } catch (err) {
       setError(err instanceof ApiError && err.status === 401 ? "Incorrect passcode. Try again." : messageOf(err));
     } finally {
@@ -49,6 +57,7 @@ function PasscodeScreen({ onUnlocked }: { onUnlocked: (roadmaps: Roadmap[]) => v
           <input
             type="password"
             autoComplete="current-password"
+            autoFocus
             value={code}
             onChange={(e) => setCodeInput(e.target.value)}
             required
@@ -72,7 +81,7 @@ function CreateRoadmapForm({
   onUnauthorized,
 }: {
   onCreated: (r: Roadmap) => void;
-  onUnauthorized: () => void;
+  onUnauthorized: (err: ApiError) => void;
 }) {
   const [slug, setSlug] = useState("");
   const [title, setTitle] = useState("");
@@ -90,7 +99,7 @@ function CreateRoadmapForm({
       setTitle("");
       setSourceText("");
     } catch (err) {
-      if (err instanceof ApiError && err.status === 401) onUnauthorized();
+      if (isAuthError(err)) onUnauthorized(err);
       else setError(messageOf(err));
     } finally {
       setBusy(false);
@@ -162,19 +171,24 @@ function RoadmapList({ roadmaps }: { roadmaps: Roadmap[] }) {
 export function App() {
   const [health, setHealth] = useState<HealthState>(null);
   const [roadmaps, setRoadmaps] = useState<Roadmap[] | null>(null);
-  const [locked, setLocked] = useState(false);
+  // null: unlocked. Otherwise the passcode screen shows, with the lockout message for a 429.
+  const [lock, setLock] = useState<{ error: string | null } | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  const showPasscode = useCallback((err: ApiError) => {
+    setLock({ error: err.status === 429 ? err.message : null });
+  }, []);
 
   const load = useCallback(async () => {
     setLoadError(null);
     try {
       setRoadmaps(await listRoadmaps());
-      setLocked(false);
+      setLock(null);
     } catch (err) {
-      if (err instanceof ApiError && err.status === 401) setLocked(true);
+      if (isAuthError(err)) showPasscode(err);
       else setLoadError(messageOf(err));
     }
-  }, []);
+  }, [showPasscode]);
 
   useEffect(() => {
     getHealth().then(setHealth, () => setHealth("down"));
@@ -191,11 +205,13 @@ export function App() {
         <HealthBadge health={health} />
       </header>
       <main className="page">
-        {locked ? (
+        {lock ? (
           <PasscodeScreen
+            initialError={lock.error}
             onUnlocked={(list) => {
               setRoadmaps(list);
-              setLocked(false);
+              setLoadError(null);
+              setLock(null);
             }}
           />
         ) : (
@@ -212,7 +228,7 @@ export function App() {
               </section>
               <CreateRoadmapForm
                 onCreated={(r) => setRoadmaps((prev) => [r, ...(prev ?? [])])}
-                onUnauthorized={() => setLocked(true)}
+                onUnauthorized={showPasscode}
               />
             </div>
           </>

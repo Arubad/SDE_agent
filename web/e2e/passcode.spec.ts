@@ -18,3 +18,22 @@ test("passcode screen gates the app until the right code is entered", async ({ p
   await expect(page.getByRole("heading", { name: "Roadmaps", exact: true })).toBeVisible();
   await expect(page.getByLabel("Passcode")).toHaveCount(0);
 });
+
+test("a rejected passcode is not kept or re-sent after a reload", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("Passcode").fill("typo-code");
+  await page.getByRole("button", { name: "Unlock" }).click();
+  await expect(page.getByRole("alert")).toContainText("Incorrect passcode");
+
+  const sentCodes: (string | undefined)[] = [];
+  page.on("request", (req) => {
+    if (new URL(req.url()).pathname.startsWith("/api/")) sentCodes.push(req.headers()["x-access-code"]);
+  });
+  await page.reload();
+
+  await expect(page.getByLabel("Passcode")).toBeVisible();
+  await expect(page.getByLabel("Passcode")).toBeFocused();
+  expect(await page.evaluate(() => Object.keys(localStorage).length)).toBe(0);
+  expect(sentCodes.length).toBeGreaterThan(0);
+  expect(sentCodes.filter(Boolean)).toEqual([]);
+});

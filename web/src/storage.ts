@@ -22,3 +22,12 @@ export function setCode(code: string): void {
     // in-memory value is enough for this session
   }
 }
+
+export function clearCode(): void {
+  memory = null;
+  try {
+    localStorage.removeItem(KEY);
+  } catch {
+    // nothing stored there to clear
+  }
+}

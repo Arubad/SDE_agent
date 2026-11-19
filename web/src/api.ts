@@ -1,4 +1,4 @@
-import { getCode } from "./storage";
+import { clearCode, getCode, setCode } from "./storage";
 
 export interface Health {
   status: "ok" | "degraded";
@@ -41,15 +41,21 @@ function errorMessage(status: number, body: unknown): string {
   return `Request failed (HTTP ${status}).`;
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+// `candidateCode` is sent instead of the stored code and is saved only if the request succeeds,
+// so a mistyped passcode is never kept or re-sent. Any 401 clears the stored code.
+async function request<T>(path: string, init: RequestInit = {}, candidateCode?: string): Promise<T> {
   const headers = new Headers(init.headers);
-  const code = getCode();
+  const code = candidateCode ?? getCode();
   if (code) headers.set("X-Access-Code", code);
   if (init.body !== undefined) headers.set("Content-Type", "application/json");
 
   const res = await fetch(path, { ...init, headers });
   const body: unknown = await res.json().catch(() => null);
-  if (!res.ok) throw new ApiError(res.status, errorMessage(res.status, body));
+  if (!res.ok) {
+    if (res.status === 401) clearCode();
+    throw new ApiError(res.status, errorMessage(res.status, body));
+  }
+  if (candidateCode) setCode(candidateCode);
   return body as T;
 }
 
@@ -57,8 +63,9 @@ export function getHealth(): Promise<Health> {
   return request<Health>("/api/health");
 }
 
-export function listRoadmaps(): Promise<Roadmap[]> {
-  return request<Roadmap[]>("/api/roadmaps");
+/** Pass `candidateCode` to try a passcode; it is stored only if the server accepts it. */
+export function listRoadmaps(candidateCode?: string): Promise<Roadmap[]> {
+  return request<Roadmap[]>("/api/roadmaps", {}, candidateCode);
 }
 
 export function createRoadmap(input: RoadmapInput): Promise<Roadmap> {

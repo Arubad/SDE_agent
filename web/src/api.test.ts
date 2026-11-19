@@ -118,4 +118,38 @@ describe("api", () => {
     await expect(listRoadmaps()).resolves.toEqual([]);
     expect(sentHeaders().get("X-Access-Code")).toBe("memory-code");
   });
+
+  it("clears the stored code on a 401", async () => {
+    const { getCode, listRoadmaps, setCode } = await load();
+    setCode("stale-code");
+    fetchMock.mockResolvedValue(jsonResponse(401, { error: "Passcode required" }));
+
+    await expect(listRoadmaps()).rejects.toMatchObject({ status: 401 });
+
+    expect(getCode()).toBeNull();
+    expect(localStorage.length).toBe(0);
+  });
+
+  it("stores a candidate code only after a successful response", async () => {
+    const { getCode, listRoadmaps } = await load();
+    let respond!: (r: Response) => void;
+    fetchMock.mockReturnValue(new Promise<Response>((resolve) => (respond = resolve)));
+
+    const pending = listRoadmaps("candidate");
+    expect(sentHeaders().get("X-Access-Code")).toBe("candidate");
+    expect(getCode()).toBeNull();
+
+    respond(jsonResponse(200, []));
+    await pending;
+    expect(getCode()).toBe("candidate");
+  });
+
+  it("does not store a candidate code the server rejects", async () => {
+    const { getCode, listRoadmaps } = await load();
+    fetchMock.mockResolvedValue(jsonResponse(401, { error: "Passcode required" }));
+
+    await expect(listRoadmaps("wrong")).rejects.toMatchObject({ status: 401 });
+
+    expect(getCode()).toBeNull();
+  });
 });
