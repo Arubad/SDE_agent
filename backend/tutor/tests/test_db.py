@@ -102,3 +102,47 @@ def test_create_database_if_missing(db_url):
         with admin.connect() as c:
             c.execute(text(f'DROP DATABASE IF EXISTS "{name}"'))
         admin.dispose()
+
+
+DOWN_URL = "postgresql+psycopg://x:y@127.0.0.1:9/z"
+
+
+def test_engine_has_connect_timeout():
+    from sqlalchemy import event
+
+    from backend.tutor.db import make_engine
+
+    eng = make_engine(DOWN_URL)
+    seen = {}
+
+    @event.listens_for(eng, "do_connect")
+    def _capture(dialect, conn_rec, cargs, cparams):
+        seen.update(cparams)
+        raise RuntimeError("stop before connecting")
+
+    try:
+        with pytest.raises(Exception):
+            eng.connect()
+    finally:
+        eng.dispose()
+    assert seen.get("connect_timeout") == 5
+    assert eng.pool._pre_ping is True
+
+
+def test_migration_engine_has_connect_timeout(monkeypatch):
+    import sqlalchemy
+
+    from backend.tutor import db
+
+    captured = []
+    real = sqlalchemy.create_engine
+
+    def spy(url, **kw):
+        captured.append(kw)
+        return real(url, **kw)
+
+    monkeypatch.setattr(sqlalchemy, "create_engine", spy)
+    monkeypatch.setattr(db, "create_engine", spy)
+    with pytest.raises(Exception):
+        migrate(DOWN_URL)
+    assert captured and all(kw.get("connect_args", {}).get("connect_timeout") == 5 for kw in captured)

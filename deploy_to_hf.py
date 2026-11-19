@@ -33,6 +33,12 @@ IGNORE_PATTERNS = [
     "docker/**",
     "compose*.yaml",
     "requirements-platform.txt",
+    # local tooling, plans and platform docs: never shipped to the Space
+    ".superpowers/**",
+    ".claude/**",
+    "docs/superpowers/**",
+    "docs/platform/**",
+    "backend/eval/recordings/**",
 ]
 
 

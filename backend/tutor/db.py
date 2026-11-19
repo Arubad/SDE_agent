@@ -12,10 +12,12 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
+# Fail fast (seconds) when Postgres is unreachable instead of hanging on the OS TCP timeout.
+CONNECT_ARGS = {"connect_timeout": 5}
 
 
 def make_engine(url: str) -> Engine:
-    return create_engine(url, pool_pre_ping=True)
+    return create_engine(url, pool_pre_ping=True, connect_args=dict(CONNECT_ARGS))
 
 
 @contextmanager
@@ -51,7 +53,9 @@ def create_database_if_missing(url: str) -> bool:
     """Create the database named in `url` (via the server's `postgres` database). True if it was created."""
     target = make_url(url)
     name = target.database
-    admin = create_engine(target.set(database="postgres"), isolation_level="AUTOCOMMIT")
+    admin = create_engine(
+        target.set(database="postgres"), isolation_level="AUTOCOMMIT", connect_args=dict(CONNECT_ARGS)
+    )
     try:
         with admin.connect() as conn:
             if conn.execute(text("SELECT 1 FROM pg_database WHERE datname = :n"), {"n": name}).scalar():

@@ -71,3 +71,12 @@ def test_trace_log_is_redacted(capsys):
     t.log()
     out = capsys.readouterr().out
     assert "[email]" in out and "a@b.com" not in out
+
+
+def test_foundry_api_key_alternate_name_redacted(monkeypatch):
+    from backend.core.redact import SECRET_ENV_NAMES
+
+    assert "ANTHROPIC_FOUNDRY_API_KEY" in SECRET_ENV_NAMES
+    monkeypatch.setenv("ANTHROPIC_FOUNDRY_API_KEY", "foundry-key-value-123")
+    out = redact("using foundry-key-value-123 now")
+    assert "foundry-key-value-123" not in out and "[secret]" in out
