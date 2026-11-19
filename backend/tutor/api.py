@@ -39,6 +39,15 @@ def _roadmap_out(r: Roadmap) -> dict:
     }
 
 
+def _lockout_key(request: Request) -> str:
+    """Per-client key for the passcode lockout. X-Forwarded-For is client-controlled, so it is ignored;
+    CF-Connecting-IP is set (overwritten) by the Cloudflare edge in tunnel mode."""
+    cf_ip = request.headers.get("cf-connecting-ip", "").strip()
+    if cf_ip:
+        return cf_ip
+    return request.client.host if request.client else "unknown"
+
+
 def _error(status: int, message: str) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status)
 
@@ -105,10 +114,8 @@ def create_app(settings: Settings, *, engine: Engine | None = None) -> FastAPI:
         async def _passcode_guard(request: Request, call_next):
             path = request.url.path
             if path.startswith("/api/") and path != "/api/health":
-                fallback = request.client.host if request.client else "unknown"
-                ip = access.client_ip(request.headers, fallback)
                 try:
-                    ok = access.check_passcode(request.headers.get("x-access-code"), ip)
+                    ok = access.check_passcode(request.headers.get("x-access-code"), _lockout_key(request))
                 except access.TooManyAttempts as exc:
                     return _error(429, str(exc))
                 if not ok:

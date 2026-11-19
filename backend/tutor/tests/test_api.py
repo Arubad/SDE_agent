@@ -175,3 +175,37 @@ def test_telemetry_failure_does_not_break_request(engine, tmp_path, monkeypatch)
     monkeypatch.setattr(api, "export_trace", boom)
     with TestClient(create_app(_settings(tmp_path), engine=engine)) as c:
         assert c.get("/api/health").status_code == 200
+
+
+@pytest.fixture
+def guarded(engine, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "PREMIUM_PASSCODE", "pw123456")
+    with TestClient(create_app(_settings(tmp_path, public_mode=True), engine=engine)) as c:
+        yield c
+
+
+def test_spoofed_forwarded_for_does_not_bypass_lockout(guarded):
+    codes = [
+        guarded.get("/api/roadmaps", headers={"X-Access-Code": "nope", "X-Forwarded-For": f"10.0.0.{i}"}).status_code
+        for i in range(6)
+    ]
+    assert codes == [401] * 5 + [429]
+    assert len(access._failures) == 1
+
+
+def test_forwarded_for_cannot_lock_out_a_victim(guarded):
+    for _ in range(6):
+        guarded.get("/api/roadmaps", headers={"X-Access-Code": "nope", "X-Forwarded-For": "203.0.113.7"})
+    victim = {"X-Access-Code": "pw123456", "CF-Connecting-IP": "203.0.113.7"}
+    assert guarded.get("/api/roadmaps", headers=victim).status_code == 200
+    assert not access._failures.get("203.0.113.7")  # no failures recorded against the victim
+
+
+def test_cf_connecting_ip_counters_are_independent(guarded):
+    a = {"X-Access-Code": "nope", "CF-Connecting-IP": "198.51.100.1"}
+    for _ in range(5):
+        assert guarded.get("/api/roadmaps", headers=a).status_code == 401
+    assert guarded.get("/api/roadmaps", headers=a).status_code == 429
+    b = {"X-Access-Code": "pw123456", "CF-Connecting-IP": "198.51.100.2"}
+    assert guarded.get("/api/roadmaps", headers=b).status_code == 200
+    assert guarded.get("/api/roadmaps", headers={**b, "X-Access-Code": "nope"}).status_code == 401
