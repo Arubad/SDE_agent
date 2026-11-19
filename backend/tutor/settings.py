@@ -10,6 +10,7 @@ from backend.core import config
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _TRUE = {"1", "true", "yes", "on"}
+_FALSE = {"", "0", "false", "no", "off"}
 
 
 class SettingsError(ValueError):
@@ -32,13 +33,22 @@ class Settings:
             raise SettingsError("PUBLIC_MODE=true requires PREMIUM_PASSCODE to be set")
 
 
+def _parse_bool(name: str, raw: str | None) -> bool:
+    value = (raw or "").strip().lower()
+    if value in _TRUE:
+        return True
+    if value in _FALSE:
+        return False
+    raise SettingsError(f"{name} must be one of true/false, 1/0, yes/no or on/off (got {raw!r})")
+
+
 def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
     d = Settings()
     return Settings(
         database_url=env.get("DATABASE_URL") or d.database_url,
         qdrant_url=env.get("PLATFORM_QDRANT_URL") or d.qdrant_url,
         collection=env.get("PLATFORM_COLLECTION") or d.collection,
-        public_mode=env.get("PUBLIC_MODE", "").strip().lower() in _TRUE,
+        public_mode=_parse_bool("PUBLIC_MODE", env.get("PUBLIC_MODE")),
         otel_endpoint=env.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") or None,
         web_dist=Path(env["WEB_DIST"]) if env.get("WEB_DIST") else d.web_dist,
         host=env.get("HOST") or d.host,

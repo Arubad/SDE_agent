@@ -209,3 +209,35 @@ def test_cf_connecting_ip_counters_are_independent(guarded):
     b = {"X-Access-Code": "pw123456", "CF-Connecting-IP": "198.51.100.2"}
     assert guarded.get("/api/roadmaps", headers=b).status_code == 200
     assert guarded.get("/api/roadmaps", headers={**b, "X-Access-Code": "nope"}).status_code == 401
+
+
+TUNNEL_REFUSED = {"error": "This server is not in public mode; tunnel traffic is refused."}
+
+
+@pytest.mark.parametrize("header", ["CF-Connecting-IP", "CF-Ray"])
+def test_tunnel_traffic_refused_when_not_public(engine, tmp_path, header):
+    (tmp_path / "index.html").write_text("<h1>app</h1>")
+    with TestClient(create_app(Settings(web_dist=tmp_path), engine=engine)) as c:
+        value = "203.0.113.9" if header == "CF-Connecting-IP" else "8c1f2a3b4d5e6f70-AMS"
+        for path in ("/api/health", "/api/roadmaps", "/"):
+            r = c.get(path, headers={header: value})
+            assert r.status_code == 403, path
+            assert r.json() == TUNNEL_REFUSED, path
+        assert c.post("/api/roadmaps", json=_body(), headers={header: value}).status_code == 403
+
+
+def test_local_traffic_served_when_not_public(engine, tmp_path):
+    with session_scope(engine) as s:
+        s.execute(text("DELETE FROM roadmaps"))
+    (tmp_path / "index.html").write_text("<h1>app</h1>")
+    with TestClient(create_app(Settings(web_dist=tmp_path), engine=engine)) as c:
+        assert c.get("/api/health").status_code == 200
+        assert c.get("/api/roadmaps").status_code == 200
+        assert c.get("/").text == "<h1>app</h1>"
+
+
+def test_tunnel_traffic_allowed_in_public_mode(guarded):
+    headers = {"CF-Connecting-IP": "198.51.100.3", "CF-Ray": "8c1f2a3b4d5e6f70-AMS"}
+    assert guarded.get("/api/health", headers=headers).status_code == 200
+    assert guarded.get("/api/roadmaps", headers=headers).status_code == 401
+    assert guarded.get("/api/roadmaps", headers={**headers, "X-Access-Code": "pw123456"}).status_code == 200

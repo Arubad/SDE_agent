@@ -48,6 +48,9 @@ def _lockout_key(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+_TUNNEL_HEADERS = ("cf-connecting-ip", "cf-ray")
+
+
 def _error(status: int, message: str) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status)
 
@@ -108,7 +111,17 @@ def create_app(settings: Settings, *, engine: Engine | None = None) -> FastAPI:
         log.warning("database unavailable: %s", type(exc).__name__)
         return _error(503, "Database unavailable")
 
-    if settings.public_mode:
+    if not settings.public_mode:
+
+        @app.middleware("http")
+        async def _refuse_tunnel_traffic(request: Request, call_next):
+            # A Cloudflare tunnel left running (e.g. an orphaned cloudflared after a plain `docker compose up`)
+            # must never reach an API that has no passcode guard. The edge always adds these headers.
+            if any(h in request.headers for h in _TUNNEL_HEADERS):
+                return _error(403, "This server is not in public mode; tunnel traffic is refused.")
+            return await call_next(request)
+
+    else:
 
         @app.middleware("http")
         async def _passcode_guard(request: Request, call_next):

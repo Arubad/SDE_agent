@@ -24,8 +24,8 @@ Open http://127.0.0.1:8000. `curl http://127.0.0.1:8000/api/health` should repor
 `"db": "ok"`.
 
 `backend/.env` reaches the API container only as environment variables (`env_file`). It is never copied into
-the image. Compose sets `DATABASE_URL` and `PLATFORM_QDRANT_URL` itself, so those always point at the
-containers whatever `.env` says.
+the image. Compose sets `DATABASE_URL`, `PLATFORM_QDRANT_URL`, `HOST`, `PORT` and `WEB_DIST` itself, so
+those always point at the containers whatever `.env` says.
 
 Stop with `docker compose down`. Data lives in the `pgdata` and `qdrant_data` volumes. `docker compose down -v`
 deletes them too.
@@ -46,8 +46,9 @@ with `docker compose --profile observability down`.
 
 This publishes the app on a public HTTPS URL for as long as it runs. Only do it on purpose.
 
-1. Set `PREMIUM_PASSCODE` in `backend/.env`. The tunnel override sets `PUBLIC_MODE=true`, and the API refuses
-   to start in public mode without a passcode.
+1. Set `PREMIUM_PASSCODE` in `backend/.env` to a long random value (for example the output of
+   `openssl rand -base64 24`). The URL is public, so anyone can guess at it. The tunnel override sets
+   `PUBLIC_MODE=true`, and the API refuses to start in public mode without a passcode.
 2. Start the stack with the tunnel override:
 
    ```bash
@@ -66,8 +67,15 @@ This publishes the app on a public HTTPS URL for as long as it runs. Only do it 
 5. Stop sharing:
 
    ```bash
-   docker compose -f compose.yaml -f compose.tunnel.yaml down
+   docker compose -f compose.yaml -f compose.tunnel.yaml down --remove-orphans
    ```
+
+   Always pass both `-f` files while the tunnel is up, and keep `--remove-orphans` when you stop it.
+   A plain `docker compose up` or `docker compose down` reads only `compose.yaml`. It doesn't know about
+   `cloudflared`, so it leaves that container running as an orphan, and a plain `up` also recreates the API
+   without `PUBLIC_MODE`, so the tunnel would forward the public URL to an API with no passcode. As a
+   backstop, an API that isn't in public mode refuses every request carrying Cloudflare's `CF-Connecting-IP`
+   or `CF-Ray` header with a 403. Still, check `docker ps` shows no `cloudflared` container after you stop.
 
    Stopping the `cloudflared` container alone (`docker compose -f compose.yaml -f compose.tunnel.yaml stop
    cloudflared`) also takes the URL offline, but leaves the API in public mode until you restart it with plain
