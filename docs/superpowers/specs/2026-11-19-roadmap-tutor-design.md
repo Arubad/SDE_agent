@@ -449,3 +449,18 @@ only, with no URLs, and its line breaks were lost when pasted. That is realistic
   no cookies). Comment timestamps need the free API key.
 - **Fixture licensing.** Only kubernetes.io pages (CC BY 4.0) are committed as eval fixtures. Third-party pages
   and transcripts stay in a git-ignored local cache.
+- **Ingestion agent (owner's request, 2026-11-19).** The deterministic job queue stays the engine. A Haiku tool
+  loop supervises it at two moments:
+  - **before the crawl (plan),** it picks which pages of a large site matter for the skills;
+  - **after the crawl settles (recover, up to 2 rounds),** it reviews gaps (skipped resources, videos without a
+    transcript, skills under 5 chunks). It finds replacements through search, retries transcripts on the routes
+    the owner enabled, and proposes new sources.
+
+  Limits:
+  - it acts only by enqueueing jobs or proposing resources, and proposals need the user's approval;
+  - its URLs follow the agent rule in "Security";
+  - spend is capped at $0.05 per roadmap;
+  - with the model unavailable, the pipeline completes without it.
+
+  It has its own eval: gap-fix rate, plan and proposal precision, restraint on a healthy roadmap, and injection
+  resistance with defenses on vs off.
