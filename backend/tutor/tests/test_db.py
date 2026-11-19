@@ -58,3 +58,20 @@ def test_validation(session, kwargs):
 def test_large_emoji_source_accepted(session):
     r = create_roadmap(session, slug="emoji", title="E", source_text="😀" * 200_000)
     assert len(r.source_text) == 200_000
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"title": "bad\x00title"},
+        {"source_text": "bad\x00text"},
+        {"title": "lone \ud800 surrogate"},
+        {"source_text": "lone \ud800 surrogate"},
+    ],
+)
+def test_unstorable_characters_rejected_and_session_usable(session, kwargs):
+    args = {"slug": "ok-slug", "title": "T", "source_text": "s"} | kwargs
+    with pytest.raises(ValueError):
+        create_roadmap(session, **args)
+    r = create_roadmap(session, slug="after-bad", title="Fine", source_text="fine")
+    assert r.slug == "after-bad"

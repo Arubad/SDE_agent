@@ -29,6 +29,13 @@ def create_roadmap(session: Session, *, slug: str, title: str, source_text: str)
         raise ValueError(
             f"Source text is too long: {len(source_text):,} characters (the limit is {MAX_SOURCE_CHARS:,})."
         )
+    for label, value in (("Title", title), ("Source text", source_text)):
+        if "\x00" in value:
+            raise ValueError(f"{label} must not contain NUL (null) characters.")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError(f"{label} contains characters that cannot be stored as valid text.") from None
     roadmap = Roadmap(slug=slug, title=title.strip(), source_text=source_text)
     session.add(roadmap)
     try:
