@@ -28,6 +28,10 @@ GEMINI_MODEL = _env("GEMINI_MODEL", "gemini-3.5-flash")
 # Which model writes the final answer: "haiku" (default) or "gemini"
 GENERATOR = _env("GENERATOR", "haiku").lower()
 
+# Where Claude calls go: "foundry" (default) | "fake" (offline, scripted) | "record" | "replay" (recordings dir)
+LLM_PROVIDER = _env("LLM_PROVIDER", "foundry").lower()
+LLM_RECORDINGS_DIR = _env("LLM_RECORDINGS_DIR", str(BACKEND_DIR / "eval" / "recordings"))
+
 # --- Retrieval ----------------------------------------------------------------
 QDRANT_URL = _env("QDRANT_URL")
 QDRANT_API_KEY = _env("QDRANT_API_KEY")

@@ -9,7 +9,7 @@ from typing import Any
 import anthropic
 from anthropic import AnthropicFoundry
 
-from backend.core import config
+from backend.core import config, fake_llm, llm_replay
 from backend.core.trace import current_trace
 
 
@@ -23,19 +23,53 @@ def _foundry_base_url() -> str:
     return base + "/"
 
 
-@lru_cache(maxsize=1)
-def haiku_client() -> AnthropicFoundry:
+def _require_foundry_credentials() -> None:
     if not config.FOUNDRY_API_KEY or not config.FOUNDRY_ENDPOINT:
         raise LLMUnavailable("Foundry credentials missing (TESTFORGE_FOUNDRY_API_KEY / TESTFORGE_FOUNDRY_ENDPOINT)")
+
+
+@lru_cache(maxsize=1)
+def _foundry_client() -> AnthropicFoundry:
+    _require_foundry_credentials()
     return AnthropicFoundry(api_key=config.FOUNDRY_API_KEY, base_url=_foundry_base_url(), max_retries=3, timeout=120)
 
 
-def haiku_async_client() -> anthropic.AsyncAnthropicFoundry:
-    """A new async client per call (streaming generation, agent loop); the caller closes it."""
-    if not config.FOUNDRY_API_KEY or not config.FOUNDRY_ENDPOINT:
-        raise LLMUnavailable("Foundry credentials missing (TESTFORGE_FOUNDRY_API_KEY / TESTFORGE_FOUNDRY_ENDPOINT)")
+def _foundry_async_client() -> anthropic.AsyncAnthropicFoundry:
+    _require_foundry_credentials()
     return anthropic.AsyncAnthropicFoundry(api_key=config.FOUNDRY_API_KEY, base_url=_foundry_base_url(),
                                            max_retries=2, timeout=120)
+
+
+def _unknown_provider() -> ValueError:
+    return ValueError(f"Unknown LLM_PROVIDER {config.LLM_PROVIDER!r} (foundry | fake | record | replay)")
+
+
+def haiku_client():
+    """The sync client for config.LLM_PROVIDER, chosen per call (only the Foundry client itself is cached)."""
+    provider = config.LLM_PROVIDER
+    if provider == "foundry":
+        return _foundry_client()
+    if provider == "fake":
+        return fake_llm.FakeAnthropic()
+    if provider == "record":
+        return llm_replay.RecordingClient(_foundry_client())
+    if provider == "replay":
+        return llm_replay.ReplayClient()
+    raise _unknown_provider()
+
+
+def haiku_async_client():
+    """A new async client per call (streaming generation, agent loop); the caller closes it."""
+    provider = config.LLM_PROVIDER
+    if provider == "foundry":
+        return _foundry_async_client()
+    if provider == "fake":
+        return fake_llm.FakeAsyncAnthropic()
+    if provider == "record":
+        return llm_replay.AsyncRecordingClient(_foundry_async_client())
+    if provider == "replay":
+        return llm_replay.AsyncReplayClient()
+    raise _unknown_provider()
 
 
 def _record_usage(span, response) -> None:
