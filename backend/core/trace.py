@@ -47,6 +47,7 @@ class Trace:
         self.id = uuid.uuid4().hex[:12]
         self.name = name
         self.t0 = time.perf_counter()
+        self.wall_t0: float = time.time()
         self.spans: list[Span] = []
         self.llm_calls = 0
 
