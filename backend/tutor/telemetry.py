@@ -8,7 +8,12 @@ from typing import Any
 from opentelemetry import trace as otel_trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
+from opentelemetry.sdk.trace.export import (
+    BatchSpanProcessor,
+    SimpleSpanProcessor,
+    SpanExporter,
+    SpanExportResult,
+)
 from opentelemetry.trace import Status, StatusCode
 
 from backend.core.redact import redact_obj
@@ -26,17 +31,60 @@ def _warn_once(msg: str, exc: BaseException | None = None) -> None:
         log.warning("%s%s", msg, f": {type(exc).__name__}: {exc}" if exc else "")
 
 
+def _reset_warning_state() -> None:
+    global _warned
+    _warned = False
+
+
+class _GuardedExporter(SpanExporter):
+    """Delegates to a real exporter; never raises and logs one concise warning for the first failure."""
+
+    def __init__(self, inner: SpanExporter):
+        self._inner = inner
+        self._warned = False
+
+    def export(self, spans) -> SpanExportResult:
+        try:
+            result = self._inner.export(spans)
+            if result == SpanExportResult.SUCCESS:
+                return result
+            err = None
+        except Exception as e:
+            err = e
+        if not self._warned:
+            self._warned = True
+            log.warning(
+                "OpenTelemetry export failed (further failures are not logged)%s",
+                f": {type(err).__name__}: {err}" if err else "",
+            )
+        return SpanExportResult.FAILURE
+
+    def shutdown(self) -> None:
+        try:
+            self._inner.shutdown()
+        except Exception:
+            pass
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        try:
+            return self._inner.force_flush(timeout_millis)
+        except Exception:
+            return False
+
+
 def setup_tracing(endpoint: str | None, *, service_name: str = "roadmap-tutor", exporter=None):
     if exporter is None and not endpoint:
         return None
     provider = TracerProvider(resource=Resource.create({"service.name": service_name}))
     if exporter is not None:
-        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        provider.add_span_processor(SimpleSpanProcessor(_GuardedExporter(exporter)))
     else:
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
+        # The OTLP exporter logs every failed batch itself (with tracebacks); the guard logs once instead.
+        logging.getLogger("opentelemetry.exporter.otlp").setLevel(logging.CRITICAL)
         provider.add_span_processor(
-            BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint, timeout=_EXPORT_TIMEOUT_S))
+            BatchSpanProcessor(_GuardedExporter(OTLPSpanExporter(endpoint=endpoint, timeout=_EXPORT_TIMEOUT_S)))
         )
     return provider
 
