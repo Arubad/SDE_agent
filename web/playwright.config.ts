@@ -20,6 +20,8 @@ function server(port: number, database: string, extraEnv: Record<string, string>
       DATABASE_URL: `${pgBase}/${database}`,
       WEB_DIST: path.join(webDir, "dist"),
       LLM_PROVIDER: "fake",
+      // backend/.env would otherwise override these values (config loads it with override=True).
+      SKIP_DOTENV: "1",
       ...extraEnv,
     },
   };
@@ -37,6 +39,9 @@ export default defineConfig({
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: [
     server(8765, "tutor_e2e_main", { PUBLIC_MODE: "false" }),
+    // Wrong-passcode lockout lives in the server's memory (5 failures per IP per 15 minutes). A reused
+    // public server (reuseExistingServer, local only) keeps that state between runs; passcode.spec.ts
+    // makes exactly one wrong attempt per run.
     server(8766, "tutor_e2e_public", { PUBLIC_MODE: "true", PREMIUM_PASSCODE: "e2e-pass-123" }),
   ],
 });

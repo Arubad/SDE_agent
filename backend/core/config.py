@@ -8,7 +8,9 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 REPO_DIR = BACKEND_DIR.parent
 # .env wins over the shell locally (stale placeholders like GEMINI_API_KEY="..." are common);
 # on HF Spaces there is no .env file, so Space secrets (env vars) are used as-is.
-load_dotenv(BACKEND_DIR / ".env", override=True)
+# SKIP_DOTENV=1 keeps the process env authoritative (the Playwright E2E servers set it).
+if os.getenv("SKIP_DOTENV") != "1":
+    load_dotenv(BACKEND_DIR / ".env", override=True)
 
 
 def _env(name: str, default: str = "") -> str:
