@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from backend.core.cost import span_cost
+from backend.core.redact import redact_obj
 
 _current: contextvars.ContextVar["Trace | None"] = contextvars.ContextVar("current_trace", default=None)
 
@@ -86,7 +87,7 @@ class Trace:
         }
 
     def log(self) -> None:
-        print("[TRACE] " + json.dumps(self.summary(), default=str), flush=True)
+        print("[TRACE] " + json.dumps(redact_obj(self.summary()), default=str), flush=True)
 
 
 def current_trace() -> Trace:
