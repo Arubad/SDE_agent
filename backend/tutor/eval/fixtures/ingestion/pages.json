@@ -1,0 +1,14 @@
+{
+  "https://kubernetes.io/docs/concepts/": {
+    "status": 200,
+    "content_type": "text/html",
+    "file": "k8s-docs-concepts.html",
+    "headers": {}
+  },
+  "https://kubernetes.io/docs/tutorials/": {
+    "status": 200,
+    "content_type": "text/html",
+    "file": "k8s-docs-tutorials.html",
+    "headers": {}
+  }
+}

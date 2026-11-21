@@ -80,6 +80,8 @@ jobs:
           pip install -r requirements-platform.txt pytest
       - name: "Platform tests (Postgres required: DB tests fail instead of skipping)"
         run: python -m pytest backend/tests backend/tutor/tests -q
+      - name: "Ingestion eval (--ci: committed fixtures, hash embedder, no network or model)"
+        run: python -m backend.tutor.eval.ingestion_eval --ci --out-dir "$RUNNER_TEMP/ingestion-eval"
 
   web:
     runs-on: ubuntu-latest

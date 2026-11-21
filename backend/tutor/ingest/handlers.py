@@ -271,6 +271,18 @@ def _embedder(ctx):
     return ctx.index.embedder if ctx.index is not None else HashEmbedder()
 
 
+RAW_MAX_CUES, RAW_MAX_COMMENTS, RAW_MAX_TEXT = 12000, 20, 5000
+
+
+def _raw_video(meta, comments: list[str], cues) -> dict:
+    """What the eval's capture tool needs to rebuild a fixture (description, creator chapters, top comments, cues),
+    kept in Document.meta['raw'], bounded: <= RAW_MAX_CUES cues, RAW_MAX_COMMENTS comments, RAW_MAX_TEXT chars each."""
+    return {"description": meta.description[:RAW_MAX_TEXT],
+            "chapters": [{"start_s": c.start_s, "title": c.title} for c in meta.chapters],
+            "comments": [c[:RAW_MAX_TEXT] for c in comments[:RAW_MAX_COMMENTS]],
+            "cues": [[c.start, c.dur, c.text] for c in cues[:RAW_MAX_CUES]]}
+
+
 def video(ctx, job: Job) -> dict:
     """Meta, transcript, chapters and the Markdown document in one job (the steps share in-memory state)."""
     p = job.payload
@@ -295,7 +307,8 @@ def video(ctx, job: Job) -> dict:
                     markdown=video_document(meta, route, cues, seg_route, chapters), reason=reason,
                     meta={"video_id": vid, "channel": meta.channel, "duration_s": meta.duration_s,
                           "transcript_route": route, "segment_route": seg_route, "reason": reason,
-                          "chapters": len(chapters), "playlist_id": p.get("playlist_id")})
+                          "chapters": len(chapters), "playlist_id": p.get("playlist_id"),
+                          "raw": _raw_video(meta, comments, cues)})
     _chunk(ctx, job, res, doc_id, *(("retry", retry, job.id) if retry else ()))
     return {"transcript_route": route, "segment_route": seg_route, "reason": reason}
 

@@ -169,6 +169,7 @@ def test_end_to_end_fixture_roadmap(engine, tmp_path, clock):
     videos = [d for d in _docs(engine, rid) if d.kind == "video"]
     assert len(videos) == 5
     assert all(d.status == "ok" and d.meta["segment_route"] for d in videos)
+    assert all("cues" in d.meta["raw"] and "description" in d.meta["raw"] for d in videos)  # eval capture reads these
     nocaps = next(d for d in videos if d.meta["video_id"] == "nocaps00001")
     assert nocaps.reason == "no_captions" and nocaps.meta["transcript_route"] is None
     with Session(engine) as s:

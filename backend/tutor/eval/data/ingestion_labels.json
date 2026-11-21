@@ -1,0 +1,14 @@
+{
+  "_note": "PLACEHOLDER so `--ci` runs: it points only at the committed kubernetes.io stand-in fixtures. The live run (Task 15 step 5) replaces this file with labels for the owner's Kubernetes roadmap (>= 6 pages, ~10 videos). Videos here are cached-only, so they are reported as `skipped: not cached` until captured.",
+  "pages": [
+    {"url": "https://kubernetes.io/docs/concepts/", "expected_videos": [], "expected_playlists": [],
+     "must_contain": ["smallest deployable unit", "control plane"], "must_not_contain": ["cookie"]},
+    {"url": "https://kubernetes.io/docs/tutorials/", "expected_videos": [], "expected_playlists": [],
+     "must_contain": ["rolling update"], "must_not_contain": ["Sign in"]}
+  ],
+  "videos": [
+    {"video_id": "kube000001a", "expected_route": "creator",
+     "creator_chapters": [{"start_s": 0, "title": "Intro"}, {"start_s": 30, "title": "Pods"},
+                          {"start_s": 60, "title": "Services"}]}
+  ]
+}
