@@ -9,6 +9,7 @@ The loop knows nothing about FastAPI or MCP: tools, the safety check and (in tes
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -20,7 +21,7 @@ from backend.core.llm import (LLMUnavailable, _record_usage, cache_kwargs, haiku
                               system_param)
 from backend.core.trace import Trace
 
-ToolCaller = Callable[[str, dict], Awaitable[dict]]          # {"passages": [...]} or {"error": "..."}
+ToolCaller = Callable[[str, dict], Awaitable[dict]]  # {"passages": [...]}, {"data": <JSON>} or {"error": "..."}
 CallCheck = Callable[[str, dict, set[str]], "str | None"]     # (name, args, seen_doc_ids) -> refusal reason
 ModelTurn = Callable[[list[dict], bool], Awaitable[Any]]      # (messages, allow_tools) -> Message-like
 Emit = Callable[[dict], Awaitable[None]]
@@ -107,6 +108,11 @@ async def run_tool_loop(messages: list[dict], *, system: str, tool_defs: list[di
                     tool_calls.append({"name": u.name, "args": args, "ok": False, "refused": False})
                     results.append({"type": "tool_result", "tool_use_id": u.id, "is_error": True,
                                     "content": [_text_block(str(out["error"]))]})
+                    continue
+                if "data" in out:  # plain data: one JSON text block, no passages (the demo's tools never use it)
+                    tool_calls.append({"name": u.name, "args": args, "ok": True, "refused": False})
+                    results.append({"type": "tool_result", "tool_use_id": u.id,
+                                    "content": [_text_block(json.dumps(out["data"], sort_keys=True))]})
                     continue
                 found = out.get("passages") or []
                 tool_calls.append({"name": u.name, "args": args, "ok": True, "refused": False})
