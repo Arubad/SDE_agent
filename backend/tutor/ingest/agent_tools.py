@@ -38,24 +38,46 @@ from backend.tutor.models import AgentAction, Document, Job, Resource, Roadmap
 
 log = logging.getLogger(__name__)
 TAG = "untrusted_web_content"
-# any "<" that opens something starting "untrusted" (closing, spaced or Markdown-escaped forms such as
-# "\</untrusted\_web\_content>" included) loses its bracket
-_TAG_RE = re.compile(r"<(?=[\s/\\]*untrusted)", re.I)
 MAX_RESULTS, MAX_HEADINGS, PEEK_CHARS, MAX_LINKS, MAX_PROPOSALS = 8, 40, 1500, 50, 3
 CATEGORIES = ("general", "videos")
 NOT_ALLOWED = "URL not allowed: not from a search result or the roadmap"
 
 
+_SKIP = re.compile(r"[\s/\\]*")
+_WRAPPED = re.compile(r"\s*<" + TAG + r">\s*(.*?)\s*</" + TAG + r">\s*", re.S)
+
+
 def _plain(text: str) -> str:
-    """NFKC (fullwidth "＜" becomes "<") without format characters (zero-width spaces, joiners, bidi marks), so
-    disguised copies of the tag are matched and escaped too."""
-    return "".join(ch for ch in unicodedata.normalize("NFKC", text) if unicodedata.category(ch) != "Cf")
+    """For MATCHING only: NFKC (fullwidth letters and brackets become ASCII) without format characters (Cf:
+    zero-width spaces, joiners, bidi marks) or nonspacing marks (Mn: combining marks, variation selectors)."""
+    return "".join(ch for ch in unicodedata.normalize("NFKC", text) if unicodedata.category(ch) not in ("Cf", "Mn"))
+
+
+def _escape(text: str) -> str:
+    """Replace every bracket that opens a disguised copy of the tag (a "<", or anything NFKC turns into "<",
+    followed after whitespace, slashes, backslashes, Cf or Mn characters by "untrusted", any case or width) with
+    "&lt;". Every other character is kept exactly as it was, so a wrapped URL still equals the allowed one."""
+    out = []
+    for i, ch in enumerate(text):
+        if unicodedata.normalize("NFKC", ch) == "<":
+            rest = _plain(text[i + 1:i + 120])
+            if rest[_SKIP.match(rest).end():].lower().startswith("untrusted"):
+                out.append("&lt;")
+                continue
+        out.append(ch)
+    return "".join(out)
 
 
 def wrap(text: str) -> str:
     """Untrusted web text, fenced; an opening or closing copy of the tag inside it is escaped."""
-    body = _TAG_RE.sub("&lt;", _plain(str(text or "")))
-    return f"<{TAG}>{body}</{TAG}>"
+    return f"<{TAG}>{_escape(str(text or ''))}</{TAG}>"
+
+
+def unwrap(value):
+    """A URL passed back by the model as it was shown, wrapper included: strip one exact wrapper."""
+    if isinstance(value, str) and (m := _WRAPPED.fullmatch(value)):
+        return m.group(1)
+    return value
 
 
 def _str(schema_desc: str) -> dict:
@@ -271,12 +293,24 @@ class _Tools:
         return None
 
     def check_call(self, name: str, args: dict, seen_doc_ids: set[str]) -> str | None:
+        args = self._args(args)
         reason = self.refusal(name, args)
         if reason is not None:
             self.log(name, args, "refused", reason)
         return reason
 
+    @staticmethod
+    def _args(args: dict) -> dict:
+        """URL arguments without the untrusted wrapper they were shown in (validation happens after this)."""
+        out = dict(args)
+        if "url" in out:
+            out["url"] = unwrap(out["url"])
+        if isinstance(out.get("urls"), list):
+            out["urls"] = [unwrap(u) for u in out["urls"]]
+        return out
+
     async def call_tool(self, name: str, args: dict) -> dict:
+        args = self._args(args)
         reason = self.refusal(name, args)  # defence in depth: the tool checks again
         if reason is not None:
             self.log(name, args, "refused", reason)

@@ -61,7 +61,12 @@ def public_resolver(host: str) -> list[str]:
     return ["93.184.216.34"]
 
 
+_NAT64 = (ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("64:ff9b:1::/48"))  # reach IPv4 inside
+
+
 def _is_public(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if isinstance(addr, ipaddress.IPv6Address) and any(addr in net for net in _NAT64):
+        return False  # Python calls NAT64 global, but it translates to any IPv4 address, private ones included
     if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
         addr = addr.ipv4_mapped
     return addr.is_global and not (addr.is_loopback or addr.is_link_local or addr.is_private or addr.is_reserved

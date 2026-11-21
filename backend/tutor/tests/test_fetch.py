@@ -445,7 +445,8 @@ def test_redirect_to_metadata_address_is_refused_before_the_request():
     assert not any("169.254.169.254" in u for u in seen)
 
 
-@pytest.mark.parametrize("addrs", [["10.0.0.5"], ["93.184.216.34", "127.0.0.1"], ["::1"], ["::ffff:10.1.2.3"]])
+@pytest.mark.parametrize("addrs", [["10.0.0.5"], ["93.184.216.34", "127.0.0.1"], ["::1"], ["::ffff:10.1.2.3"],
+                                   ["64:ff9b::a9fe:a9fe"], ["64:ff9b:1::a00:1"]])
 def test_hostname_resolving_to_private_address_is_refused(addrs):
     seen = []
     f, _ = make_fetcher(lambda req: seen.append(str(req.url)) or html(LONG), interval=0, resolver=lambda h: addrs)
@@ -454,7 +455,7 @@ def test_hostname_resolving_to_private_address_is_refused(addrs):
 
 
 @pytest.mark.parametrize("url", ["http://127.0.0.1/x", "http://2130706433/x", "http://localhost/x",
-                                 "http://[::1]/x", "http://10.1.1.1/x"])
+                                 "http://[::1]/x", "http://10.1.1.1/x", "http://[64:ff9b::a9fe:a9fe]/x"])
 def test_private_literals_are_refused_even_in_fixture_mode(url):
     seen = []
     f, _ = make_fetcher(lambda req: seen.append(str(req.url)) or html(LONG), interval=0)
