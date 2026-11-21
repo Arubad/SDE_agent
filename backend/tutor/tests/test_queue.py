@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from backend.tutor.jobs import queue
 from backend.tutor.jobs.queue import PermanentError, RetryableError, job_key
-from backend.tutor.jobs.worker import JobContext, WorkerPool, run_one, run_until_idle
+from backend.tutor.jobs.worker import JobContext, WorkerPool, reap_and_settle, run_one, run_until_idle
 from backend.tutor.models import Job, Roadmap
 
 
@@ -91,17 +91,17 @@ def test_failure_backs_off_then_dead_letters(engine, rid, fake_clock):
     t0 = fake_clock["now"]
     j = queue.claim(engine, "w", roadmap_id=rid)
     assert j.id == jid and j.attempts == 1
-    assert queue.fail(engine, jid, "boom") == "queued"
+    assert queue.fail(engine, jid, "boom", worker_id="w") == "queued"
     row = _get(engine, jid)
     assert row.status == "queued"
     assert 8 <= (row.not_before - t0).total_seconds() <= 12
     assert queue.claim(engine, "w", roadmap_id=rid) is None  # still backing off
     fake_clock["now"] = row.not_before + timedelta(seconds=1)
     assert queue.claim(engine, "w", roadmap_id=rid).attempts == 2
-    queue.fail(engine, jid, "boom")
+    queue.fail(engine, jid, "boom", worker_id="w")
     fake_clock["now"] += timedelta(seconds=1000)
     assert queue.claim(engine, "w", roadmap_id=rid).attempts == 3
-    assert queue.fail(engine, jid, "boom") == "dead"
+    assert queue.fail(engine, jid, "boom", worker_id="w") == "dead"
     assert _get(engine, jid).status == "dead"
 
 
@@ -112,7 +112,7 @@ def test_backoff_is_capped():
 def test_error_is_redacted(engine, rid):
     (jid,) = _add(engine, rid)
     queue.claim(engine, "w", roadmap_id=rid)
-    queue.fail(engine, jid, "contact bob@example.com failed")
+    queue.fail(engine, jid, "contact bob@example.com failed", worker_id="w")
     err = _get(engine, jid).error
     assert "bob@example.com" not in err and "[email]" in err
 
@@ -240,3 +240,38 @@ def test_job_span_is_exported_when_provider_configured(engine, rid, ctx):
     _add(engine, rid)
     run_one(ctx, {"t": lambda c, j: None}, "w", tracer_provider=provider, roadmap_id=rid)
     assert "job:t" in {s.name for s in exporter.get_finished_spans()}
+
+
+def test_poison_job_is_dead_lettered_on_expiry_and_settles(engine, rid, fake_clock):
+    (jid,) = _add(engine, rid, max_attempts=2)
+    calls = []
+    for n in (1, 2):
+        assert queue.claim(engine, "w", roadmap_id=rid).attempts == n
+        fake_clock["now"] += timedelta(seconds=601)
+        reap_and_settle(engine, calls.append)
+        if n == 1:
+            assert _get(engine, jid).status == "queued" and calls == []
+    row = _get(engine, jid)
+    assert row.status == "dead" and row.error == "lease expired"
+    assert _status(engine, rid) == "finalizing" and calls == [rid]
+    reap_and_settle(engine, calls.append)
+    assert calls == [rid]
+
+
+def test_stale_worker_cannot_complete_or_fail(engine, rid, fake_clock):
+    (jid,) = _add(engine, rid)
+    queue.claim(engine, "A", roadmap_id=rid)
+    fake_clock["now"] += timedelta(seconds=601)
+    assert queue.requeue_expired(engine) >= 1
+    assert queue.claim(engine, "B", roadmap_id=rid).locked_by == "B"
+    assert queue.complete(engine, jid, {"x": 1}, worker_id="A") is False
+    assert queue.fail(engine, jid, "late", worker_id="A") is None
+    row = _get(engine, jid)
+    assert row.status == "running" and row.locked_by == "B" and row.result is None and row.error is None
+    assert queue.complete(engine, jid, worker_id="B") is True
+
+
+def test_empty_handlers_claims_nothing(engine, rid, ctx):
+    (jid,) = _add(engine, rid)
+    assert run_one(ctx, {}, "w", roadmap_id=rid) is False
+    assert _get(engine, jid).status == "queued"

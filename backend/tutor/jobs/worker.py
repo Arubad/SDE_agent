@@ -59,6 +59,15 @@ def _maybe_settle(engine: Engine, roadmap_id: uuid.UUID, on_settled: SettledHook
         log.exception("settled hook failed for roadmap %s", roadmap_id)
 
 
+def reap_and_settle(engine: Engine, on_settled: SettledHook | None = None, lease_s: int = 600) -> int:
+    """Requeue/dead-letter expired leases, then run the settle check for roadmaps that lost a job to dead-lettering.
+    Returns the requeued count."""
+    requeued, dead_roadmaps = queue.reap_expired(engine, lease_s)
+    for rid in dead_roadmaps:
+        _maybe_settle(engine, rid, on_settled)
+    return requeued
+
+
 def run_one(
     ctx: JobContext,
     handlers: dict[str, Handler],
@@ -68,7 +77,9 @@ def run_one(
     tracer_provider=None,
     roadmap_id: uuid.UUID | None = None,
 ) -> bool:
-    job = queue.claim(ctx.engine, worker_id, types=set(handlers) or None, roadmap_id=roadmap_id)
+    if not handlers:
+        return False
+    job = queue.claim(ctx.engine, worker_id, types=set(handlers), roadmap_id=roadmap_id)
     if job is None:
         return False
     trace = start_trace(f"job:{job.type}")
@@ -78,11 +89,12 @@ def run_one(
             with trace.span(f"job:{job.type}", kind="step", job_id=job.id, attempt=job.attempts):
                 handler = handlers[job.type]
                 result = handler(ctx, job)
-            queue.complete(ctx.engine, job.id, result)
+            if not queue.complete(ctx.engine, job.id, result, worker_id=worker_id):
+                status = None  # lease lost: another worker owns the job now
         except PermanentError as e:
-            status = queue.fail(ctx.engine, job.id, f"{type(e).__name__}: {e}", retryable=False)
+            status = queue.fail(ctx.engine, job.id, f"{type(e).__name__}: {e}", retryable=False, worker_id=worker_id)
         except Exception as e:  # RetryableError and anything else
-            status = queue.fail(ctx.engine, job.id, f"{type(e).__name__}: {e}", retryable=True)
+            status = queue.fail(ctx.engine, job.id, f"{type(e).__name__}: {e}", retryable=True, worker_id=worker_id)
         if status in ("done", "dead"):
             _maybe_settle(ctx.engine, job.roadmap_id, on_settled)
     finally:
@@ -138,7 +150,7 @@ class WorkerPool:
             try:
                 if reaper and time.monotonic() - last_requeue >= REQUEUE_EVERY_S:
                     last_requeue = time.monotonic()
-                    queue.requeue_expired(self.ctx.engine)
+                    reap_and_settle(self.ctx.engine, self.on_settled)
                 if run_one(self.ctx, self.handlers, worker_id, on_settled=self.on_settled,
                            tracer_provider=self.tracer_provider):
                     continue
