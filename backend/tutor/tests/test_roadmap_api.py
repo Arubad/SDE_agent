@@ -195,6 +195,7 @@ def test_events_unknown_roadmap_404(client):
 
 
 def test_events_require_passcode(engine, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "PREMIUM_PASSCODE", "pw123456")
     monkeypatch.setattr(access, "check_passcode", lambda code, key: code == "pw")
     with session_scope(engine) as s:
         s.execute(text("DELETE FROM roadmaps"))
