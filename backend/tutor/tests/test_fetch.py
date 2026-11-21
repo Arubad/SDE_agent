@@ -265,6 +265,20 @@ def test_searxng_parses_results_and_sends_category():
     assert (out[0].title, out[0].url, out[0].snippet, out[0].engine) == ("T", "https://x.test/", "snip", "duckduckgo")
 
 
+def test_searxng_drops_hostless_and_duplicate_urls():
+    def handler(req):
+        return httpx.Response(200, json={"results": [
+            {"title": "bad", "url": "http:///go/v1/x", "engine": "brave"},
+            {"title": "ftp", "url": "ftp://x.test/a", "engine": "brave"},
+            {"title": "A", "url": "https://k8s.test/docs", "engine": "brave"},
+            {"title": "A dup", "url": "https://k8s.test/docs", "engine": "duckduckgo"},
+            {"title": "B", "url": "https://b.test/", "engine": "brave"}]})
+
+    s = SearxngSearch(httpx.Client(transport=httpx.MockTransport(handler)), "http://s.test/")
+    out = s.search("k8s")
+    assert [(r.title, r.url) for r in out] == [("A", "https://k8s.test/docs"), ("B", "https://b.test/")]
+
+
 def test_data_api_video_meta_comments_and_playlist():
     def handler(req):
         p = req.url.path

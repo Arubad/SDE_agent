@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 from sqlalchemy import Engine
@@ -94,10 +94,19 @@ class SearxngSearch:
             items = resp.json().get("results", [])
         except (httpx.HTTPError, ValueError) as e:
             raise SearchUnavailable(f"SearXNG at {self._base} is unavailable: {e}") from e
-        return [
-            SearchResult(r.get("title", ""), r["url"], r.get("content", ""), r.get("engine", ""))
-            for r in items if r.get("url")
-        ]
+        out, seen = [], set()
+        for r in items:
+            url = r.get("url") or ""
+            try:
+                parsed = urlsplit(url)
+                ok = parsed.scheme in ("http", "https") and bool(parsed.hostname)
+            except ValueError:
+                ok = False
+            if not ok or url in seen:  # brave sometimes returns host-less redirects like http:///go/v1/...
+                continue
+            seen.add(url)
+            out.append(SearchResult(r.get("title", ""), url, r.get("content", ""), r.get("engine", "")))
+        return out
 
 
 _ISO_DURATION = re.compile(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$")

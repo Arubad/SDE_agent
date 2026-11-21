@@ -62,7 +62,6 @@ def test_ingestion_eval_ci_mode_runs(tmp_path):
 
 
 def test_boundary_f1_tolerance_and_hiding():
-    assert E.boundary_f1([0, 100, 200], [0, 125, 400]) == (1 / 2) if False else True
     # zero is trivially shared and ignored; one of two predicted within 30 s, one of two true found
     p, r, f = E.prf([100, 400], [100, 200], tol=30)
     assert (p, r) == (0.5, 0.5) and f == 0.5

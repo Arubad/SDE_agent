@@ -1,8 +1,9 @@
-# Self-hosted SearXNG for the roadmap tutor's resource resolver. Mounted read-only by compose.yaml.
+# Self-hosted SearXNG for the roadmap tutor's resource resolver. Engines: brave + duckduckgo (general; DuckDuckGo often CAPTCHAs self-hosted instances) and youtube. Mounted read-only by compose.yaml.
 # secret_key is deliberately absent: SearXNG reads it from the SEARXNG_SECRET environment variable.
 use_default_settings:
   engines:
     keep_only:
+      - brave           # DuckDuckGo often CAPTCHAs self-hosted instances, so brave backs up general search
       - duckduckgo
       - youtube
 
