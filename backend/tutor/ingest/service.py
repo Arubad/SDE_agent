@@ -66,12 +66,18 @@ def validate_crawl_url(url: str) -> None:
             return  # an ordinary hostname
     if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
         addr = addr.ipv4_mapped
-    if (addr.is_loopback or addr.is_link_local or addr.is_private or addr.is_reserved or addr.is_multicast
-            or addr.is_unspecified):
+    if (not addr.is_global or addr.is_loopback or addr.is_link_local or addr.is_private or addr.is_reserved
+            or addr.is_multicast or addr.is_unspecified):  # not is_global also covers CGNAT 100.64.0.0/10
         raise ValueError(f"URL points at a private or reserved address: {url!r}")
 
 
 def approve(session: Session, roadmap: Roadmap, spec: RoadmapSpec, choices: dict[str, str | None]) -> None:
+    """Write Resource rows and enqueue ingest jobs, then set status `ingesting`.
+
+    Per resource: a key in `choices` with a URL uses that URL; an explicit `None` -> `skipped`/`no_url`; an absent
+    key falls back to the spec's own `url` (user-authored, it survives normalisation only if it appears in the
+    source text) if any, else `skipped`/`no_url`. Every URL used is validated (`validate_crawl_url`).
+    """
     if roadmap.status != "parsed":
         raise Conflict(f"Roadmap is '{roadmap.status}'; it can only be approved while parsed.")
     resources = [(stage.id, r) for stage in spec.stages for r in stage.resources]
@@ -79,11 +85,13 @@ def approve(session: Session, roadmap: Roadmap, spec: RoadmapSpec, choices: dict
     unknown = sorted(set(choices) - known)
     if unknown:
         raise ValueError(f"Unknown resource id(s) in choices: {', '.join(unknown)}")
-    # An explicit None skips the resource; an absent key falls back to the URL given in the source text.
-    chosen = {r.id: (choices[r.id] if r.id in choices else r.url) for _, r in resources}
-    for url in chosen.values():
+    chosen: dict[str, str | None] = {}
+    for _, r in resources:
+        url = (choices[r.id] if r.id in choices else r.url)
+        url = url.strip() if url else None
         if url:
-            validate_crawl_url(url)
+            validate_crawl_url(url)  # the stripped URL is what gets validated and stored
+        chosen[r.id] = url or None
 
     roadmap.spec = spec.model_dump(mode="json")
     rows = []

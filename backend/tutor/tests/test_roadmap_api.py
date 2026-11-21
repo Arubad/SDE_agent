@@ -119,7 +119,7 @@ def test_parse_after_approve_conflicts(client):
 
 @pytest.mark.parametrize("url", [
     "http://127.0.0.1/x", "http://10.0.0.5/", "file:///etc/passwd", "http://localhost:8080/", "http://[::1]/",
-    "http://169.254.169.254/latest", "http://192.168.1.1/", "http://0.0.0.0/", "ftp://example.test/x", "not a url",
+    "http://169.254.169.254/latest", "http://100.64.0.1/", "http://192.168.1.1/", "http://0.0.0.0/", "ftp://example.test/x", "not a url",
 ])
 def test_approve_rejects_unsafe_urls(client, url):
     slug = _create(client)
@@ -215,7 +215,8 @@ def test_report_gating(client, engine):
     slug = _create(client)
     assert client.get(f"/api/roadmaps/{slug}/report").status_code == 409
     _set_status(engine, slug, "ready")
-    assert client.get(f"/api/roadmaps/{slug}/report").status_code in (200, 501)
+    r = client.get(f"/api/roadmaps/{slug}/report")
+    assert r.status_code == 501 and r.json() == {"error": "Report not available yet"}  # until Task 10
 
 
 def test_workers_start_only_with_handlers(engine, tmp_path):
@@ -231,3 +232,52 @@ def test_workers_start_only_with_handlers(engine, tmp_path):
     with TestClient(create_app(s, engine=engine, handlers={"noop": lambda ctx, job: None})):
         assert len(workers()) == base + 1
     assert len(workers()) == base
+
+
+URL_SOURCE = "Learn Rust.\n\n## Basics\n\nRead https://doc.rust-lang.org/book/ first.\n"
+
+
+def _url_spec(*_a):
+    from backend.tutor.roadmap.parse import normalize_spec
+
+    def res(i, url):
+        return {"id": i, "title": f"Res {i}", "kind": "doc", "url": url, "url_hint": None, "query": i, "note": "",
+                "focus": [], "skill_ids": []}
+
+    raw = {"title": "Rust", "goals": [], "weekly_hours": None, "stages": [
+        {"id": "s", "title": "Basics", "timeframe": None, "summary": "", "skills": [],
+         "resources": [res("with-url", "https://doc.rust-lang.org/book/"), res("no-url", None)],
+         "practice_goals": []}]}
+    return normalize_spec(raw, URL_SOURCE)
+
+
+def _approve_url_case(client, monkeypatch, choices):
+    monkeypatch.setattr("backend.tutor.ingest.service.parse_roadmap", lambda text: _url_spec())
+    r = client.post("/api/roadmaps", json={"slug": "rust", "title": "Rust", "source_text": URL_SOURCE})
+    assert r.status_code == 201
+    parsed = _parse(client, "rust")
+    ids = [x["id"] for st in parsed["spec"]["stages"] for x in st["resources"]]
+    assert ids == ["res-with-url", "res-no-url"]
+    r = client.post("/api/roadmaps/rust/approve", json={"spec": parsed["spec"], "choices": choices})
+    assert r.status_code == 202, r.text
+    return {x["key"]: x for x in client.get("/api/roadmaps/rust").json()["resources"]}
+
+
+def test_absent_choice_falls_back_to_source_url(client, monkeypatch):
+    got = _approve_url_case(client, monkeypatch, {})
+    assert got["res-with-url"]["status"] == "pending" and got["res-with-url"]["url"] == "https://doc.rust-lang.org/book/"
+    assert got["res-no-url"]["status"] == "skipped" and got["res-no-url"]["reason"] == "no_url"
+    jobs = client.get("/api/roadmaps/rust").json()["jobs"]
+    assert jobs["ingest_resource"] == {"queued": 1}
+
+
+def test_explicit_null_skips_even_with_source_url(client, monkeypatch):
+    got = _approve_url_case(client, monkeypatch, {"res-with-url": None})
+    assert got["res-with-url"]["status"] == "skipped" and got["res-with-url"]["reason"] == "no_url"
+    assert got["res-with-url"]["url"] is None
+    assert "ingest_resource" not in client.get("/api/roadmaps/rust").json()["jobs"]
+
+
+def test_choice_url_is_stored_stripped(client, monkeypatch):
+    got = _approve_url_case(client, monkeypatch, {"res-no-url": "  https://example.test/x  "})
+    assert got["res-no-url"]["url"] == "https://example.test/x" and got["res-no-url"]["status"] == "pending"

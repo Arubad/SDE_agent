@@ -285,7 +285,9 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
                 return _error(409, f"Roadmap is '{r.status}'; the report is available once ingestion has settled.")
             try:  # Task 10 provides this module
                 from backend.tutor.ingest.report import build_report
-            except ImportError:
+            except ModuleNotFoundError as exc:
+                if exc.name != "backend.tutor.ingest.report":
+                    raise
                 return _error(501, "Report not available yet")
             return build_report(session, r)
 
