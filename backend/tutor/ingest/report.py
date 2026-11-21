@@ -204,7 +204,8 @@ def build_report(session: Session, roadmap: Roadmap) -> dict:
     agent, cost = _agent_section(session, roadmap.id)
     summary = video_summary(len(videos), segments, ok, by_route)
     if agent["runs"] or agent["actions"]:
-        summary += f"\nAgent: {len(agent['actions'])} actions over {len(agent['runs'])} rounds, ${cost:.3f}"
+        rounds = len({r["round"] for r in agent["runs"] if r["mode"] == "recover"})  # the plan run is not a round
+        summary += f"\nAgent: {len(agent['actions'])} actions over {rounds} rounds, ${cost:.3f}"
     return {
         "status": roadmap.status,
         "resources": out_res,

@@ -98,13 +98,30 @@ def round_cost(cost: float) -> float:
     return round(max(0.0, float(cost)), 6)
 
 
-def record_error(engine: Engine, roadmap_id, mode: str, round: int, error: Exception) -> None:
-    """A run that failed outside `run_ingest_agent`'s own handling (logged, never raised)."""
+def record_error(engine: Engine, roadmap_id, mode: str, round: int, error: Exception, *, steps: int = 0,
+                 cost: float = 0.0) -> None:
+    """A run that failed outside `run_ingest_agent`'s own handling (logged, never raised). `cost` is what the
+    run's model calls already spent, so the budget never loses it."""
     try:
-        _record_run(engine, roadmap_id, mode, round, stop="error", steps=0, actions=0, outcome="error",
-                    notes=f"agent error: {type(error).__name__}", cost=0.0)
+        _record_run(engine, roadmap_id, mode, round, stop="error", steps=steps, actions=0, outcome="error",
+                    notes=f"agent error: {type(error).__name__}", cost=cost)
     except Exception:
         log.exception("could not record the agent error for roadmap %s", roadmap_id)
+
+
+def brief_status(status: dict) -> dict:
+    """The user turn's view of kb_status: ids, statuses, counts and user-authored titles only. Every web-derived
+    string (URLs, agent-proposed titles, video ids) stays out; the kb_status tool returns them, wrapped."""
+    return {
+        "resources": [{"id": r["id"], "title": r["title"] if r["user_authored"] else None, "kind": r["kind"],
+                       "status": r["status"], "reason": r["reason"], "skills": r["skills"], "focus": r["focus"],
+                       "crawlable": r["crawlable"]} for r in status["resources"]],
+        "skills": status["skills"],
+        "skipped_count": len(status["skipped"]),
+        "videos_without_transcript": [v["document_id"] for v in status["videos_without_transcript"]],
+        "transcript_routes": status["transcript_routes"],
+        "budget_remaining_usd": status["budget_remaining_usd"],
+    }
 
 
 def user_turn(roadmap: Roadmap, mode: str, round: int, status: dict) -> str:
@@ -115,7 +132,8 @@ def user_turn(roadmap: Roadmap, mode: str, round: int, status: dict) -> str:
                                   for k in st.get("skills", [])]})
     head = f"Mode: {mode}" + (f" (round {round})" if mode == "recover" else "")
     return (f"{head}\nRoadmap: {roadmap.title}\n\nStages and skills:\n{json.dumps(stages, indent=1)}\n\n"
-            f"Knowledge-base status (kb_status):\n{json.dumps(status, indent=1, sort_keys=True)}")
+            f"Knowledge-base status (URLs and skipped pages: call kb_status):\n"
+            f"{json.dumps(brief_status(status), indent=1, sort_keys=True)}")
 
 
 def _actions_since(engine: Engine, roadmap_id, after_id: int) -> int:
@@ -172,7 +190,12 @@ def run_ingest_agent(ctx, roadmap_id, mode: str, round: int = 0) -> AgentRun:
         log.exception("ingestion agent (%s) failed for roadmap %s", mode, roadmap_id)
         stop, steps, notes, outcome = "error", trace.llm_calls, f"agent error: {type(e).__name__}", "error"
     cost = turn_cost(trace)
-    actions = _actions_since(engine, roadmap_id, last_id)
-    _record_run(engine, roadmap_id, mode, round, stop=stop, steps=steps, actions=actions, outcome=outcome,
-                notes=notes, cost=cost)
+    try:
+        actions = _actions_since(engine, roadmap_id, last_id)
+        _record_run(engine, roadmap_id, mode, round, stop=stop, steps=steps, actions=actions, outcome=outcome,
+                    notes=notes, cost=cost)
+    except Exception as e:  # the spend must still count against the budget
+        log.exception("could not record the agent run for roadmap %s", roadmap_id)
+        record_error(engine, roadmap_id, mode, round, e, steps=steps, cost=cost)
+        stop, actions = "error", 0
     return AgentRun(stop, steps, actions, round_cost(cost), notes[:NOTES_CHARS])

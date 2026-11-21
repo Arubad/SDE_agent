@@ -37,7 +37,7 @@ from backend.tutor.ingest.discover import _repo as parse_repo
 from backend.tutor.ingest.discover import discover, parse_youtube
 from backend.tutor.ingest.embed import HashEmbedder
 from backend.tutor.ingest.extract import extract_page
-from backend.tutor.ingest.fetch import FetchResult
+from backend.tutor.ingest.fetch import PRIVATE_ADDRESS, FetchResult
 from backend.tutor.ingest.index import index_document
 from backend.tutor.ingest.report import finalize_roadmap
 from backend.tutor.ingest.segment import choose_segments
@@ -138,8 +138,8 @@ def content_hash(fr: FetchResult) -> str:
 
 def _non_ok(ctx, job: Job, res: Resource, url: str, kind: str, fr: FetchResult, owner: bool) -> dict:
     """Record a fetch that did not succeed. Only `error` is retried; walls and denials are reported."""
-    if fr.outcome == "error" and job.attempts < job.max_attempts:
-        raise RetryableError(fr.reason or "fetch error")
+    if fr.outcome == "error" and job.attempts < job.max_attempts and fr.reason != PRIVATE_ADDRESS:
+        raise RetryableError(fr.reason or "fetch error")  # a private address will not become public on retry
     status = "failed" if fr.outcome == "error" else "skipped"
     _store(ctx.engine, res, url=url, kind=kind, owner=owner, title=url, status=status, reason=fr.outcome,
            meta={"detail": fr.reason, "http_status": fr.status})

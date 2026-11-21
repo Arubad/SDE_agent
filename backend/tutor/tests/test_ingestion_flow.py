@@ -487,3 +487,40 @@ def test_cli_ingest_report_recheck(engine, db_url, tmp_path, monkeypatch, capsys
     assert rep["resources"][0]["status"] == "done"
     main(["recheck", "cli"])
     assert json.loads(capsys.readouterr().out) == {"one": "ok"}
+
+
+def test_pipeline_redirect_to_metadata_address_is_refused(engine, tmp_path, clock):
+    import httpx
+
+    from backend.tutor.ingest.fetch import USER_AGENT, Fetcher, public_resolver
+
+    seen = []
+
+    def handler(req):
+        seen.append(str(req.url))
+        if req.url.path == "/robots.txt":
+            return httpx.Response(404)
+        return httpx.Response(302, headers={"location": "http://169.254.169.254/latest/meta-data/"})
+
+    ctx = _ctx(engine, _site(tmp_path / "net", {}))
+    ctx.net.fetcher = Fetcher(httpx.Client(transport=httpx.MockTransport(handler)), domain_interval_s=0,
+                              user_agent=USER_AGENT, resolver=public_resolver)
+    rid = _roadmap(engine, "ssrf", [("m", "doc", "https://flow.test/moved")])
+    _drain(ctx, rid, clock)
+    doc = _docs(engine, rid)[0]
+    assert (doc.status, doc.reason, doc.meta["detail"]) == ("failed", "error", "private_address")
+    assert not any("169.254.169.254" in u for u in seen)
+    with Session(engine) as s:  # refused, not retried: a private address does not become public
+        job = s.scalars(select(Job).where(Job.roadmap_id == rid, Job.type == "fetch_page")).one()
+        assert (job.status, job.attempts) == ("dead", 1)
+
+
+def test_pipeline_hostname_resolving_privately_is_refused(engine, tmp_path, clock):
+    site = _site(tmp_path / "net", {"https://internal.test/x": _page("X", _prose("Internal"))})
+    ctx = _ctx(engine, site)
+    ctx.net.fetcher._resolver = lambda host: ["10.0.0.7"]
+    rid = _roadmap(engine, "dns", [("x", "doc", "https://internal.test/x")])
+    _drain(ctx, rid, clock)
+    doc = _docs(engine, rid)[0]
+    assert (doc.status, doc.meta["detail"]) == ("failed", "private_address")
+    assert _resources(engine, rid)["x"].status == "skipped"

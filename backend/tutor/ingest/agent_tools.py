@@ -19,8 +19,9 @@ import copy
 import hashlib
 import logging
 import re
+import unicodedata
 import uuid
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session
@@ -45,9 +46,15 @@ CATEGORIES = ("general", "videos")
 NOT_ALLOWED = "URL not allowed: not from a search result or the roadmap"
 
 
+def _plain(text: str) -> str:
+    """NFKC (fullwidth "＜" becomes "<") without format characters (zero-width spaces, joiners, bidi marks), so
+    disguised copies of the tag are matched and escaped too."""
+    return "".join(ch for ch in unicodedata.normalize("NFKC", text) if unicodedata.category(ch) != "Cf")
+
+
 def wrap(text: str) -> str:
     """Untrusted web text, fenced; an opening or closing copy of the tag inside it is escaped."""
-    body = _TAG_RE.sub("&lt;", str(text or ""))
+    body = _TAG_RE.sub("&lt;", _plain(str(text or "")))
     return f"<{TAG}>{body}</{TAG}>"
 
 
@@ -122,17 +129,19 @@ def kb_status(session: Session, roadmap_id, settings, *, settled: bool) -> dict:
     out_res = []
     for r in sorted(resources, key=lambda r: r.key):
         status, reason = outcomes[r.id][:2] if r.id in outcomes else (r.status, r.reason)
-        out_res.append({"id": r.key, "title": r.title, "kind": r.kind, "url": r.url, "status": status,
+        out_res.append({"id": r.key, "title": wrap(r.title) if r.proposed_by == "agent" else r.title,
+                        "user_authored": r.proposed_by is None, "kind": r.kind,
+                        "url": wrap(r.url) if r.url else None, "status": status,
                         "reason": reason, "skills": list(r.skill_ids or []), "focus": list(r.focus or []),
                         "crawlable": report.is_crawlable(r)})
     skills = [{"id": k["id"], "title": k["title"], "chunks": chunks.get(k["id"], 0)}
               for st in (roadmap.spec or {}).get("stages", []) for k in st.get("skills", [])]
-    videos = [{"document_id": str(d.id), "video_id": (d.meta or {}).get("video_id"),
+    videos = [{"document_id": str(d.id), "video_id": wrap((d.meta or {}).get("video_id") or ""),
                "resource": by_id[d.resource_id].key if d.resource_id in by_id else None, "reason": d.reason}
               for docs in docs_by_res.values() for d in docs
               if d.kind == "video" and d.status == "ok" and not (d.meta or {}).get("transcript_route")]
-    skipped = sorted(({"url": u, "reason": why} for items in failures.values() for u, why in items),
-                     key=lambda x: (x["url"] or "", x["reason"] or ""))
+    skipped = [{"url": wrap(u or ""), "reason": why} for u, why in sorted(
+        ((u, why) for items in failures.values() for u, why in items), key=lambda x: (x[0] or "", x[1] or ""))]
     return {"resources": out_res, "skills": skills, "skipped": skipped[:50],
             "videos_without_transcript": sorted(videos, key=lambda v: v["document_id"]),
             "transcript_routes": list(settings.transcript_routes),
@@ -242,11 +251,14 @@ class _Tools:
                 return "unknown or non-crawlable resource_id"
             site, scheme, root = _site(res.url), urlsplit(res.url).scheme, _root(res.url)
         for u in urls:
-            path = urlsplit(u).path or "/"
-            dots = any(seg in (".", "..") for seg in path.split("/")) or "%2e" in path.lower()
-            if (safe_url(u) is None or _site(u) != site or urlsplit(u).scheme != scheme
-                    or not path.startswith(root) or dots):  # "/docs/../admin" is not under "/docs/"
-                return f"URL not allowed: {u[:200]!r} is outside the resource's site"
+            parts = urlsplit(u)
+            path = unquote(parts.path or "/")  # decoded once: "..%2fadmin" is a traversal too
+            dots = any(seg in (".", "..") for seg in re.split(r"[/\\]", path)) or "%2e" in path.lower()
+            if safe_url(u) is None or _site(u) != site or parts.scheme != scheme or dots:
+                return "URL not allowed: outside the resource's site"
+            # a URL the run has seen (search result, discovered link), or a plain page under the resource root
+            if safe_url(u) not in self.allowed and (not path.startswith(root) or parts.query):
+                return "URL not allowed: outside the resource's site"
         return None
 
     def refusal(self, name: str, args: dict) -> str | None:
@@ -272,7 +284,7 @@ class _Tools:
         try:
             out, summary = getattr(self, "t_" + name)(**{k: v for k, v in args.items() if isinstance(k, str)})
         except TypeError as e:
-            out, summary = {"error": f"bad arguments: {e}"[:300]}, "bad arguments"
+            out, summary = {"error": "bad arguments"}, "bad arguments"
         except Exception as e:  # a tool failure is a result for the model, never a crash of the job
             log.exception("agent tool %s failed", name)
             out, summary = {"error": f"{name} failed: {type(e).__name__}"}, type(e).__name__
@@ -302,7 +314,8 @@ class _Tools:
             if norm is None:
                 continue
             self.allowed.add(norm)
-            results.append({"title": wrap(r.title[:200]), "url": r.url, "snippet": wrap(r.snippet[:500])})
+            results.append({"title": wrap((r.title or "")[:200]), "url": wrap(r.url),
+                            "snippet": wrap((r.snippet or "")[:500])})
             if len(results) == MAX_RESULTS:
                 break
         return {"data": {"results": results}}, f"{len(results)} results"
@@ -311,9 +324,9 @@ class _Tools:
         host, site = _host(url), _site(url)
         fr = self.ctx.net.fetcher.get(url, url_guard=lambda hop: safe_url(hop) is not None and _site(hop) == site)
         if fr.outcome != "ok":
-            return {"error": f"could not open the page: {fr.outcome} ({fr.reason or fr.status})"[:300]}, ""
+            return {"error": f"could not open the page: {fr.outcome}"}, fr.outcome  # a code, never fetch text
         if fr.content_type and "html" not in fr.content_type:
-            return {"data": {"url": fr.url, "content_type": fr.content_type, "note": "not an HTML page"}}, "non-html"
+            return {"data": {"url": wrap(fr.url), "note": "not an HTML page"}}, "non-html"
         html = fr.body.decode("utf-8", "replace")
         page = extract_page(html, fr.url)
         found = discover(html, fr.url, root="/")
@@ -322,7 +335,7 @@ class _Tools:
         headings = [ln for ln in page.markdown.splitlines() if ln.startswith("#")][:MAX_HEADINGS]
         counts = {"links": len(found.links), "videos": len(found.videos), "playlists": len(found.playlists),
                   "pdfs": len(found.pdfs), "repos": len(found.repos)}
-        return {"data": {"url": fr.url, "title": wrap(page.title), "headings": wrap("\n".join(headings)),
+        return {"data": {"url": wrap(fr.url), "title": wrap(page.title), "headings": wrap("\n".join(headings)),
                          "counts": counts, "links": wrap("\n".join(links)),
                          "text": wrap(page.markdown[:PEEK_CHARS])}}, f"peeked {host}: {len(links)} links"
 
@@ -348,7 +361,8 @@ class _Tools:
 
     def t_retry_transcript(self, video_document_id, route):
         if route not in self.settings.transcript_routes:
-            return {"error": f"transcript route {str(route)[:40]!r} is not enabled"}, ""
+            return {"error": "that transcript route is not enabled; enabled routes: "
+                             + ", ".join(self.settings.transcript_routes)}, ""
         try:
             doc_id = uuid.UUID(str(video_document_id))
         except ValueError:
@@ -362,7 +376,7 @@ class _Tools:
             vid, res_id, playlist = doc.meta.get("video_id"), doc.resource_id, doc.meta.get("playlist_id")
         self.ctx.enqueue("video", {"resource_id": str(res_id), "video_id": vid, "route": route,
                                    "playlist_id": playlist}, ("retry", vid, route, self.round), roadmap_id=self.rid)
-        return {"data": {"enqueued": "video", "video_id": vid, "route": route}}, f"retry {vid} via {route}"
+        return {"data": {"enqueued": "video", "video_document_id": str(doc_id), "route": route}}, f"retry via {route}"
 
     def t_replace_url(self, resource_id, url, reason):
         with Session(self.engine) as s:
@@ -387,7 +401,7 @@ class _Tools:
             res.stats = {**(res.stats or {}), "pages": ok_pages}
             queue.enqueue(s, type="ingest_resource", roadmap_id=self.rid, payload={"resource_id": str(res.id)},
                           key=queue.job_key("ingest_resource", self.rid, res.key, "replace", url))
-        return {"data": {"replaced": resource_id, "url": url}}, f"replaced {resource_id} -> {_host(url)}"
+        return {"data": {"replaced": resource_id, "url": wrap(url)}}, f"replaced {resource_id} -> {_host(url)}"
 
     def t_propose_resource(self, skill_id, url, title, reason):
         url = url.strip()
@@ -396,7 +410,7 @@ class _Tools:
             stage = next((st["id"] for st in spec.get("stages", [])
                           if any(k["id"] == skill_id for k in st.get("skills", []))), None)
             if stage is None:
-                return {"error": f"unknown skill_id {str(skill_id)[:60]!r}"}, ""
+                return {"error": "unknown skill_id"}, ""
             made = s.execute(select(func.count()).select_from(AgentAction).where(
                 AgentAction.roadmap_id == self.rid, AgentAction.mode == self.mode, AgentAction.round == self.round,
                 AgentAction.tool == "propose_resource", AgentAction.outcome == "ok")).scalar_one()

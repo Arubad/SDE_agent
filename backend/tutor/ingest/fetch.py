@@ -2,7 +2,9 @@
 classification of walls. It never works around a protection; it reports it and moves on."""
 from __future__ import annotations
 
+import ipaddress
 import re
+import socket
 import threading
 import time
 from collections.abc import Callable
@@ -43,6 +45,56 @@ _BOT = re.compile(
     re.I,
 )
 _ROOT_DIV = re.compile(r"""<div[^>]+id=["'](?:root|app|__next)["']""", re.I)
+
+
+Resolver = Callable[[str], list[str]]  # hostname -> IP address strings
+PRIVATE_ADDRESS = "private_address"
+
+
+def system_resolver(host: str) -> list[str]:
+    return [info[4][0] for info in socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)]
+
+
+def public_resolver(host: str) -> list[str]:
+    """Fixture mode (no network): every hostname resolves to one public address. IP literals and `localhost`
+    are still checked as themselves."""
+    return ["93.184.216.34"]
+
+
+def _is_public(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+        addr = addr.ipv4_mapped
+    return addr.is_global and not (addr.is_loopback or addr.is_link_local or addr.is_private or addr.is_reserved
+                                   or addr.is_multicast or addr.is_unspecified)
+
+
+def _literal(host: str):
+    try:
+        return ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        try:  # legacy forms the OS resolver also accepts: 2130706433, 0x7f.1, 127.1
+            return ipaddress.IPv4Address(socket.inet_aton(host))
+        except OSError:
+            return None
+
+
+def address_refusal(host: str, resolver: Resolver) -> str | None:
+    """None if `host` is (and resolves only to) public addresses; else the refusal reason.
+
+    Checked on every hop before the request. Known gap (TOCTOU): httpx resolves the name again when it connects,
+    so a DNS-rebinding server could answer differently the second time; closing that needs connecting to the
+    checked address itself (a custom transport), which this fetcher does not do."""
+    host = (host or "").lower().rstrip(".")
+    if not host or host == "localhost" or host.endswith(".localhost"):
+        return PRIVATE_ADDRESS
+    literal = _literal(host)
+    if literal is not None:
+        return None if _is_public(literal) else PRIVATE_ADDRESS
+    try:
+        addrs = [ipaddress.ip_address(a.split("%")[0]) for a in resolver(host)]
+    except (OSError, ValueError, UnicodeError):
+        return "dns_failure"
+    return None if addrs and all(_is_public(a) for a in addrs) else PRIVATE_ADDRESS
 
 
 @dataclass(frozen=True)
@@ -103,13 +155,15 @@ def _visible_text(html: str) -> str:
 
 class Fetcher:
     def __init__(self, client: httpx.Client, *, domain_interval_s: float, user_agent: str = USER_AGENT,
-                 cache: HttpCacheStore | None = None, clock=time.monotonic, sleep=time.sleep):
+                 cache: HttpCacheStore | None = None, clock=time.monotonic, sleep=time.sleep,
+                 resolver: Resolver = system_resolver):
         self._client = client
         self._interval = domain_interval_s
         self._ua = user_agent
         self._cache = cache
         self._clock = clock
         self._sleep = sleep
+        self._resolver = resolver
         self._guard = threading.Lock()
         self._host_locks: dict[str, threading.Lock] = {}
         self._last: dict[str, float] = {}
@@ -164,6 +218,9 @@ class Fetcher:
                 parts = urlsplit(url)
                 if parts.scheme not in ("http", "https") or not parts.hostname:
                     raise _Early(FetchResult(url, 0, "", b"", "error", "unsupported URL scheme"))
+                refused = address_refusal(parts.hostname or "", self._resolver)  # every hop, every fetch
+                if refused is not None:
+                    raise _Early(FetchResult(url, 0, "", b"", "error", refused))
                 if url_guard is not None and not url_guard(url):  # checked on every hop, before any request
                     raise _Early(FetchResult(url, 0, "", b"", "error", "redirect target not allowed"))
                 if (check_robots and (parts.hostname or "").lower() not in ROBOTS_EXEMPT_HOSTS

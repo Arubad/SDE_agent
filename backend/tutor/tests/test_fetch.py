@@ -4,7 +4,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from backend.tutor.ingest.fetch import USER_AGENT, Fetcher, FetchResult, HttpCacheStore
+from backend.tutor.ingest.fetch import USER_AGENT, Fetcher, FetchResult, HttpCacheStore, public_resolver
 from backend.tutor.ingest.net import (
     RealYouTube,
     CaptionsBlocked,
@@ -35,11 +35,11 @@ class FakeTime:
         self.t += s
 
 
-def make_fetcher(handler, *, interval=1.0, cache=None, time=None):
+def make_fetcher(handler, *, interval=1.0, cache=None, time=None, resolver=public_resolver):
     time = time or FakeTime()
     client = httpx.Client(transport=httpx.MockTransport(handler))
     return Fetcher(client, domain_interval_s=interval, user_agent=USER_AGENT, cache=cache,
-                   clock=time.clock, sleep=time.sleep), time
+                   clock=time.clock, sleep=time.sleep, resolver=resolver), time
 
 
 def html(body: str, status=200, headers=None):
@@ -428,3 +428,42 @@ def test_robots_exempt_only_for_allow_listed_hosts_on_every_hop():
     before = len(t.sleeps)
     f.get("https://api.github.com/repos/a/b/contents/docs")
     assert t.sleeps[before:] == [1.0]
+
+
+def test_redirect_to_metadata_address_is_refused_before_the_request():
+    seen = []
+
+    def handler(req):
+        seen.append(str(req.url))
+        if req.url.path == "/robots.txt":
+            return httpx.Response(404)
+        return httpx.Response(302, headers={"location": "http://169.254.169.254/latest/meta-data/"})
+
+    f, _ = make_fetcher(handler, interval=0)
+    r = f.get("https://a.test/x")
+    assert (r.outcome, r.reason) == ("error", "private_address")
+    assert not any("169.254.169.254" in u for u in seen)
+
+
+@pytest.mark.parametrize("addrs", [["10.0.0.5"], ["93.184.216.34", "127.0.0.1"], ["::1"], ["::ffff:10.1.2.3"]])
+def test_hostname_resolving_to_private_address_is_refused(addrs):
+    seen = []
+    f, _ = make_fetcher(lambda req: seen.append(str(req.url)) or html(LONG), interval=0, resolver=lambda h: addrs)
+    r = f.get("https://internal.test/x")
+    assert (r.outcome, r.reason) == ("error", "private_address") and seen == []
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1/x", "http://2130706433/x", "http://localhost/x",
+                                 "http://[::1]/x", "http://10.1.1.1/x"])
+def test_private_literals_are_refused_even_in_fixture_mode(url):
+    seen = []
+    f, _ = make_fetcher(lambda req: seen.append(str(req.url)) or html(LONG), interval=0)
+    assert f.get(url).reason == "private_address" and seen == []
+
+
+def test_dns_failure_is_an_error_outcome():
+    def boom(host):
+        raise OSError("no such host")
+
+    f, _ = make_fetcher(lambda req: html(LONG), interval=0, resolver=boom)
+    assert (f.get("https://nowhere.test/").outcome, f.get("https://nowhere.test/").reason) == ("error", "dns_failure")

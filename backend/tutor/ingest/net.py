@@ -15,7 +15,7 @@ from urllib.parse import quote
 import httpx
 from sqlalchemy import Engine
 
-from backend.tutor.ingest.fetch import TIMEOUT_S, USER_AGENT, Fetcher, HttpCacheStore
+from backend.tutor.ingest.fetch import TIMEOUT_S, USER_AGENT, Fetcher, HttpCacheStore, public_resolver
 from backend.tutor.settings import Settings
 
 
@@ -310,7 +310,7 @@ def fixture_net(root: Path) -> Net:
         return httpx.Response(entry.get("status", 200), content=body, headers=headers)
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    fetcher = Fetcher(client, domain_interval_s=0, user_agent=USER_AGENT, cache=None)
+    fetcher = Fetcher(client, domain_interval_s=0, user_agent=USER_AGENT, cache=None, resolver=public_resolver)
     return Net(fetcher=fetcher, search=FixtureSearch(load("search.json")), youtube=FixtureYouTube(root))
 
 
