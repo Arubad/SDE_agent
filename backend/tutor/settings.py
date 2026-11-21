@@ -1,6 +1,7 @@
 """Platform settings, read from the environment (backend/.env is loaded by backend.core.config)."""
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -69,15 +70,15 @@ def _parse_int(name: str, raw: str | None, default: int, minimum: int) -> int:
     return value
 
 
-def _parse_positive_float(name: str, raw: str | None, default: float) -> float:
+def _parse_interval(name: str, raw: str | None, default: float) -> float:
     if not (raw or "").strip():
         return default
     try:
         value = float(raw)
     except ValueError:
         raise SettingsError(f"{name} must be a number (got {raw!r})") from None
-    if not value > 0:  # also rejects NaN
-        raise SettingsError(f"{name} must be > 0 (got {raw!r})")
+    if not math.isfinite(value) or value < 0:  # rejects inf and NaN too
+        raise SettingsError(f"{name} must be a finite number >= 0 (got {raw!r})")
     return value
 
 
@@ -98,7 +99,7 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
     embedder = (env.get("EMBEDDER") or d.embedder).strip().lower()
     if embedder not in EMBEDDERS:
         raise SettingsError(f"EMBEDDER must be one of {EMBEDDERS} (got {env.get('EMBEDDER')!r})")
-    cookies_browser = env.get("YTDLP_COOKIES_BROWSER") or None
+    cookies_browser = (env.get("YTDLP_COOKIES_BROWSER") or "").strip() or None
     return Settings(
         database_url=env.get("DATABASE_URL") or d.database_url,
         qdrant_url=env.get("PLATFORM_QDRANT_URL") or d.qdrant_url,
@@ -108,14 +109,14 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
         web_dist=Path(env["WEB_DIST"]) if env.get("WEB_DIST") else d.web_dist,
         host=env.get("HOST") or d.host,
         port=_parse_int("PORT", env.get("PORT"), d.port, 1),
-        searxng_url=env.get("SEARXNG_URL") or d.searxng_url,
+        searxng_url=(env["SEARXNG_URL"].strip() or None) if "SEARXNG_URL" in env else d.searxng_url,
         youtube_api_key=env.get("YOUTUBE_API_KEY") or None,
         transcript_routes=_parse_routes(env.get("TRANSCRIPT_ROUTES"), cookies_browser, d.transcript_routes),
         ytdlp_cookies_browser=cookies_browser,
         ingest_workers=_parse_int("INGEST_WORKERS", env.get("INGEST_WORKERS"), d.ingest_workers, 0),
         crawl_max_depth=_parse_int("CRAWL_MAX_DEPTH", env.get("CRAWL_MAX_DEPTH"), d.crawl_max_depth, 0),
         crawl_max_pages=_parse_int("CRAWL_MAX_PAGES", env.get("CRAWL_MAX_PAGES"), d.crawl_max_pages, 1),
-        domain_interval_s=_parse_positive_float(
+        domain_interval_s=_parse_interval(
             "DOMAIN_INTERVAL_S", env.get("DOMAIN_INTERVAL_S"), d.domain_interval_s
         ),
         playlist_max_videos=_parse_int(

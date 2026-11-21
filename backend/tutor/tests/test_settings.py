@@ -79,3 +79,24 @@ def test_ingestion_defaults_and_embedder():
     assert load_settings({"PLATFORM_QDRANT_URL": ":memory:"}).qdrant_url == ":memory:"
     with pytest.raises(SettingsError):
         load_settings({"EMBEDDER": "openai"})
+
+
+def test_empty_searxng_url_disables_search_but_unset_keeps_default():
+    assert load_settings({"SEARXNG_URL": ""}).searxng_url is None
+    assert load_settings({"SEARXNG_URL": "  "}).searxng_url is None
+    assert load_settings({}).searxng_url == "http://127.0.0.1:8888"
+    assert load_settings({"SEARXNG_URL": "http://s:1"}).searxng_url == "http://s:1"
+
+
+def test_domain_interval_accepts_zero_but_not_non_finite_or_negative():
+    assert load_settings({"DOMAIN_INTERVAL_S": "0"}).domain_interval_s == 0.0
+    assert load_settings({"DOMAIN_INTERVAL_S": "2.5"}).domain_interval_s == 2.5
+    for bad in ("inf", "nan", "-1", "abc"):
+        with pytest.raises(SettingsError, match="DOMAIN_INTERVAL_S"):
+            load_settings({"DOMAIN_INTERVAL_S": bad})
+
+
+def test_blank_cookies_browser_counts_as_unset():
+    assert load_settings({"YTDLP_COOKIES_BROWSER": "   "}).ytdlp_cookies_browser is None
+    with pytest.raises(SettingsError):
+        load_settings({"TRANSCRIPT_ROUTES": "ytdlp_cookies", "YTDLP_COOKIES_BROWSER": "  "})

@@ -1,0 +1,5 @@
+{
+  "https://example.test/kubernetes-intro": {"status": 200, "content_type": "text/html", "file": "kubernetes-intro.html", "headers": {}},
+  "https://example.test/pods": {"status": 200, "content_type": "text/html", "file": "pods.html", "headers": {}},
+  "https://example.test/login": {"status": 200, "content_type": "text/html", "file": "login.html", "headers": {}}
+}

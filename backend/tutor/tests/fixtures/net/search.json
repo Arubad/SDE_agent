@@ -1,0 +1,8 @@
+{
+  "general:kubernetes tutorial": [
+    {"title": "Kubernetes introduction", "url": "https://example.test/kubernetes-intro", "snippet": "What Kubernetes is and how a cluster is laid out.", "engine": "fixture"}
+  ],
+  "videos:kubernetes tutorial": [
+    {"title": "Kubernetes in 10 minutes", "url": "https://www.youtube.com/watch?v=kube000001a", "snippet": "Pods, Deployments and Services.", "engine": "fixture"}
+  ]
+}

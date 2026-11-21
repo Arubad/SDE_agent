@@ -1,0 +1,11 @@
+{
+  "meta": {"title": "Kubernetes in 10 minutes", "channel": "Fixture Academy", "description": "0:00 Intro\n0:30 Pods\n1:00 Services", "duration_s": 90.0,
+           "chapters": [{"start_s": 0, "title": "Intro"}, {"start_s": 30, "title": "Pods"}, {"start_s": 60, "title": "Services"}]},
+  "cues": [
+    {"start": 0.0, "dur": 4.0, "text": "Welcome, today we look at Kubernetes."},
+    {"start": 30.0, "dur": 5.0, "text": "A pod is one or more containers scheduled together."},
+    {"start": 60.0, "dur": 5.0, "text": "A service gives pods a stable address."}
+  ],
+  "comments": ["Great intro to pods.", "Please cover Ingress next."],
+  "captions_error": null
+}
