@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { type ApiError, isAuthError, type Progress, type Report, roadmapPath, TERMINAL_STATUSES } from "./api";
 import { AgentActivity, Proposals } from "./IngestReport";
 import { reasonText, statusText } from "./format";
-import { streamEvents } from "./stream";
+import { followEvents } from "./stream";
 
 const JOB_LABELS: Record<string, string> = {
   agent_plan: "Agent: crawl plan",
@@ -17,7 +17,11 @@ const JOB_LABELS: Record<string, string> = {
   recheck: "Re-checks",
 };
 const JOB_STATUSES = ["queued", "running", "done", "dead"];
-const RECONNECT_MS = 1500;
+const RECONNECT_RETRIES = 3; // followEvents' default: backoff 1.5 s, 3 s, 6 s, then give up
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : "The progress stream failed.";
+}
 
 function JobTable({ jobs }: { jobs: Progress["jobs"] }) {
   const types = Object.keys(jobs).sort();
@@ -79,43 +83,34 @@ export function IngestProgress({
 }) {
   const [progress, setProgress] = useState<Progress | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [fatal, setFatal] = useState<string | null>(null);
   // Callbacks change identity on every parent render; the stream effect must not restart for that.
   const handlers = useRef({ onSettled, onUnauthorized });
   handlers.current = { onSettled, onUnauthorized };
 
   useEffect(() => {
     const controller = new AbortController();
-    const { signal } = controller;
-    let settled = false;
-
-    async function run() {
-      while (!signal.aborted && !settled) {
-        try {
-          await streamEvents(
-            roadmapPath(slug, "/events"),
-            (name, data) => {
-              if (name === "progress" && data && typeof data === "object") {
-                setProgress(data as Progress);
-                setError(null);
-              } else if (name === "done") {
-                settled = true;
-                const status = (data as { status?: unknown } | null)?.status;
-                handlers.current.onSettled(typeof status === "string" ? status : "ready");
-              }
-            },
-            signal,
-          );
-        } catch (err) {
-          if (isAuthError(err)) {
-            handlers.current.onUnauthorized(err);
-            return;
-          }
-          setError(err instanceof Error ? err.message : "The progress stream failed.");
+    followEvents(
+      roadmapPath(slug, "/events"),
+      (name, data) => {
+        if (name === "progress" && data && typeof data === "object") {
+          setProgress(data as Progress);
+          setError(null);
+        } else if (name === "done") {
+          const status = (data as { status?: unknown } | null)?.status;
+          handlers.current.onSettled(typeof status === "string" ? status : "ready");
         }
-        if (!signal.aborted && !settled) await new Promise((r) => setTimeout(r, RECONNECT_MS));
-      }
-    }
-    void run();
+      },
+      controller.signal,
+      {
+        onRetry: (failures, err) =>
+          setError(`${messageOf(err)} Reconnecting (attempt ${failures} of ${RECONNECT_RETRIES})…`),
+      },
+    ).catch((err: unknown) => {
+      if (controller.signal.aborted) return;
+      if (isAuthError(err)) handlers.current.onUnauthorized(err);
+      else setFatal(`Live progress stopped: ${messageOf(err)} Reload the page to try again.`);
+    });
     return () => controller.abort();
   }, [slug]);
 
@@ -133,10 +128,16 @@ export function IngestProgress({
           {TERMINAL_STATUSES.includes(status) ? statusText(status) : `${statusText(status)}…`}
         </span>
       </div>
-      {error && (
+      {fatal ? (
         <p className="error" role="alert">
-          {error} Reconnecting…
+          {fatal}
         </p>
+      ) : (
+        error && (
+          <p className="error" role="status">
+            {error}
+          </p>
+        )
       )}
       {agentBusy && <p className="muted small">The ingestion agent is working on this roadmap.</p>}
       <div className="card stack">

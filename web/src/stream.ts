@@ -1,5 +1,5 @@
 // Server-sent events over `fetch`: EventSource cannot send the X-Access-Code header.
-import { ApiError, Unauthorized, errorMessage } from "./api";
+import { ApiError, errorMessage, isAuthError, Unauthorized } from "./api";
 import { clearCode, getCode } from "./storage";
 
 export type EventHandler = (name: string, data: unknown) => void;
@@ -99,5 +99,74 @@ export async function streamEvents(path: string, onEvent: EventHandler, signal: 
     signal.removeEventListener("abort", cancel);
     if (!finished) cancel(); // aborted, or a handler threw: never leave the connection open
     reader.releaseLock();
+  }
+}
+
+/** Waits `ms`, or less if `signal` aborts; the timer is always cleared. */
+export function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
+export interface FollowOptions {
+  /** Reconnects allowed after consecutive failures before giving up (default 3). */
+  retries?: number;
+  /** The first backoff; it doubles per consecutive failure (default 1500 ms: 1.5 s, 3 s, 6 s). */
+  delayMs?: number;
+  /** Called before each reconnect that follows a failure, with the failure count. */
+  onRetry?: (failures: number, err: unknown) => void;
+  sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+}
+
+/**
+ * `streamEvents` until a `done` event arrives, reconnecting when the stream fails or ends early.
+ * A stream that delivered events and then ended is reopened after the base delay and resets the failure count;
+ * an error (or an end with no events) is a failure, retried with doubling backoff up to `retries` times, then
+ * thrown. A 401/429 is thrown at once. Resolves on `done` or when `signal` aborts.
+ */
+export async function followEvents(
+  path: string,
+  onEvent: EventHandler,
+  signal: AbortSignal,
+  { retries = 3, delayMs = 1500, onRetry, sleep = abortableSleep }: FollowOptions = {},
+): Promise<void> {
+  let failures = 0;
+  while (!signal.aborted) {
+    let settled = false;
+    let received = false;
+    let failure: unknown = null;
+    try {
+      await streamEvents(
+        path,
+        (name, data) => {
+          received = true;
+          if (name === "done") settled = true;
+          onEvent(name, data);
+        },
+        signal,
+      );
+      if (!received) failure = new Error("The progress stream closed without sending anything.");
+    } catch (err) {
+      if (isAuthError(err)) throw err;
+      failure = err;
+    }
+    if (settled || signal.aborted) return;
+    if (failure === null) {
+      failures = 0;
+      await sleep(delayMs, signal);
+      continue;
+    }
+    failures = received ? 1 : failures + 1; // a stream that worked before failing starts the count afresh
+    if (failures > retries) throw failure;
+    onRetry?.(failures, failure);
+    await sleep(delayMs * 2 ** (failures - 1), signal);
   }
 }

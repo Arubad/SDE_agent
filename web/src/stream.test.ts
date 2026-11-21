@@ -157,3 +157,79 @@ describe("streamEvents", () => {
     expect(events).toEqual([["message", "plain text"]]);
   });
 });
+
+describe("followEvents", () => {
+  function errorResponse(status: number) {
+    return new Response(JSON.stringify({ error: `HTTP ${status} from server` }), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  it("stops after N failed reconnects, with growing delays", async () => {
+    const { ApiError, followEvents } = await load();
+    fetchMock.mockImplementation(async () => errorResponse(500));
+    const delays: number[] = [];
+    const retrying: number[] = [];
+
+    const err = await followEvents("/e", () => {}, new AbortController().signal, {
+      retries: 3,
+      delayMs: 1500,
+      sleep: async (ms) => void delays.push(ms),
+      onRetry: (attempt) => retrying.push(attempt),
+    }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as Error).message).toBe("HTTP 500 from server");
+    expect(fetchMock).toHaveBeenCalledTimes(4); // the first try plus 3 reconnects
+    expect(delays).toEqual([1500, 3000, 6000]);
+    expect(retrying).toEqual([1, 2, 3]);
+  });
+
+  it("a 401 is not retried", async () => {
+    const { Unauthorized, followEvents } = await load();
+    fetchMock.mockImplementation(async () => errorResponse(401));
+
+    const err = await followEvents("/e", () => {}, new AbortController().signal, { sleep: async () => {} }).catch(
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(Unauthorized);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reconnects after an early end and stops at done", async () => {
+    const { followEvents } = await load();
+    fetchMock
+      .mockResolvedValueOnce(sseResponse(['event: progress\ndata: {"n": 1}\n\n']).res)
+      .mockResolvedValueOnce(errorResponse(503))
+      .mockResolvedValueOnce(sseResponse(['event: done\ndata: {"status": "ready"}\n\n']).res);
+    const events: string[] = [];
+
+    await followEvents("/e", (name) => events.push(name), new AbortController().signal, {
+      retries: 1,
+      sleep: async () => {},
+    });
+
+    // The early end received events, so it did not count as a failure; the one 503 stayed within 1 retry.
+    expect(events).toEqual(["progress", "done"]);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("abort during the backoff ends quietly and clears the timer", async () => {
+    const { followEvents } = await load();
+    vi.useFakeTimers();
+    try {
+      fetchMock.mockImplementation(async () => errorResponse(500));
+      const controller = new AbortController();
+      const done = followEvents("/e", () => {}, controller.signal, { delayMs: 1500 });
+      await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1));
+      controller.abort();
+      await expect(done).resolves.toBeUndefined();
+      expect(vi.getTimerCount()).toBe(0);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

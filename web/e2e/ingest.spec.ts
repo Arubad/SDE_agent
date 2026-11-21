@@ -13,7 +13,10 @@ const roadmapText = readFileSync(
 const slug = `k8s-${Date.now()}`;
 const SETTLE = { timeout: 90_000 };
 
-test.describe.configure({ mode: "serial" });
+// No retries here, even in CI: the agent's FAKE_LLM_SCRIPT is single-use per server process, and Playwright keeps
+// the webServer across retries, so a retried run would find the script spent and get no proposal. To re-run
+// locally, restart the main E2E server (stop any reused one on port 8765).
+test.describe.configure({ mode: "serial", retries: 0 });
 
 test("parse, review, approve, then watch ingestion settle into a report", async ({ page }) => {
   test.setTimeout(150_000);
