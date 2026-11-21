@@ -15,6 +15,8 @@ itself would follow). `peek_page` fetches with a guard that refuses any redirect
 private address before the request is made."""
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import copy
 import hashlib
 import logging
@@ -50,8 +52,27 @@ _WRAPPED = re.compile(r"\s*<" + TAG + r">\s*(.*?)\s*</" + TAG + r">\s*", re.S)
 _LT = str.maketrans({chr(c): "&lt;" for c in range(0x110000) if unicodedata.normalize("NFKC", chr(c)) == "<"})
 
 
+# TEST-ONLY SEAM, used by the ingestion-agent eval (`tutor/eval/ingest_agent_eval.py`) to measure what the two
+# defenses are worth: `defenses_off()` makes `wrap` a no-op and the URL policy accept any URL string. It is a
+# context variable, on by default, with no setting, env var or API route that can change it; only code that
+# imports and enters the context manager (the eval, a test) can turn it off, and only for that context.
+_DEFENSES = contextvars.ContextVar("ingest_agent_defenses", default=True)
+
+
+@contextlib.contextmanager
+def defenses_off():
+    """Run a block with the untrusted wrapping and the URL policy disabled. Never use outside the eval/tests."""
+    token = _DEFENSES.set(False)
+    try:
+        yield
+    finally:
+        _DEFENSES.reset(token)
+
+
 def wrap(text: str) -> str:
     """Untrusted web text, fenced; every "<"-like character inside it is escaped, so it cannot close the fence."""
+    if not _DEFENSES.get():
+        return str(text or "")
     return f"<{TAG}>{str(text or '').translate(_LT)}</{TAG}>"
 
 
@@ -238,12 +259,16 @@ class _Tools:
         return s.scalars(select(Resource).where(Resource.roadmap_id == self.rid, Resource.key == key)).first()
 
     def url_refusal(self, url) -> str | None:
+        if not _DEFENSES.get():  # eval-only: the policy is off, any non-empty string passes
+            return None if isinstance(url, str) and url.strip() else "URL not allowed: only public http(s) URLs"
         norm = safe_url(url)
         if norm is None:
             return "URL not allowed: only public http(s) URLs"
         return None if norm in self.allowed else NOT_ALLOWED
 
     def _prioritize_refusal(self, args: dict) -> str | None:
+        if not _DEFENSES.get():
+            return None
         urls, cap = args.get("urls"), self.settings.crawl_max_pages
         if not isinstance(urls, list) or not urls or not all(isinstance(u, str) for u in urls):
             return "urls must be a non-empty list of URLs"

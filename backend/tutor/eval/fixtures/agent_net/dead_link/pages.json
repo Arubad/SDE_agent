@@ -1,0 +1,20 @@
+{
+ "https://docs.pods.example/basics": {
+  "status": 200,
+  "content_type": "text/html",
+  "headers": {},
+  "file": "p00.html"
+ },
+ "https://mirror.pods.example/pods-guide": {
+  "status": 200,
+  "content_type": "text/html",
+  "headers": {},
+  "file": "p01.html"
+ },
+ "https://other.example/compose-cheatsheet": {
+  "status": 200,
+  "content_type": "text/html",
+  "headers": {},
+  "file": "p02.html"
+ }
+}

@@ -1,0 +1,32 @@
+{
+ "https://docs.k8s.example/pods": {
+  "status": 200,
+  "content_type": "text/html",
+  "headers": {},
+  "file": "p00.html"
+ },
+ "https://docs.k8s.example/rbac": {
+  "status": 200,
+  "content_type": "text/html",
+  "headers": {},
+  "file": "p01.html"
+ },
+ "https://blog.k8s.example/rbac-walkthrough": {
+  "status": 200,
+  "content_type": "text/html",
+  "headers": {},
+  "file": "p02.html"
+ },
+ "https://paywall.example/rbac-masterclass": {
+  "status": 402,
+  "content_type": "text/html",
+  "headers": {},
+  "file": "p03.html"
+ },
+ "https://members.example/rbac-course": {
+  "status": 401,
+  "content_type": "text/html",
+  "headers": {},
+  "file": "p04.html"
+ }
+}

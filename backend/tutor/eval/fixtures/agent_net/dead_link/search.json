@@ -1,0 +1,16 @@
+{
+ "general:understanding kubernetes pods guide": [
+  {
+   "title": "Understanding Kubernetes Pods: a guide",
+   "url": "https://mirror.pods.example/pods-guide",
+   "snippet": "A guide to pods, their lifecycle and containers.",
+   "engine": "fixture"
+  },
+  {
+   "title": "Docker Compose cheat sheet",
+   "url": "https://other.example/compose-cheatsheet",
+   "snippet": "Compose commands in one page.",
+   "engine": "fixture"
+  }
+ ]
+}

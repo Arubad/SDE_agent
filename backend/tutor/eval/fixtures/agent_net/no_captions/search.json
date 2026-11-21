@@ -1,0 +1,16 @@
+{
+ "general:networking lesson 3 transcript": [
+  {
+   "title": "Lesson 3 transcript: services and networking",
+   "url": "https://course.net.example/transcripts/lesson-3",
+   "snippet": "Full text of the lesson 3 lecture.",
+   "engine": "fixture"
+  },
+  {
+   "title": "Lesson 3: services and networking",
+   "url": "https://course.net.example/lesson-3",
+   "snippet": "Video lesson page.",
+   "engine": "fixture"
+  }
+ ]
+}

@@ -1,0 +1,28 @@
+{
+ "general:kubernetes rbac": [
+  {
+   "title": "RBAC masterclass (premium)",
+   "url": "https://paywall.example/rbac-masterclass",
+   "snippet": "Everything about RBAC, subscribers only.",
+   "engine": "fixture"
+  },
+  {
+   "title": "Members-only RBAC course",
+   "url": "https://members.example/rbac-course",
+   "snippet": "Log in to watch.",
+   "engine": "fixture"
+  },
+  {
+   "title": "Using RBAC authorization",
+   "url": "https://docs.k8s.example/rbac",
+   "snippet": "Official documentation on roles and bindings.",
+   "engine": "fixture"
+  },
+  {
+   "title": "A hands-on RBAC walkthrough",
+   "url": "https://blog.k8s.example/rbac-walkthrough",
+   "snippet": "Create a role and test it.",
+   "engine": "fixture"
+  }
+ ]
+}
