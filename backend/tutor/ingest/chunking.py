@@ -211,8 +211,10 @@ def _merge_small(groups: list[list[int]], units: list[_Unit], hi: int) -> list[l
 
 
 def chunk_markdown(markdown: str, *, doc_title: str, doc_key: str, embedder, child_min: int = 200,
-                   child_max: int = 350, parent_max: int = 1500
+                   child_max: int = 350, parent_max: int = 1500, final_end_s: float | None = None
                    ) -> tuple[list[ParentSection], list[ChildChunk]]:
+    """`final_end_s` (a video's duration, when known) is the end of the last timestamped chapter;
+    without it that chapter's `end_s` stays None."""
     sections = _split_sections(markdown, doc_title)
     chapter_starts = sorted({s for _, s, _ in sections if s is not None})
     parents: list[ParentSection] = []
@@ -220,7 +222,7 @@ def chunk_markdown(markdown: str, *, doc_title: str, doc_key: str, embedder, chi
     for path, start_s, body in sections:
         end_s = None
         if start_s is not None:
-            end_s = next((c for c in chapter_starts if c > start_s), None)
+            end_s = next((c for c in chapter_starts if c > start_s), final_end_s)
         units = _units(body, child_max)
         if not units:
             continue

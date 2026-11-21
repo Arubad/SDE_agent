@@ -134,10 +134,13 @@ def _drop_near_duplicates(children: list[ChildChunk], others: list[str]) -> list
 
 
 def index_document(engine: Engine, index: PlatformIndex, document, skill_ids: Sequence[str]) -> int:
-    """Chunk the document; replace its Section rows, then its Qdrant points; return the child count."""
+    """Chunk the document; replace its Section rows, then its Qdrant points; return the child count.
+    A video's `meta["duration_s"]` (when > 0) becomes the end of its last chapter."""
     doc_id, rid = str(document.id), str(document.roadmap_id)
+    duration = (document.meta or {}).get("duration_s")
     parents, children = chunk_markdown(document.markdown or "", doc_title=document.title or document.url,
-                                       doc_key=doc_id, embedder=index.embedder)
+                                       doc_key=doc_id, embedder=index.embedder,
+                                       final_end_s=float(duration) if duration else None)
     children = _drop_near_duplicates(children, index.other_texts(rid, doc_id))
     live = {c.parent_id for c in children}
     parents = [p for p in parents if p.id in live]

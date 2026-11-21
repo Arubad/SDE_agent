@@ -124,3 +124,14 @@ def test_reindex_shortened_document_removes_stale(engine, clean, index):
     with session_scope(engine) as s:
         rows = s.scalars(select(Section).where(Section.document_id == d.id)).all()
     assert len(rows) == 1 and "short paragraph" in rows[0].text
+
+
+def test_video_duration_ends_last_chapter(engine, clean, index):
+    md = ("# Tour\n\n## [00:00] Intro\n\n" + "Intro words about pods. " * 10
+          + "\n\n## [01:00] Outro\n\n" + "Closing words about services. " * 10)
+    d = _doc(engine, "dur", md=md, url="https://www.youtube.com/watch?v=abcdefghijk")
+    d.kind, d.meta = "video", {"duration_s": 150.0}
+    index_document(engine, index, d, [])
+    with session_scope(engine) as s:
+        rows = s.scalars(select(Section).where(Section.document_id == d.id).order_by(Section.ord)).all()
+    assert [(r.start_s, r.end_s) for r in rows] == [(0.0, 60.0), (60.0, 150.0)]

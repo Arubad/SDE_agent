@@ -138,6 +138,8 @@ class TranscriptRouter:
                 cues, reason = [], f"{route.split('_')[0]}_error"
             if cues:
                 return route, cues, None
+            if reason is None:  # a route that returned nothing without saying why is still a failure
+                reason = "no_captions" if route == "captions" else f"{route}_empty"
         return None, [], reason
 
     def _try(self, route: str, video_id: str) -> tuple[list[Cue], str | None]:
@@ -165,6 +167,8 @@ class TranscriptRouter:
             return [], "captions_blocked"
         for attempt in range(len(BACKOFF_S) + 1):
             self._throttle.wait()
+            if self._breaker.is_open():  # another worker may have tripped it while this one waited
+                return [], "captions_blocked"
             try:
                 return self._yt.captions(video_id), None
             except NoCaptions:

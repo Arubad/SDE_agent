@@ -234,3 +234,30 @@ def test_video_document_hour_format_and_no_transcript():
     assert "late words" in doc.split("## [1:01:01] B")[1]
     nodoc = video_document(meta, None, [], "whole", [Chapter(0, "T")])
     assert "About this video" in nodoc and nodoc.startswith("# T")
+
+
+def test_empty_route_results_carry_a_reason(yt):
+    class Empty:
+        def captions(self, vid):
+            return []
+
+    meta = VideoMeta("x", "t", "c", "", 10.0)
+    assert _router(Empty()).get("x", meta) == (None, [], "no_captions")
+    r = _router(Empty(), routes=("captions", "ytdlp_cookies"), ytdlp_fn=lambda vid, browser: [])
+    assert r.get("x", meta) == (None, [], "ytdlp_cookies_empty")
+
+
+def test_breaker_rechecked_after_throttle_wait(yt):
+    calls = []
+
+    class Counting:
+        def captions(self, vid):
+            calls.append(vid)
+            return [Cue(0.0, 1.0, "x")]
+
+    breaker = CircuitBreaker(1800, clock=lambda: 0.0)
+    throttle = Throttle(3.0, clock=lambda: 0.0, sleep=lambda s: None)
+    throttle.wait = breaker.trip  # another worker trips the breaker while this one waits its turn
+    r = TranscriptRouter(Settings(), Counting(), breaker=breaker, throttle=throttle, sleep=lambda s: None)
+    assert r.get("x", VideoMeta("x", "t", "c", "", 10.0)) == (None, [], "captions_blocked")
+    assert calls == []

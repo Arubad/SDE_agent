@@ -86,6 +86,11 @@ def test_video_timestamps_carried():
     assert {(c.start_s, c.end_s) for c in by_title["Pods"]} == {(75.0, 3700.0)}
     assert {c.start_s for c in by_title["Wrap up"]} == {3700.0}
     assert all(c.end_s is None for c in by_title["Wrap up"])
+    # with the video duration known, the last chapter ends at the duration
+    parents, children = chunk_markdown(md, doc_title=meta.title, doc_key="v1", embedder=EMB, final_end_s=4000.0)
+    assert {c.end_s for c in children if c.start_s == 3700.0} == {4000.0}
+    assert {p.end_s for p in parents if p.start_s == 3700.0} == {4000.0}
+    assert {c.end_s for c in children if c.start_s == 0.0} == {75.0}
 
 
 def test_ids_are_stable():
