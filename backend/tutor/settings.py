@@ -43,6 +43,7 @@ class Settings:
     playlist_max_videos: int = 50
     net_fixtures_dir: Path | None = None
     embedder: str = "bge"  # "bge" or "hash"
+    github_token: str | None = field(default=None, repr=False)  # GITHUB_TOKEN: GitHub API rate limits
 
     def validate(self) -> None:
         if self.public_mode and not config.PREMIUM_PASSCODE:
@@ -124,4 +125,5 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
         ),
         net_fixtures_dir=Path(env["NET_FIXTURES_DIR"]) if env.get("NET_FIXTURES_DIR") else None,
         embedder=embedder,
+        github_token=(env.get("GITHUB_TOKEN") or "").strip() or None,
     )

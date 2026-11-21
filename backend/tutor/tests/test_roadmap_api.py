@@ -217,7 +217,10 @@ def test_report_gating(client, engine):
     assert client.get(f"/api/roadmaps/{slug}/report").status_code == 409
     _set_status(engine, slug, "ready")
     r = client.get(f"/api/roadmaps/{slug}/report")
-    assert r.status_code == 501 and r.json() == {"error": "Report not available yet"}  # until Task 10
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ready" and body["resources"] == [] and body["skipped"] == []
+    assert body["summary"] == "0 videos" and body["videos"]["total"] == 0
 
 
 def test_workers_start_only_with_handlers(engine, tmp_path):

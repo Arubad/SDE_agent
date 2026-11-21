@@ -165,6 +165,8 @@ class Fetcher:
                                          follow_redirects=False) as resp:
                     if resp.is_redirect and resp.headers.get("location"):
                         url = urljoin(url, resp.headers["location"])
+                        if urlsplit(url).netloc != parts.netloc:  # never hand credentials to another host
+                            headers.pop("Authorization", None)
                         headers.pop("If-None-Match", None)
                         headers.pop("If-Modified-Since", None)
                         continue
@@ -180,7 +182,9 @@ class Fetcher:
         raise _Early(FetchResult(url, 0, "", b"", "error", f"too many redirects (> {MAX_REDIRECTS})"))
 
     # -- public ---------------------------------------------------------------------------------
-    def get(self, url: str) -> FetchResult:
+    def get(self, url: str, *, headers: dict[str, str] | None = None, robots: bool = True) -> FetchResult:
+        """`headers` are extra request headers (an `Authorization` header is dropped on a cross-host redirect).
+        `robots=False` is only for documented APIs (e.g. the GitHub REST API), never for crawled pages."""
         cached = self._cache.get(url) if self._cache else None
         conditional: dict[str, str] = {}
         if cached and cached.etag:
@@ -188,7 +192,7 @@ class Fetcher:
         if cached and cached.last_modified:
             conditional["If-Modified-Since"] = cached.last_modified
         try:
-            raw = self._download(url, conditional, check_robots=True)
+            raw = self._download(url, {**(headers or {}), **conditional}, check_robots=robots)
         except _Early as e:
             return e.result
         if raw.status == 304 and cached:

@@ -22,7 +22,7 @@ from backend.tutor.db import make_engine, migrate, session_scope
 from backend.tutor.models import Roadmap
 from backend.tutor.ingest import service
 from backend.tutor.ingest.net import make_net
-from backend.tutor.jobs.worker import JobContext, WorkerPool
+from backend.tutor.jobs.worker import JobContext, WorkerPool, maybe_settle
 from backend.tutor.repo import DuplicateRoadmap, create_roadmap, get_roadmap_by_slug, list_roadmaps
 from backend.tutor.roadmap.parse import normalize_spec
 from backend.tutor.settings import Settings
@@ -243,11 +243,14 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
                     raise service.Conflict(f"Roadmap is '{r.status}'; it can only be approved while parsed.")
                 spec = normalize_spec(body.spec, r.source_text)
                 service.approve(session, r, spec, body.choices)
-                return {"status": "ingesting"}
+                roadmap_id = r.id
         except service.Conflict as exc:
             return _error(409, str(exc))
         except ValueError as exc:
             return _error(422, str(exc))
+        if on_settled is not None:  # nothing to run (no crawlable resource, or every job already done)
+            maybe_settle(request.app.state.engine, roadmap_id, on_settled)
+        return {"status": "ingesting"}
 
     @app.get("/api/roadmaps/{slug}/events")
     async def events(slug: str, request: Request):

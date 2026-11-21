@@ -59,6 +59,9 @@ def _maybe_settle(engine: Engine, roadmap_id: uuid.UUID, on_settled: SettledHook
         log.exception("settled hook failed for roadmap %s", roadmap_id)
 
 
+maybe_settle = _maybe_settle  # public name for callers outside the worker loop (CLI, approve)
+
+
 def reap_and_settle(engine: Engine, on_settled: SettledHook | None = None, lease_s: int = 600) -> int:
     """Requeue/dead-letter expired leases, then run the settle check for roadmaps that lost a job to dead-lettering.
     Returns the requeued count."""

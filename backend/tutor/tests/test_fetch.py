@@ -387,3 +387,22 @@ def test_captions_old_style_get_transcript(monkeypatch):
 
     monkeypatch.setattr(mod, "YouTubeTranscriptApi", Old)
     assert RealYouTube(httpx.Client()).captions("abcdefghijk") == [Cue(0.5, 1.5, "old")]
+
+
+def test_extra_headers_robots_opt_out_and_auth_dropped_cross_host():
+    seen = []
+
+    def handler(req):
+        seen.append((str(req.url), req.headers.get("authorization")))
+        if req.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nDisallow: /")
+        if req.url.host == "api.example.test" and req.url.path == "/moved":
+            return httpx.Response(302, headers={"location": "https://other.example.test/x"})
+        return httpx.Response(200, json={"ok": True})
+
+    f, _ = make_fetcher(handler, interval=0)
+    assert f.get("https://api.example.test/a").outcome == "robots_denied"
+    r = f.get("https://api.example.test/a", headers={"Authorization": "Bearer t"}, robots=False)
+    assert r.outcome == "ok" and ("https://api.example.test/a", "Bearer t") in seen
+    f.get("https://api.example.test/moved", headers={"Authorization": "Bearer t"}, robots=False)
+    assert ("https://other.example.test/x", None) in seen
