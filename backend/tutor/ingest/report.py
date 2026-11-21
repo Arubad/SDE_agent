@@ -112,6 +112,10 @@ def current_outcomes(session: Session, roadmap_id) -> dict:
 
 def _finalize(session: Session, roadmap_id) -> None:
     roadmap = session.get(Roadmap, roadmap_id, with_for_update=True)
+    if session.execute(select(Job.id).where(Job.roadmap_id == roadmap_id, Job.status.in_(("queued", "running")))
+                       .limit(1)).first():
+        roadmap.status = "ingesting"  # work was added while finalizing (an approved proposal): settle again later
+        return
     resources, docs_by_res, failures = _gather(session, roadmap_id)
     outcomes = resource_outcomes(resources, docs_by_res, failures)
     crawlable = [r for r in resources if r.id in outcomes]

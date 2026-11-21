@@ -242,8 +242,10 @@ class _Tools:
                 return "unknown or non-crawlable resource_id"
             site, scheme, root = _site(res.url), urlsplit(res.url).scheme, _root(res.url)
         for u in urls:
+            path = urlsplit(u).path or "/"
+            dots = any(seg in (".", "..") for seg in path.split("/")) or "%2e" in path.lower()
             if (safe_url(u) is None or _site(u) != site or urlsplit(u).scheme != scheme
-                    or not (urlsplit(u).path or "/").startswith(root)):
+                    or not path.startswith(root) or dots):  # "/docs/../admin" is not under "/docs/"
                 return f"URL not allowed: {u[:200]!r} is outside the resource's site"
         return None
 

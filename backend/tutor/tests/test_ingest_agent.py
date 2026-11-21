@@ -174,6 +174,8 @@ def test_prioritize_refuses_off_site_and_too_many(engine, tmp_path):
     assert check("prioritize_pages", {"resource_id": "docs", "urls": ["https://plan.test/other/x"]}, set())
     assert check("prioritize_pages", {"resource_id": "docs", "urls": ["https://plan.test:6379/docs/x"]}, set())
     assert check("prioritize_pages", {"resource_id": "docs", "urls": ["https://u@plan.test/docs/x"]}, set())
+    for sneaky in ("https://plan.test/docs/../admin", "https://plan.test/docs/%2e%2e/admin"):
+        assert check("prioritize_pages", {"resource_id": "docs", "urls": [sneaky]}, set())
     assert check("prioritize_pages", {"resource_id": "docs", "urls": ["https://plan.test/docs/x"]}, set()) is None
     many = [f"https://plan.test/docs/p{i}" for i in range(4)]
     assert "at most 3" in check("prioritize_pages", {"resource_id": "docs", "urls": many}, set())
@@ -328,6 +330,26 @@ def test_proposals_capped_per_round(engine, tmp_path):
     assert ["data" in o for o in outs] == [True, True, True, False] and "at most 3" in outs[3]["error"]
     assert "unknown skill" in asyncio.run(call_tool("propose_resource", {
         "skill_id": "nope", "url": urls[0], "title": "P", "reason": "r"}))["error"]
+
+
+def test_proposal_approved_while_finalizing_is_not_lost(engine, tmp_path, clock):
+    from backend.tutor.ingest.report import finalize_roadmap
+
+    site = _site(tmp_path / "net", {"https://ok.test/a": _page("A", _prose("Fine")), ALT: _page("G", _prose("G"))})
+    ctx = _ctx(engine, site, ingest_agent=False)
+    rid = _roadmap(engine, "race", [("a", "doc", "https://ok.test/a")])
+    _drain(ctx, rid, clock)
+    with session_scope(engine) as s:
+        s.get(Roadmap, rid).status = "finalizing"
+        prop = Resource(roadmap_id=rid, key="p", stage_id="s1", skill_ids=["k1"], title="p", kind="article", url=ALT,
+                        status="proposed", proposed_by="agent", proposal_reason="r")
+        s.add(prop)
+        s.flush()
+        service.approve_proposal(s, prop.id)
+    finalize_roadmap(engine, rid)  # the finalize that was already running
+    assert _status(engine, rid) == "ingesting"
+    _drain(ctx, rid, clock)
+    assert _res(engine, rid, "p").status == "done" and _status(engine, rid) == "ready"
 
 
 def test_proposal_routes(engine, tmp_path):

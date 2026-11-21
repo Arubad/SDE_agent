@@ -149,7 +149,7 @@ def approve_proposal(session: Session, resource_id) -> Resource:
     roadmap = session.get(Roadmap, res.roadmap_id, with_for_update=True)
     res.status, res.reason = "pending", None
     enqueue_ingest(session, res)
-    if roadmap.status in TERMINAL_STATUSES:
+    if roadmap.status in (*TERMINAL_STATUSES, "finalizing"):  # finalize sees the queued job and stands down
         roadmap.status = "ingesting"
     session.flush()
     return res
