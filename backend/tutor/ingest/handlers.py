@@ -13,9 +13,13 @@ playlist, PDF or repo is processed once per roadmap.
 Crawl limits: links are followed while `depth < crawl_max_depth`, only on the resource's host and under its
 root path (`discover`), and each page or PDF takes a slot from `Resource.stats.pages`, reserved by one atomic
 `UPDATE ... RETURNING` that fails once `crawl_max_pages` slots are taken (safe with any number of workers;
-`finalize_roadmap` later rewrites `stats.pages` to the number of documents fetched)."""
+`finalize_roadmap` later rewrites `stats.pages` to the number of documents fetched).
+
+The ingestion agent (`agent_plan`, `agent_recover`; see `agent.py`) only ever adds jobs to this queue or proposes
+resources; with it switched off or its model down the pipeline below runs exactly as without it."""
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import logging
@@ -24,7 +28,7 @@ import uuid
 from io import BytesIO
 from urllib.parse import quote, urlsplit
 
-from sqlalchemy import Engine, select, text, update
+from sqlalchemy import Engine, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -116,9 +120,11 @@ def _enqueue(ctx, job: Job, type: str, payload: dict, parts: tuple) -> None:
     ctx.enqueue(type, payload, parts, job.id, roadmap_id=job.roadmap_id)
 
 
-def _chunk(ctx, job: Job, res: Resource, doc_id: uuid.UUID | None) -> None:
+def _chunk(ctx, job: Job, res: Resource, doc_id: uuid.UUID | None, *extra) -> None:
+    """`extra` key parts re-index a document that changed (a transcript retry); the plain key indexes it once."""
     if doc_id is not None:
-        _enqueue(ctx, job, "chunk_embed", {"resource_id": str(res.id), "document_id": str(doc_id)}, (doc_id,))
+        _enqueue(ctx, job, "chunk_embed", {"resource_id": str(res.id), "document_id": str(doc_id)},
+                 (doc_id, *extra))
 
 
 def content_hash(fr: FetchResult) -> str:
@@ -166,7 +172,8 @@ def ingest_resource(ctx, job: Job) -> dict:
         type, payload = "github_repo", {**base, "repo": repo}
     else:
         type, payload = "fetch_page", {**base, "url": res.url, "depth": 0}
-    parts = ("resource", res.id, type)
+    # a URL replaced by the recovery agent is a new crawl of the resource; otherwise the keys are as before
+    parts = ("resource", res.id, type) + ((res.url,) if (res.meta or {}).get("replaced") else ())
     if type in ("fetch_page", "pdf") and not _key_exists(ctx.engine, type, job.roadmap_id, *parts):
         reserve_page(ctx.engine, res.id, ctx.settings.crawl_max_pages)  # the resource's own page takes a slot
     _enqueue(ctx, job, type, payload, parts)
@@ -217,9 +224,9 @@ def _enqueue_discoveries(ctx, job: Job, res: Resource, found, depth: int) -> dic
         _enqueue(ctx, job, "pdf", {"resource_id": rid, "url": pdf}, (pdf,))
     if depth < ctx.settings.crawl_max_depth and not full:
         host = (urlsplit(res.url).hostname or "").lower()
-        own = queue._normalize(res.url)
+        own = queue.normalize_url(res.url)
         for link in found.links:
-            if (urlsplit(link).hostname or "").lower() != host or queue._normalize(link) == own:
+            if (urlsplit(link).hostname or "").lower() != host or queue.normalize_url(link) == own:
                 continue
             if _key_exists(ctx.engine, "fetch_page", rs, link):  # also makes a retried job reserve nothing twice
                 continue
@@ -243,9 +250,15 @@ def expand_playlist(ctx, job: Job) -> dict:
     return {"videos": len(ids)}
 
 
-def make_router(ctx) -> TranscriptRouter:
-    """Uses the process-wide captions throttle and breaker (workers are threads in one process)."""
-    return TranscriptRouter(ctx.settings, ctx.net.youtube)
+def make_router(ctx, route: str | None = None) -> TranscriptRouter:
+    """Uses the process-wide captions throttle and breaker (workers are threads in one process). `route` limits
+    it to that one route, which must be enabled (a retry requested by the recovery agent)."""
+    settings = ctx.settings
+    if route is not None:
+        if route not in settings.transcript_routes:
+            raise PermanentError(f"transcript route {route!r} is not enabled")
+        settings = dataclasses.replace(settings, transcript_routes=(route,))
+    return TranscriptRouter(settings, ctx.net.youtube)
 
 
 def _embedder(ctx):
@@ -265,7 +278,8 @@ def video(ctx, job: Job) -> dict:
         _store(ctx.engine, res, url=url, kind="video", owner=owner, title=vid, status="skipped",
                reason="video_unavailable", meta={"video_id": vid})
         return {"outcome": "video_unavailable"}
-    route, cues, reason = make_router(ctx).get(vid, meta)
+    retry = p.get("route")
+    route, cues, reason = make_router(ctx, retry).get(vid, meta)
     try:
         comments = yt.top_comments(vid)
     except Exception:  # comments only help chapter detection
@@ -276,7 +290,7 @@ def video(ctx, job: Job) -> dict:
                     meta={"video_id": vid, "channel": meta.channel, "duration_s": meta.duration_s,
                           "transcript_route": route, "segment_route": seg_route, "reason": reason,
                           "chapters": len(chapters), "playlist_id": p.get("playlist_id")})
-    _chunk(ctx, job, res, doc_id)
+    _chunk(ctx, job, res, doc_id, *(("retry", retry, job.id) if retry else ()))
     return {"transcript_route": route, "segment_route": seg_route, "reason": reason}
 
 
@@ -430,24 +444,92 @@ def recheck(ctx, job: Job) -> dict:
     return record
 
 
+# -- the ingestion agent ----------------------------------------------------------------------------
+def _run_agent(ctx, job: Job, mode: str, round: int) -> dict:
+    """Run the agent once (first attempt only: a retried job does not pay for the model twice). Never raises:
+    `run_ingest_agent` records its own failures; this guards against anything that escapes it."""
+    from backend.tutor.ingest.agent import record_error, run_ingest_agent
+
+    if not ctx.settings.ingest_agent or job.attempts > 1:
+        return {"agent": "skipped"}
+    try:
+        run = run_ingest_agent(ctx, job.roadmap_id, mode, round)
+        return {"agent": run.stop, "steps": run.steps, "actions": run.actions}
+    except Exception as e:
+        log.exception("ingestion agent (%s) failed for roadmap %s", mode, job.roadmap_id)
+        record_error(ctx.engine, job.roadmap_id, mode, round, e)
+        return {"agent": "error"}
+
+
+def agent_plan(ctx, job: Job) -> dict:
+    """Plan the crawl (it may enqueue depth-1 `fetch_page` jobs, which are then claimed first), then ALWAYS
+    enqueue the deterministic `ingest_resource` jobs, with the keys `service.approve` would have used."""
+    out = _run_agent(ctx, job, "plan", 0)
+    n = 0
+    for rid in job.payload.get("resource_ids") or []:
+        with Session(ctx.engine) as s:
+            res = s.get(Resource, uuid.UUID(rid))
+            key = res.key if res is not None and res.status == "pending" else None
+        if key is not None:
+            _enqueue(ctx, job, "ingest_resource", {"resource_id": rid}, (key,))
+            n += 1
+    return {**out, "ingest_resource": n}
+
+
+def agent_recover(ctx, job: Job) -> dict:
+    return _run_agent(ctx, job, "recover", int(job.payload.get("round") or 1))
+
+
 HANDLERS: dict[str, worker.Handler] = {
     "ingest_resource": ingest_resource, "fetch_page": fetch_page, "expand_playlist": expand_playlist,
     "video": video, "pdf": pdf, "github_repo": github_repo, "chunk_embed": chunk_embed, "recheck": recheck,
+    "agent_plan": agent_plan, "agent_recover": agent_recover,
 }
 
 
 # -- orchestration used by the CLI and the served app --------------------------------------------------
-def settled_hook(engine: Engine):
-    """The `on_settled` callback for workers: finalize the roadmap (Task 11 extends this hook point)."""
+def _start_recovery(engine: Engine, settings, roadmap_id) -> bool:
+    """If the agent is on, rounds and budget remain, and the settled roadmap has gaps: back to `ingesting` and
+    one `agent_recover` job, in ONE transaction (a crash cannot leave it ingesting with nothing queued)."""
+    from backend.tutor.ingest import agent_tools
+
+    with Session(engine) as s:
+        rounds = s.execute(select(func.count()).select_from(Job).where(
+            Job.roadmap_id == roadmap_id, Job.type == "agent_recover")).scalar_one()
+        if rounds >= settings.ingest_agent_recovery_rounds:
+            return False
+        if agent_tools.spent_usd(s, roadmap_id) >= settings.ingest_agent_budget_usd:
+            return False
+        if not agent_tools.has_gaps(agent_tools.kb_status(s, roadmap_id, settings, settled=True), settings):
+            return False
+    with session_scope(engine) as s:
+        won = s.execute(update(Roadmap).where(Roadmap.id == roadmap_id, Roadmap.status == "finalizing")
+                        .values(status="ingesting")).rowcount
+        if not won:
+            return False
+        queue.enqueue(s, type="agent_recover", roadmap_id=roadmap_id, payload={"round": rounds + 1},
+                      key=queue.job_key("agent_recover", roadmap_id, str(rounds + 1)))
+    return True
+
+
+def settled_hook(engine: Engine, settings=None):
+    """The `on_settled` callback for workers: start a recovery round when `_start_recovery` says so, else
+    finalize the roadmap. Without settings (or with the agent off) it only finalizes, as before."""
     def on_settled(roadmap_id) -> None:
+        if settings is not None and settings.ingest_agent:
+            try:
+                if _start_recovery(engine, settings, roadmap_id):
+                    return
+            except Exception:  # the pipeline never depends on the agent: finalize instead
+                log.exception("could not start a recovery round for roadmap %s", roadmap_id)
         finalize_roadmap(engine, roadmap_id)
     return on_settled
 
 
-def settle(engine: Engine, roadmap_id) -> None:
+def settle(engine: Engine, roadmap_id, settings=None) -> None:
     """Finalize a roadmap with no queued/running jobs: one still `ingesting` (e.g. re-approved with every job
     already done, or nothing to enqueue) goes through the normal CAS; one left `finalizing` is finished."""
-    hook = settled_hook(engine)
+    hook = settled_hook(engine, settings)
     worker.maybe_settle(engine, roadmap_id, hook)
     with Session(engine) as s:
         status = s.get(Roadmap, roadmap_id).status
@@ -460,17 +542,22 @@ def ingest_roadmap(ctx, roadmap_id, *, until_idle: bool = True, workers: int = 0
                    timeout_s: float | None = None) -> str:
     """Run the roadmap's jobs in the foreground and return its final (or current) status. `until_idle` runs
     inline and returns once nothing is due; otherwise a `workers`-thread pool runs until the status is terminal."""
-    on_settled = settled_hook(ctx.engine)
+    on_settled = settled_hook(ctx.engine, ctx.settings)
     if until_idle:
-        worker.run_until_idle(ctx, HANDLERS, roadmap_id=roadmap_id, on_settled=on_settled)
-        settle(ctx.engine, roadmap_id)
+        for _ in range(ctx.settings.ingest_agent_recovery_rounds + 2):  # settle() may start a recovery round
+            worker.run_until_idle(ctx, HANDLERS, roadmap_id=roadmap_id, on_settled=on_settled)
+            settle(ctx.engine, roadmap_id, ctx.settings)
+            with Session(ctx.engine) as s:
+                if not s.execute(select(Job.id).where(Job.roadmap_id == roadmap_id, Job.status == "queued",
+                                                      Job.not_before <= queue.clock()).limit(1)).first():
+                    break
     else:
         pool = worker.WorkerPool(ctx, HANDLERS, max(1, workers), on_settled=on_settled)
         pool.start()
         deadline = None if timeout_s is None else time.monotonic() + timeout_s
         try:
             while deadline is None or time.monotonic() < deadline:
-                settle(ctx.engine, roadmap_id)
+                settle(ctx.engine, roadmap_id, ctx.settings)
                 with Session(ctx.engine) as s:
                     if s.get(Roadmap, roadmap_id).status in TERMINAL:
                         break

@@ -13,6 +13,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    Numeric,
     Text,
     UniqueConstraint,
     func,
@@ -50,8 +51,10 @@ class Resource(Base):
     """A resource from the roadmap spec.
 
     `kind`: video|playlist|doc|article|course_site|interactive|pdf|repo|other.
-    `status` is free text, no DB constraint; values include pending, ingesting, ingested, linked_only, skipped,
-    failed (later tasks may add more).
+    `status` is free text, no DB constraint; values include pending, ingesting, done, partial, linked_only,
+    skipped, failed, and for suggestions `proposed` (awaiting the user) and `dismissed`.
+    `proposed_by` is `agent` or `user` for suggested resources (None for the roadmap's own); `meta.replaced`
+    lists URLs the recovery agent replaced.
     """
 
     __tablename__ = "resources"
@@ -69,6 +72,9 @@ class Resource(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, default="pending", server_default="pending")
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     stats: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")  # pages, videos, chunks
+    meta: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    proposed_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    proposal_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class Job(Base):
@@ -153,5 +159,26 @@ class HttpCache(Base):
     etag: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_modified: Mapped[str | None] = mapped_column(Text, nullable=True)
     fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class AgentAction(Base):
+    """One ingestion-agent tool call (or, with `tool="run"`, one run: `args` = {stop, steps, actions}, `summary`
+    = the final notes). `mode`: plan|recover; `outcome`: ok|refused|error. `cost_usd` holds the run's model cost on
+    its `run` row, so the per-roadmap budget is the sum over the roadmap's rows."""
+
+    __tablename__ = "agent_actions"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    roadmap_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), _roadmap_fk(), nullable=False, index=True)
+    mode: Mapped[str] = mapped_column(Text, nullable=False)
+    round: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    tool: Mapped[str] = mapped_column(Text, nullable=False)
+    args: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    cost_usd: Mapped[float] = mapped_column(Numeric(12, 6), nullable=False, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

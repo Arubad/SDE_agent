@@ -44,7 +44,9 @@ def _utcnow() -> datetime:
 clock: Callable[[], datetime] = _utcnow
 
 
-def _normalize(part: str) -> str:
+def normalize_url(part: str) -> str:
+    """The URL form job keys (and the ingestion agent's URL policy) compare: scheme and netloc lowercased,
+    trailing slash, fragment and utm_* parameters dropped. Anything without "://" is returned unchanged."""
     if "://" not in part:
         return part
     u = urlsplit(part.strip())
@@ -53,8 +55,11 @@ def _normalize(part: str) -> str:
     return urlunsplit((u.scheme.lower(), u.netloc.lower(), path, query, ""))
 
 
+_normalize = normalize_url  # the earlier private name
+
+
 def job_key(type: str, roadmap_id, *parts: str) -> str:
-    digest = hashlib.sha1("\x1f".join(_normalize(str(p)) for p in parts).encode()).hexdigest()[:16]
+    digest = hashlib.sha1("\x1f".join(normalize_url(str(p)) for p in parts).encode()).hexdigest()[:16]
     return f"{type}:{roadmap_id}:{digest}"
 
 

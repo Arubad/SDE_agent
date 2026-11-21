@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import Engine, text
+from sqlalchemy import Engine, select, text
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 from backend.agent import access
@@ -19,7 +19,7 @@ from backend.core import config
 from backend.core.llm import LLMUnavailable
 from backend.core.trace import start_trace
 from backend.tutor.db import make_engine, migrate, session_scope
-from backend.tutor.models import Roadmap
+from backend.tutor.models import Resource, Roadmap
 from backend.tutor.ingest import service
 from backend.tutor.ingest.embed import make_embedder
 from backend.tutor.ingest.index import make_index
@@ -246,7 +246,7 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
                 if r.status != "parsed":  # 409 before the body is validated
                     raise service.Conflict(f"Roadmap is '{r.status}'; it can only be approved while parsed.")
                 spec = normalize_spec(body.spec, r.source_text)
-                service.approve(session, r, spec, body.choices)
+                service.approve(session, r, spec, body.choices, agent=settings.ingest_agent)
                 roadmap_id = r.id
         except service.Conflict as exc:
             return _error(409, str(exc))
@@ -255,6 +255,32 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
         if on_settled is not None:  # nothing to run (no crawlable resource, or every job already done)
             maybe_settle(request.app.state.engine, roadmap_id, on_settled)
         return {"status": "ingesting"}
+
+    def _proposal_route(slug: str, key: str, request: Request, action) -> JSONResponse | dict:
+        try:
+            with session_scope(request.app.state.engine) as session:
+                r = get_roadmap_by_slug(session, slug, lock=True)
+                if r is None:
+                    return _error(404, f"No roadmap '{slug}'")
+                res = session.scalars(select(Resource).where(Resource.roadmap_id == r.id,
+                                                             Resource.key == key)).first()
+                if res is None:
+                    return _error(404, f"No resource '{key}' in roadmap '{slug}'")
+                res = action(session, res.id)
+                return {"id": res.key, "status": res.status, "roadmap_status": r.status}
+        except service.Conflict as exc:
+            return _error(409, str(exc))
+        except ValueError as exc:
+            return _error(422, str(exc))
+
+    @app.post("/api/roadmaps/{slug}/resources/{key}/approve")
+    def approve_proposal_route(slug: str, key: str, request: Request):
+        """Accept a resource the ingestion agent proposed: it is validated again and ingested."""
+        return _proposal_route(slug, key, request, service.approve_proposal)
+
+    @app.post("/api/roadmaps/{slug}/resources/{key}/dismiss")
+    def dismiss_proposal_route(slug: str, key: str, request: Request):
+        return _proposal_route(slug, key, request, service.dismiss_proposal)
 
     @app.get("/api/roadmaps/{slug}/events")
     async def events(slug: str, request: Request):

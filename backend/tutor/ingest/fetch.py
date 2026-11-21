@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlsplit
 from urllib.robotparser import RobotFileParser
@@ -155,13 +156,16 @@ class Fetcher:
         return rp
 
     # -- transport ------------------------------------------------------------------------------
-    def _download(self, url: str, headers: dict[str, str], *, check_robots: bool) -> _Raw:
+    def _download(self, url: str, headers: dict[str, str], *, check_robots: bool,
+                  url_guard: Callable[[str], bool] | None = None) -> _Raw:
         headers = {"User-Agent": self._ua, "Accept": "text/html,application/xhtml+xml,*/*;q=0.5", **headers}
         for _ in range(MAX_REDIRECTS + 1):
             try:
                 parts = urlsplit(url)
                 if parts.scheme not in ("http", "https") or not parts.hostname:
                     raise _Early(FetchResult(url, 0, "", b"", "error", "unsupported URL scheme"))
+                if url_guard is not None and not url_guard(url):  # checked on every hop, before any request
+                    raise _Early(FetchResult(url, 0, "", b"", "error", "redirect target not allowed"))
                 if (check_robots and (parts.hostname or "").lower() not in ROBOTS_EXEMPT_HOSTS
                         and not self._robots_allow(url)):
                     raise _Early(FetchResult(url, 0, "", b"", "robots_denied", "disallowed by robots.txt"))
@@ -187,9 +191,11 @@ class Fetcher:
         raise _Early(FetchResult(url, 0, "", b"", "error", f"too many redirects (> {MAX_REDIRECTS})"))
 
     # -- public ---------------------------------------------------------------------------------
-    def get(self, url: str, *, headers: dict[str, str] | None = None) -> FetchResult:
+    def get(self, url: str, *, headers: dict[str, str] | None = None,
+            url_guard: Callable[[str], bool] | None = None) -> FetchResult:
         """`headers` are extra request headers (an `Authorization` header is dropped on a cross-host redirect).
-        robots.txt is always honoured except on the hard-coded ROBOTS_EXEMPT_HOSTS."""
+        robots.txt is always honoured except on the hard-coded ROBOTS_EXEMPT_HOSTS. `url_guard`, if given, must
+        accept the URL and every redirect hop, or the fetch stops before that request (outcome `error`)."""
         cached = self._cache.get(url) if self._cache else None
         conditional: dict[str, str] = {}
         if cached and cached.etag:
@@ -197,7 +203,7 @@ class Fetcher:
         if cached and cached.last_modified:
             conditional["If-Modified-Since"] = cached.last_modified
         try:
-            raw = self._download(url, {**(headers or {}), **conditional}, check_robots=True)
+            raw = self._download(url, {**(headers or {}), **conditional}, check_robots=True, url_guard=url_guard)
         except _Early as e:
             return e.result
         if raw.status == 304 and cached:

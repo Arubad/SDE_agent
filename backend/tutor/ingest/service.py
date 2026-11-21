@@ -71,8 +71,13 @@ def validate_crawl_url(url: str) -> None:
         raise ValueError(f"URL points at a private or reserved address: {url!r}")
 
 
-def approve(session: Session, roadmap: Roadmap, spec: RoadmapSpec, choices: dict[str, str | None]) -> None:
+def approve(session: Session, roadmap: Roadmap, spec: RoadmapSpec, choices: dict[str, str | None], *,
+            agent: bool = True) -> None:
     """Write Resource rows and enqueue ingest jobs, then set status `ingesting`.
+
+    With `agent` (settings.ingest_agent) one `agent_plan` job is enqueued for the pending resources instead; it
+    plans the crawl and then enqueues the same `ingest_resource` jobs (same keys) itself, so planned pages are
+    claimed first. Without it the `ingest_resource` jobs are enqueued directly, as before.
 
     Per resource: a key in `choices` with a URL uses that URL; an explicit `None` -> `skipped`/`no_url`; an absent
     key falls back to the spec's own `url` (user-authored, it survives normalisation only if it appears in the
@@ -109,13 +114,52 @@ def approve(session: Session, roadmap: Roadmap, spec: RoadmapSpec, choices: dict
         session.execute(pg_insert(Resource).values(rows).on_conflict_do_nothing(index_elements=["roadmap_id", "key"]))
     stored = session.scalars(select(Resource).where(Resource.roadmap_id == roadmap.id)
                              .execution_options(populate_existing=True)).all()
-    for res in stored:
-        if res.url and res.kind != "interactive" and res.status == "pending":
-            queue.enqueue(session, type="ingest_resource", roadmap_id=roadmap.id,
-                          payload={"resource_id": str(res.id)},
-                          key=queue.job_key("ingest_resource", roadmap.id, res.key))
+    pending = [res for res in stored if res.url and res.kind != "interactive" and res.status == "pending"]
+    if agent and pending:
+        keys = sorted(res.key for res in pending)  # a re-approve that adds resources plans them anew
+        queue.enqueue(session, type="agent_plan", roadmap_id=roadmap.id,
+                      payload={"resource_ids": [str(res.id) for res in pending]},
+                      key=queue.job_key("agent_plan", roadmap.id, *keys))
+    else:
+        for res in pending:
+            enqueue_ingest(session, res)
     roadmap.status = "ingesting"
     session.flush()
+
+
+def enqueue_ingest(session: Session, res: Resource) -> None:
+    queue.enqueue(session, type="ingest_resource", roadmap_id=res.roadmap_id, payload={"resource_id": str(res.id)},
+                  key=queue.job_key("ingest_resource", res.roadmap_id, res.key))
+
+
+def _proposal(session: Session, resource_id) -> Resource:
+    res = session.get(Resource, resource_id, with_for_update=True)
+    if res is None:
+        raise LookupError("No such resource")
+    if res.status != "proposed":
+        raise Conflict(f"Resource is '{res.status}'; only a proposed resource can be approved or dismissed.")
+    return res
+
+
+def approve_proposal(session: Session, resource_id) -> Resource:
+    """The user accepts a suggested resource: its URL is validated again, it becomes `pending` with an
+    `ingest_resource` job, and a settled roadmap goes back to `ingesting` (the progress view resumes)."""
+    res = _proposal(session, resource_id)
+    validate_crawl_url(res.url or "")
+    roadmap = session.get(Roadmap, res.roadmap_id, with_for_update=True)
+    res.status, res.reason = "pending", None
+    enqueue_ingest(session, res)
+    if roadmap.status in TERMINAL_STATUSES:
+        roadmap.status = "ingesting"
+    session.flush()
+    return res
+
+
+def dismiss_proposal(session: Session, resource_id) -> Resource:
+    res = _proposal(session, resource_id)
+    res.status = "dismissed"
+    session.flush()
+    return res
 
 
 def progress(session: Session, roadmap: Roadmap) -> dict:

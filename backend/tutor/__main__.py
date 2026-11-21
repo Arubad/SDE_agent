@@ -102,7 +102,7 @@ def build_app(settings):
 
     migrate(settings.database_url)
     engine = make_engine(settings.database_url)
-    return create_app(settings, engine=engine, handlers=HANDLERS, on_settled=settled_hook(engine))
+    return create_app(settings, engine=engine, handlers=HANDLERS, on_settled=settled_hook(engine, settings))
 
 
 if __name__ == "__main__":

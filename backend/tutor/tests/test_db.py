@@ -174,3 +174,31 @@ def test_migration_0002_round_trip(db_url):
         with admin.connect() as c:
             c.execute(text(f'DROP DATABASE IF EXISTS "{name}"'))
         admin.dispose()
+
+
+def test_migration_0003_round_trip(db_url):
+    import uuid
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+
+    name = f"tutor_mig_{uuid.uuid4().hex[:8]}"
+    admin = create_engine(make_url(db_url).set(database="postgres"), isolation_level="AUTOCOMMIT")
+    url = make_url(db_url).set(database=name).render_as_string(hide_password=False)
+    with admin.connect() as c:
+        c.execute(text(f'CREATE DATABASE "{name}"'))
+    eng = create_engine(url)
+    cols = lambda: {c["name"] for c in inspect(eng).get_columns("resources")}  # noqa: E731
+    try:
+        migrate(url)
+        assert "agent_actions" in inspect(eng).get_table_names()
+        assert {"meta", "proposed_by", "proposal_reason"} <= cols()
+        downgrade(url, "0002")
+        assert "agent_actions" not in inspect(eng).get_table_names() and "resources" in inspect(eng).get_table_names()
+        assert not {"meta", "proposed_by", "proposal_reason"} & cols()
+        migrate(url)
+        assert "agent_actions" in inspect(eng).get_table_names()
+    finally:
+        eng.dispose()
+        with admin.connect() as c:
+            c.execute(text(f'DROP DATABASE IF EXISTS "{name}"'))

@@ -14,7 +14,7 @@ from sqlalchemy import Engine, select, update
 from sqlalchemy.orm import Session
 
 from backend.tutor.db import session_scope
-from backend.tutor.models import Document, Job, Resource, Roadmap
+from backend.tutor.models import AgentAction, Document, Job, Resource, Roadmap
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +68,9 @@ def _gather(session: Session, roadmap_id):
     return resources, docs_by_res, failures
 
 
+gather = _gather  # public name for the ingestion agent's kb_status
+
+
 def _chunks(doc: Document) -> int:
     return int((doc.meta or {}).get("chunks") or 0)
 
@@ -76,23 +79,44 @@ def _dominant(reasons: list[str]) -> str | None:
     return Counter(reasons).most_common(1)[0][0] if reasons else None
 
 
-def _finalize(session: Session, roadmap_id) -> None:
-    roadmap = session.get(Roadmap, roadmap_id, with_for_update=True)
-    resources, docs_by_res, failures = _gather(session, roadmap_id)
-    crawlable = []
+SUGGESTED = ("proposed", "dismissed")  # suggestions awaiting (or refused by) the user: not part of the roadmap yet
+
+
+def is_crawlable(r: Resource) -> bool:
+    return bool(r.url) and r.status != "linked_only" and r.status not in SUGGESTED
+
+
+def resource_outcomes(resources, docs_by_res, failures) -> dict:
+    """resource id -> (status, reason, stats) for every crawlable resource, from what its jobs left behind."""
+    out = {}
     for r in resources:
-        if r.status == "linked_only" or not r.url:
-            continue  # kept as approved: linked_only, or skipped/no_url
-        crawlable.append(r)
+        if not is_crawlable(r):
+            continue  # kept as approved: linked_only, skipped/no_url, or a suggestion
         docs = docs_by_res.get(r.id, [])
         ok = [d for d in docs if d.status == "ok"]
         gaps = [reason for _, reason in failures.get(r.id, [])] + [d.reason for d in ok if d.reason]
         if any(_chunks(d) for d in ok):
-            r.status, r.reason = ("partial", _dominant(gaps)) if gaps else ("done", None)
+            status, reason = ("partial", _dominant(gaps)) if gaps else ("done", None)
         else:
-            r.status, r.reason = "skipped", _dominant(gaps) or "no_content"
-        r.stats = {**(r.stats or {}), "pages": sum(1 for d in ok if d.kind != "video"),
-                   "videos": sum(1 for d in ok if d.kind == "video"), "chunks": sum(_chunks(d) for d in ok)}
+            status, reason = "skipped", _dominant(gaps) or "no_content"
+        out[r.id] = (status, reason, {**(r.stats or {}), "pages": sum(1 for d in ok if d.kind != "video"),
+                                      "videos": sum(1 for d in ok if d.kind == "video"),
+                                      "chunks": sum(_chunks(d) for d in ok)})
+    return out
+
+
+def current_outcomes(session: Session, roadmap_id) -> dict:
+    """What finalizing now would set, without writing it (the recovery agent's view of the gaps)."""
+    return resource_outcomes(*_gather(session, roadmap_id))
+
+
+def _finalize(session: Session, roadmap_id) -> None:
+    roadmap = session.get(Roadmap, roadmap_id, with_for_update=True)
+    resources, docs_by_res, failures = _gather(session, roadmap_id)
+    outcomes = resource_outcomes(resources, docs_by_res, failures)
+    crawlable = [r for r in resources if r.id in outcomes]
+    for r in crawlable:
+        r.status, r.reason, r.stats = outcomes[r.id]
     if crawlable and all(r.status == "done" for r in crawlable):
         roadmap.status = "ready"
     elif not crawlable or any(r.status in ("done", "partial") for r in crawlable):
@@ -140,8 +164,21 @@ def _spec_order(roadmap: Roadmap) -> dict[str, int]:
     return {k: i for i, k in enumerate(keys)}
 
 
+def _agent_section(session: Session, roadmap_id) -> tuple[dict, float]:
+    rows = list(session.scalars(select(AgentAction).where(AgentAction.roadmap_id == roadmap_id)
+                                .order_by(AgentAction.id)))
+    runs = [{"mode": a.mode, "round": a.round, "stop": (a.args or {}).get("stop"),
+             "steps": int((a.args or {}).get("steps") or 0), "cost_usd": float(a.cost_usd or 0), "notes": a.summary}
+            for a in rows if a.tool == "run"]
+    actions = [{"tool": a.tool, "args": a.args, "outcome": a.outcome, "summary": a.summary}
+               for a in rows if a.tool != "run"]
+    return {"runs": runs, "actions": actions}, sum(float(a.cost_usd or 0) for a in rows)
+
+
 def build_report(session: Session, roadmap: Roadmap) -> dict:
     resources, docs_by_res, failures = _gather(session, roadmap.id)
+    proposals = sorted((r for r in resources if r.status == "proposed"), key=lambda r: r.key)
+    resources = [r for r in resources if r.status not in SUGGESTED]
     order = _spec_order(roadmap)
     resources.sort(key=lambda r: (order.get(r.key, len(order)), r.key))
     out_res = [{"id": r.key, "title": r.title, "kind": r.kind, "url": r.url, "status": r.status, "reason": r.reason,
@@ -160,10 +197,17 @@ def build_report(session: Session, roadmap: Roadmap) -> dict:
     ok = sum(by_route.values())
     skipped = sorted(({"url": u, "reason": reason} for items in failures.values() for u, reason in items),
                      key=lambda x: (x["url"] or "", x["reason"] or ""))
+    agent, cost = _agent_section(session, roadmap.id)
+    summary = video_summary(len(videos), segments, ok, by_route)
+    if agent["runs"] or agent["actions"]:
+        summary += f"\nAgent: {len(agent['actions'])} actions over {len(agent['runs'])} rounds, ${cost:.3f}"
     return {
         "status": roadmap.status,
         "resources": out_res,
         "videos": {"total": len(videos), "segments": segments, "transcripts": {"ok": ok, "by_route": by_route}},
         "skipped": skipped,
-        "summary": video_summary(len(videos), segments, ok, by_route),
+        "summary": summary,
+        "agent": agent,
+        "proposals": [{"id": r.key, "skill_id": (r.skill_ids or [None])[0], "title": r.title, "url": r.url,
+                       "reason": r.proposal_reason} for r in proposals],
     }

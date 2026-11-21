@@ -28,6 +28,7 @@ def _env(monkeypatch):
 
 
 def _settings(tmp_path, **kw):
+    kw.setdefault("ingest_agent", False)  # approve enqueues ingest_resource jobs directly (agent: see below)
     return Settings(web_dist=tmp_path / "no-dist", net_fixtures_dir=FIXTURES / "net", ingest_workers=0, **kw)
 
 
@@ -77,6 +78,17 @@ def test_parse_then_approve_flow(client):
     assert got["slug"] == slug and got["resources"][0]["stats"] == {}
     # idempotent-safe: a second approve is a 409, and nothing is duplicated
     assert client.post(f"/api/roadmaps/{slug}/approve", json={"spec": parsed["spec"], "choices": choices}).status_code == 409
+
+
+def test_approve_with_agent_enqueues_one_plan_job(engine, tmp_path):
+    with session_scope(engine) as s:
+        s.execute(text("DELETE FROM roadmaps"))
+    with TestClient(create_app(_settings(tmp_path, ingest_agent=True), engine=engine)) as client:
+        slug = _create(client)
+        parsed = _parse(client, slug)
+        r = client.post(f"/api/roadmaps/{slug}/approve", json={"spec": parsed["spec"], "choices": _choices(parsed)})
+        assert r.status_code == 202, r.text
+        assert client.get(f"/api/roadmaps/{slug}").json()["jobs"] == {"agent_plan": {"queued": 1}}
 
 
 def test_approve_skips_resources_without_url(client):

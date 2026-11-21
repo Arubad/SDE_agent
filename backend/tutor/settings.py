@@ -44,6 +44,11 @@ class Settings:
     net_fixtures_dir: Path | None = None
     embedder: str = "bge"  # "bge" or "hash"
     github_token: str | None = field(default=None, repr=False)  # GITHUB_TOKEN: GitHub API rate limits
+    ingest_agent: bool = True  # INGEST_AGENT: the Haiku planner/recoverer around the job queue
+    ingest_agent_budget_usd: float = 0.05  # per roadmap, all agent runs together
+    ingest_agent_max_steps: int = 12
+    ingest_agent_recovery_rounds: int = 2
+    min_chunks_per_skill: int = 5  # a skill with fewer indexed chunks is a gap the recoverer looks at
 
     def validate(self) -> None:
         if self.public_mode and not config.PREMIUM_PASSCODE:
@@ -126,4 +131,6 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
         net_fixtures_dir=Path(env["NET_FIXTURES_DIR"]) if env.get("NET_FIXTURES_DIR") else None,
         embedder=embedder,
         github_token=(env.get("GITHUB_TOKEN") or "").strip() or None,
+        ingest_agent=(_parse_bool("INGEST_AGENT", env.get("INGEST_AGENT"))
+                      if (env.get("INGEST_AGENT") or "").strip() else d.ingest_agent),
     )

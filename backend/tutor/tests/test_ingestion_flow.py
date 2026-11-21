@@ -85,6 +85,7 @@ def clock(monkeypatch):
 
 
 def _ctx(engine, site: Path, **kw) -> JobContext:
+    kw.setdefault("ingest_agent", False)  # the pure pipeline; the agent has its own tests (test_ingest_agent.py)
     settings = Settings(net_fixtures_dir=site, qdrant_url=":memory:", embedder="hash", **kw)
     index = PlatformIndex(QdrantClient(":memory:"), "flow_chunks", HashEmbedder())
     return JobContext(engine=engine, net=fixture_net(site), settings=settings, index=index)
@@ -101,7 +102,7 @@ def _roadmap(engine, slug: str, resources: list[tuple[str, str, str | None]]):
         rm = create_roadmap(s, slug=slug, title=slug, source_text="x")
         rm.status = "parsed"
         s.flush()
-        service.approve(s, rm, spec, {})
+        service.approve(s, rm, spec, {}, agent=False)
         return rm.id
 
 
@@ -360,7 +361,7 @@ def test_reingest_and_empty_roadmap_reach_terminal(engine, tmp_path, clock):
         rm = s.get(Roadmap, rid)
         rm.status = "parsed"
         s.flush()
-        service.approve(s, rm, RoadmapSpec(**rm.spec), {})
+        service.approve(s, rm, RoadmapSpec(**rm.spec), {}, agent=False)
     assert _status(engine, rid) == "ingesting"
     H.ingest_roadmap(ctx, rid)
     assert _status(engine, rid) == "ready"
@@ -475,7 +476,7 @@ def test_cli_ingest_report_recheck(engine, db_url, tmp_path, monkeypatch, capsys
 
     site = _site(tmp_path / "net", {"https://flow.test/one": _page("One", _prose("Command line"))})
     for k, v in {"DATABASE_URL": db_url, "NET_FIXTURES_DIR": str(site), "EMBEDDER": "hash",
-                 "PLATFORM_QDRANT_URL": ":memory:", "TRANSCRIPT_ROUTES": "captions"}.items():
+                 "PLATFORM_QDRANT_URL": ":memory:", "TRANSCRIPT_ROUTES": "captions", "INGEST_AGENT": "false"}.items():
         monkeypatch.setenv(k, v)
     _roadmap(engine, "cli", [("one", "doc", "https://flow.test/one")])
     main(["ingest", "cli", "--until-idle"])
