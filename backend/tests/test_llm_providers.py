@@ -177,3 +177,53 @@ def test_redacted_response_is_flagged_warned_and_reported(monkeypatch, tmp_path,
     llm.haiku_client().messages.create(**SECRET_REQUEST)
     llm.haiku_client().messages.create(**{**SECRET_REQUEST, "max_tokens": 11})
     assert len(llm_replay.redacted_recordings) == 1  # only the flagged one is reported on replay
+
+
+def _write_script(path, lines):
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _create(**kw):
+    return FakeAnthropic().messages.create(model="m", max_tokens=10, messages=[{"role": "user", "content": "q"}],
+                                           **kw)
+
+
+def test_script_file_replies_are_consumed_in_order(monkeypatch, tmp_path):
+    script = _write_script(tmp_path / "script.jsonl", [
+        "# comment lines and blank lines are ignored",
+        "",
+        json.dumps({"tool_uses": [["web_search", {"query": "k8s"}]]}),
+        json.dumps({"text": "all done"}),
+    ])
+    monkeypatch.setenv("FAKE_LLM_SCRIPT", str(script))
+    first = _create()
+    assert first.stop_reason == "tool_use"
+    assert [(b.name, b.input) for b in first.content if b.type == "tool_use"] == [("web_search", {"query": "k8s"})]
+    second = _create()
+    assert second.stop_reason == "end_turn" and second.content[0].text == "all done"
+    assert _create().content[0].text == fake_llm.DEFAULT_TEXT  # exhausted: the default reply
+
+
+def test_structured_requests_use_the_replies_dir_before_the_script_file(monkeypatch, tmp_path):
+    replies = tmp_path / "replies"
+    replies.mkdir()
+    (replies / "Routing.json").write_text(json.dumps({"route": "web", "k": 7}), encoding="utf-8")
+    script = _write_script(tmp_path / "script.jsonl", [json.dumps({"text": "scripted"})])
+    monkeypatch.setenv("FAKE_LLM_REPLIES_DIR", str(replies))
+    monkeypatch.setenv("FAKE_LLM_SCRIPT", str(script))
+    assert llm.haiku_json(system="s", prompt="p", schema={**SCHEMA, "title": "Routing"}) == {"route": "web", "k": 7}
+    assert _create().content[0].text == "scripted"  # the script line was not used by the structured request
+
+
+def test_in_process_script_comes_before_the_script_file(monkeypatch, tmp_path):
+    script = _write_script(tmp_path / "script.jsonl", [json.dumps({"text": "from file"})])
+    monkeypatch.setenv("FAKE_LLM_SCRIPT", str(script))
+    with fake_llm.script([FakeReply(text="in process")]):
+        assert _create().content[0].text == "in process"
+        assert _create().content[0].text == "from file"
+
+
+def test_without_the_env_var_no_script_file_is_read(monkeypatch):
+    monkeypatch.delenv("FAKE_LLM_SCRIPT", raising=False)
+    assert _create().content[0].text == fake_llm.DEFAULT_TEXT
