@@ -115,7 +115,7 @@ class PlatformIndex:
 
 def make_index(settings, embedder) -> PlatformIndex:
     client = QdrantClient(":memory:") if settings.qdrant_url == ":memory:" else QdrantClient(
-        url=settings.qdrant_url, timeout=60)
+        url=settings.qdrant_url, timeout=60, check_compatibility=False)  # no request until first use
     return PlatformIndex(client, settings.collection, embedder)
 
 

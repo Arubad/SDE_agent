@@ -21,6 +21,8 @@ from backend.core.trace import start_trace
 from backend.tutor.db import make_engine, migrate, session_scope
 from backend.tutor.models import Roadmap
 from backend.tutor.ingest import service
+from backend.tutor.ingest.embed import make_embedder
+from backend.tutor.ingest.index import make_index
 from backend.tutor.ingest.net import make_net
 from backend.tutor.jobs.worker import JobContext, WorkerPool, maybe_settle
 from backend.tutor.repo import DuplicateRoadmap, create_roadmap, get_roadmap_by_slug, list_roadmaps
@@ -118,7 +120,9 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
         app.state.net = make_net(settings, app.state.engine)
         pool = None
         if handlers and settings.ingest_workers > 0:
-            ctx = JobContext(engine=app.state.engine, net=app.state.net, settings=settings, index=None)
+            # Built only when workers run; the embedder loads its models lazily, on first use.
+            index = make_index(settings, make_embedder(settings))
+            ctx = JobContext(engine=app.state.engine, net=app.state.net, settings=settings, index=index)
             pool = WorkerPool(ctx, handlers, settings.ingest_workers, on_settled=on_settled,
                               tracer_provider=app.state.tracer_provider)
             pool.start()

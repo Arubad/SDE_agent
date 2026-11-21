@@ -90,9 +90,19 @@ def main(argv: list[str] | None = None) -> None:
         return
     import uvicorn
 
-    from backend.tutor.api import create_app
+    uvicorn.run(build_app(settings), host=settings.host, port=settings.port)
 
-    uvicorn.run(create_app(settings), host=settings.host, port=settings.port)
+
+def build_app(settings):
+    """The served app: migrated database, ingestion handlers and the settle hook (finalize the roadmap).
+    The engine lives as long as the process (`app.state.engine`)."""
+    from backend.tutor.api import create_app
+    from backend.tutor.db import make_engine, migrate
+    from backend.tutor.ingest.handlers import HANDLERS, settled_hook
+
+    migrate(settings.database_url)
+    engine = make_engine(settings.database_url)
+    return create_app(settings, engine=engine, handlers=HANDLERS, on_settled=settled_hook(engine))
 
 
 if __name__ == "__main__":

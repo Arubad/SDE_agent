@@ -285,3 +285,44 @@ def test_explicit_null_skips_even_with_source_url(client, monkeypatch):
 def test_choice_url_is_stored_stripped(client, monkeypatch):
     got = _approve_url_case(client, monkeypatch, {"res-no-url": "  https://example.test/x  "})
     assert got["res-no-url"]["url"] == "https://example.test/x" and got["res-no-url"]["status"] == "pending"
+
+
+def test_served_app_ingests_to_terminal_status(engine, db_url, tmp_path, monkeypatch):
+    """The `python -m backend.tutor` serve path: handlers + settle hook + a real (in-memory) index."""
+    import time
+
+    from backend.tutor.__main__ import build_app
+    from backend.tutor.ingest import video
+
+    monkeypatch.setattr(video, "CAPTIONS_THROTTLE", video.Throttle(0, sleep=lambda s: None))
+    monkeypatch.setattr(video, "CAPTIONS_BREAKER", video.CircuitBreaker())
+    with session_scope(engine) as s:
+        s.execute(text("DELETE FROM roadmaps"))
+    settings = Settings(database_url=db_url, web_dist=tmp_path / "no-dist", net_fixtures_dir=FIXTURES / "net",
+                        ingest_workers=2, embedder="hash", qdrant_url=":memory:")
+    app = build_app(settings)
+    try:
+        with TestClient(app) as c:
+            slug = _create(c, "served")
+            parsed = _parse(c, slug)
+            choices = _choices(parsed)
+            ids = [r["resource_id"] for r in parsed["resolution"]]
+            choices[ids[0]] = "https://example.test/kubernetes-intro"
+            choices[ids[1]] = "https://www.youtube.com/watch?v=kube000001a"
+            r = c.post(f"/api/roadmaps/{slug}/approve", json={"spec": parsed["spec"], "choices": choices})
+            assert r.status_code == 202, r.text
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                status = c.get(f"/api/roadmaps/{slug}").json()["status"]
+                if status in ("ready", "ready_with_gaps", "failed"):
+                    break
+                time.sleep(0.2)
+            assert status == "ready_with_gaps"
+            rep = c.get(f"/api/roadmaps/{slug}/report").json()
+            assert sum(x["chunks"] for x in rep["resources"]) > 0
+            assert rep["videos"]["transcripts"]["by_route"].get("captions", 0) >= 1
+            assert not [x for x in rep["skipped"] if x["reason"] == "index_error"]
+        with session_scope(engine) as s:
+            assert s.execute(text("SELECT count(*) FROM sections")).scalar() > 0
+    finally:
+        app.state.engine.dispose()

@@ -366,8 +366,8 @@ def test_reingest_and_empty_roadmap_reach_terminal(engine, tmp_path, clock):
     assert _status(engine, rid) == "ready"
 
     rid = _roadmap(engine, "labs", [("lab", "interactive", "https://killercoda.com/playgrounds")])
-    H.ingest_roadmap(ctx, rid)  # nothing was ever enqueued
-    assert _status(engine, rid) == "failed"
+    H.ingest_roadmap(ctx, rid)  # nothing was ever enqueued; nothing failed either
+    assert _status(engine, rid) == "ready_with_gaps"
     assert _resources(engine, rid)["lab"].status == "linked_only"
 
 

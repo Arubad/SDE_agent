@@ -26,6 +26,10 @@ OUTCOMES = (
     "ok", "not_found", "robots_denied", "login_wall", "paywall", "bot_protection",
     "needs_browser", "too_large", "unsupported_type", "error",
 )
+# Documented programmatic APIs (not crawl targets) whose robots.txt is not consulted. Hard-coded: no caller
+# can widen it; checked on every hop, so a redirect off these hosts is robots-checked again. The per-host
+# interval and the User-Agent still apply.
+ROBOTS_EXEMPT_HOSTS = frozenset({"api.github.com", "raw.githubusercontent.com"})
 _TEXT_TYPES = {"application/xhtml+xml", "application/pdf", "application/json", "application/xml"}
 _PAYWALL = re.compile(
     r"paywall|subscribe to (?:continue|read)|subscribers[- ]only|this (?:article|content) is for "
@@ -158,7 +162,8 @@ class Fetcher:
                 parts = urlsplit(url)
                 if parts.scheme not in ("http", "https") or not parts.hostname:
                     raise _Early(FetchResult(url, 0, "", b"", "error", "unsupported URL scheme"))
-                if check_robots and not self._robots_allow(url):
+                if (check_robots and (parts.hostname or "").lower() not in ROBOTS_EXEMPT_HOSTS
+                        and not self._robots_allow(url)):
                     raise _Early(FetchResult(url, 0, "", b"", "robots_denied", "disallowed by robots.txt"))
                 self._wait_turn(parts.netloc)
                 with self._client.stream("GET", url, headers=headers, timeout=TIMEOUT_S,
@@ -182,9 +187,9 @@ class Fetcher:
         raise _Early(FetchResult(url, 0, "", b"", "error", f"too many redirects (> {MAX_REDIRECTS})"))
 
     # -- public ---------------------------------------------------------------------------------
-    def get(self, url: str, *, headers: dict[str, str] | None = None, robots: bool = True) -> FetchResult:
+    def get(self, url: str, *, headers: dict[str, str] | None = None) -> FetchResult:
         """`headers` are extra request headers (an `Authorization` header is dropped on a cross-host redirect).
-        `robots=False` is only for documented APIs (e.g. the GitHub REST API), never for crawled pages."""
+        robots.txt is always honoured except on the hard-coded ROBOTS_EXEMPT_HOSTS."""
         cached = self._cache.get(url) if self._cache else None
         conditional: dict[str, str] = {}
         if cached and cached.etag:
@@ -192,7 +197,7 @@ class Fetcher:
         if cached and cached.last_modified:
             conditional["If-Modified-Since"] = cached.last_modified
         try:
-            raw = self._download(url, {**(headers or {}), **conditional}, check_robots=robots)
+            raw = self._download(url, {**(headers or {}), **conditional}, check_robots=True)
         except _Early as e:
             return e.result
         if raw.status == 304 and cached:

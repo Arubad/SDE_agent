@@ -95,7 +95,7 @@ def _finalize(session: Session, roadmap_id) -> None:
                    "videos": sum(1 for d in ok if d.kind == "video"), "chunks": sum(_chunks(d) for d in ok)}
     if crawlable and all(r.status == "done" for r in crawlable):
         roadmap.status = "ready"
-    elif any(r.status in ("done", "partial") for r in crawlable):
+    elif not crawlable or any(r.status in ("done", "partial") for r in crawlable):
         roadmap.status = "ready_with_gaps"
     else:
         roadmap.status = "failed"
@@ -104,7 +104,8 @@ def _finalize(session: Session, roadmap_id) -> None:
 
 def finalize_roadmap(engine: Engine, roadmap_id) -> None:
     """Set every resource's final status, then the roadmap's: `ready` (every crawlable resource done),
-    `ready_with_gaps` (at least one done or partial) or `failed`. One transaction; idempotent.
+    `ready_with_gaps` (at least one done or partial, or nothing crawlable at all, e.g. only linked-only
+    sites: nothing failed, there is just nothing to index) or `failed`. One transaction; idempotent.
 
     Never raises: if finalizing fails, that transaction is rolled back (nothing half-written) and the roadmap
     is set to `failed`, so it cannot stay stuck in `finalizing`."""

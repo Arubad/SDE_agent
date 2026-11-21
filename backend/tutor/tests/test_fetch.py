@@ -389,20 +389,42 @@ def test_captions_old_style_get_transcript(monkeypatch):
     assert RealYouTube(httpx.Client()).captions("abcdefghijk") == [Cue(0.5, 1.5, "old")]
 
 
-def test_extra_headers_robots_opt_out_and_auth_dropped_cross_host():
+def test_robots_exempt_only_for_allow_listed_hosts_on_every_hop():
     seen = []
 
     def handler(req):
-        seen.append((str(req.url), req.headers.get("authorization")))
+        seen.append((str(req.url), req.headers.get("authorization"), req.headers.get("user-agent")))
         if req.url.path == "/robots.txt":
+            if req.url.host == "open.example.test":
+                return httpx.Response(404)
             return httpx.Response(200, text="User-agent: *\nDisallow: /")
-        if req.url.host == "api.example.test" and req.url.path == "/moved":
-            return httpx.Response(302, headers={"location": "https://other.example.test/x"})
+        if req.url.host == "api.github.com" and req.url.path.startswith("/moved"):
+            target = "open" if req.url.path == "/moved-open" else "other"
+            return httpx.Response(302, headers={"location": f"https://{target}.example.test/x"})
         return httpx.Response(200, json={"ok": True})
 
-    f, _ = make_fetcher(handler, interval=0)
+    f, t = make_fetcher(handler, interval=1.0)
+    r = f.get("https://api.github.com/repos/a/b/contents/docs", headers={"Authorization": "Bearer t"})
+    assert r.outcome == "ok"
+    assert f.get("https://raw.githubusercontent.com/a/b/HEAD/README.md").outcome == "ok"
+    assert not any("api.github.com/robots.txt" in u or "raw.githubusercontent.com/robots.txt" in u
+                   for u, _, _ in seen)
+    assert ("https://api.github.com/repos/a/b/contents/docs", "Bearer t", USER_AGENT) in seen
+    # a host that is not allow-listed and denies everything
     assert f.get("https://api.example.test/a").outcome == "robots_denied"
-    r = f.get("https://api.example.test/a", headers={"Authorization": "Bearer t"}, robots=False)
-    assert r.outcome == "ok" and ("https://api.example.test/a", "Bearer t") in seen
-    f.get("https://api.example.test/moved", headers={"Authorization": "Bearer t"}, robots=False)
-    assert ("https://other.example.test/x", None) in seen
+    # a redirect from an allow-listed host is robots-checked at the new host, without the credentials
+    n = len(seen)
+    moved = f.get("https://api.github.com/moved", headers={"Authorization": "Bearer t"})
+    assert moved.outcome == "robots_denied"
+    assert ("https://other.example.test/robots.txt", None, USER_AGENT) in seen[n:]
+    assert not any(u == "https://other.example.test/x" for u, _, _ in seen)
+    n = len(seen)
+    assert f.get("https://api.github.com/moved-open", headers={"Authorization": "Bearer t"}).outcome == "ok"
+    assert [u for u, _, _ in seen[n:]] == ["https://api.github.com/moved-open", "https://open.example.test/robots.txt",
+                                           "https://open.example.test/x"]
+    assert seen[-1][1] is None  # Authorization dropped on the cross-host hop
+    # the per-host interval still applies to an exempt host
+    f.get("https://api.github.com/repos/a/b/contents/docs")
+    before = len(t.sleeps)
+    f.get("https://api.github.com/repos/a/b/contents/docs")
+    assert t.sleeps[before:] == [1.0]

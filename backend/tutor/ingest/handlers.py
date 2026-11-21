@@ -319,10 +319,9 @@ def _github_headers(ctx) -> dict[str, str]:
 
 
 def _github_get(ctx, url: str) -> FetchResult:
-    """GitHub's REST API and raw file host are documented programmatic endpoints, fetched (politely, with
-    the token if set) through the shared fetcher; robots.txt governs crawling, so it is not consulted."""
-    return ctx.net.fetcher.get(url, headers={"Accept": "application/vnd.github+json", **_github_headers(ctx)},
-                               robots=False)
+    """GitHub's REST API and raw file host, fetched politely (with the token if set) through the shared
+    fetcher; the fetcher itself exempts exactly these two hosts from robots.txt (fetch.ROBOTS_EXEMPT_HOSTS)."""
+    return ctx.net.fetcher.get(url, headers={"Accept": "application/vnd.github+json", **_github_headers(ctx)})
 
 
 def _github_docs(ctx, repo: str) -> list[str]:
@@ -437,23 +436,31 @@ HANDLERS: dict[str, worker.Handler] = {
 }
 
 
-# -- orchestration used by the CLI ------------------------------------------------------------------
+# -- orchestration used by the CLI and the served app --------------------------------------------------
+def settled_hook(engine: Engine):
+    """The `on_settled` callback for workers: finalize the roadmap (Task 11 extends this hook point)."""
+    def on_settled(roadmap_id) -> None:
+        finalize_roadmap(engine, roadmap_id)
+    return on_settled
+
+
 def settle(engine: Engine, roadmap_id) -> None:
     """Finalize a roadmap with no queued/running jobs: one still `ingesting` (e.g. re-approved with every job
     already done, or nothing to enqueue) goes through the normal CAS; one left `finalizing` is finished."""
-    worker.maybe_settle(engine, roadmap_id, lambda rid: finalize_roadmap(engine, rid))
+    hook = settled_hook(engine)
+    worker.maybe_settle(engine, roadmap_id, hook)
     with Session(engine) as s:
         status = s.get(Roadmap, roadmap_id).status
         idle = queue.is_roadmap_settled(s, roadmap_id)
     if status == "finalizing" and idle:
-        finalize_roadmap(engine, roadmap_id)
+        hook(roadmap_id)
 
 
 def ingest_roadmap(ctx, roadmap_id, *, until_idle: bool = True, workers: int = 0,
                    timeout_s: float | None = None) -> str:
     """Run the roadmap's jobs in the foreground and return its final (or current) status. `until_idle` runs
     inline and returns once nothing is due; otherwise a `workers`-thread pool runs until the status is terminal."""
-    on_settled = lambda rid: finalize_roadmap(ctx.engine, rid)  # noqa: E731
+    on_settled = settled_hook(ctx.engine)
     if until_idle:
         worker.run_until_idle(ctx, HANDLERS, roadmap_id=roadmap_id, on_settled=on_settled)
         settle(ctx.engine, roadmap_id)
