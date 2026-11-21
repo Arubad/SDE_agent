@@ -101,7 +101,6 @@ class SearxngSearch:
 
 
 _ISO_DURATION = re.compile(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$")
-_CHAPTER_LINE = re.compile(r"^\s*(?:(\d{1,2}):)?(\d{1,2}):(\d{2})\s+(.+?)\s*$")
 
 
 def _parse_iso_duration(value: str) -> float:
@@ -110,15 +109,8 @@ def _parse_iso_duration(value: str) -> float:
     return float(h * 3600 + mi * 60 + s)
 
 
-def chapters_from_description(description: str) -> list[Chapter]:
-    """YouTube's own rule: a chapter list starts at 0:00 and has at least three entries."""
-    found = []
-    for line in description.splitlines():
-        m = _CHAPTER_LINE.match(line)
-        if m:
-            h, mi, s, title = m.groups()
-            found.append(Chapter(float(int(h or 0) * 3600 + int(mi) * 60 + int(s)), title))
-    return found if len(found) >= 3 and found[0].start_s == 0 else []
+def _first_line(e: Exception) -> str:
+    return (str(e).strip().splitlines() or [""])[0]
 
 
 class DataApiYouTube:
@@ -140,11 +132,9 @@ class DataApiYouTube:
         if not items:
             return None
         sn = items[0]["snippet"]
-        description = sn.get("description", "")
         return VideoMeta(
-            video_id, sn.get("title", ""), sn.get("channelTitle", ""), description,
+            video_id, sn.get("title", ""), sn.get("channelTitle", ""), sn.get("description", ""),
             _parse_iso_duration(items[0].get("contentDetails", {}).get("duration", "")),
-            chapters_from_description(description),
         )
 
     def playlist_items(self, list_id: str, limit: int) -> list[str]:
@@ -236,7 +226,6 @@ class RealYouTube:
 
     def captions(self, video_id: str) -> list[Cue]:
         from youtube_transcript_api import (
-            CouldNotRetrieveTranscript,
             RequestBlocked,
             TranscriptsDisabled,
             YouTubeTranscriptApi,
@@ -249,13 +238,13 @@ class RealYouTube:
             else:
                 segs = [(s.start, s.duration, s.text) for s in YouTubeTranscriptApi().fetch(video_id)]
         except RequestBlocked as e:  # includes IpBlocked
-            raise CaptionsBlocked(str(e).strip().splitlines()[0] if str(e).strip() else "blocked") from e
+            raise CaptionsBlocked(_first_line(e) or "blocked") from e
         except TranscriptsDisabled as e:
             raise NoCaptions("transcripts are disabled for this video") from e
-        except CouldNotRetrieveTranscript as e:
+        except Exception as e:  # the protocol promises only CaptionsBlocked and NoCaptions
             if "429" in str(e) or "too many requests" in str(e).lower():
-                raise CaptionsBlocked("too many requests") from e
-            raise NoCaptions(type(e).__name__) from e
+                raise CaptionsBlocked(_first_line(e) or "too many requests") from e
+            raise NoCaptions(_first_line(e) or type(e).__name__) from e
         return [Cue(float(a), float(b), str(c).replace("\n", " ")) for a, b, c in segs]
 
 

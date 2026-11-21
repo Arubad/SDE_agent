@@ -154,12 +154,13 @@ class Fetcher:
     def _download(self, url: str, headers: dict[str, str], *, check_robots: bool) -> _Raw:
         headers = {"User-Agent": self._ua, "Accept": "text/html,application/xhtml+xml,*/*;q=0.5", **headers}
         for _ in range(MAX_REDIRECTS + 1):
-            if urlsplit(url).scheme not in ("http", "https") or not urlsplit(url).hostname:
-                raise _Early(FetchResult(url, 0, "", b"", "error", "unsupported URL scheme"))
-            if check_robots and not self._robots_allow(url):
-                raise _Early(FetchResult(url, 0, "", b"", "robots_denied", "disallowed by robots.txt"))
-            self._wait_turn(urlsplit(url).netloc)
             try:
+                parts = urlsplit(url)
+                if parts.scheme not in ("http", "https") or not parts.hostname:
+                    raise _Early(FetchResult(url, 0, "", b"", "error", "unsupported URL scheme"))
+                if check_robots and not self._robots_allow(url):
+                    raise _Early(FetchResult(url, 0, "", b"", "robots_denied", "disallowed by robots.txt"))
+                self._wait_turn(parts.netloc)
                 with self._client.stream("GET", url, headers=headers, timeout=TIMEOUT_S,
                                          follow_redirects=False) as resp:
                     if resp.is_redirect and resp.headers.get("location"):
@@ -174,7 +175,7 @@ class Fetcher:
                             body, truncated = body[:MAX_BYTES], True
                             break
                     return _Raw(url, resp.status_code, resp.headers, bytes(body), truncated)
-            except httpx.HTTPError as e:
+            except (httpx.HTTPError, httpx.InvalidURL, ValueError) as e:  # untrusted URLs: a state, not a raise
                 raise _Early(FetchResult(url, 0, "", b"", "error", f"{type(e).__name__}: {e}")) from None
         raise _Early(FetchResult(url, 0, "", b"", "error", f"too many redirects (> {MAX_REDIRECTS})"))
 

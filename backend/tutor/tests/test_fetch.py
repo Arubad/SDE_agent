@@ -6,7 +6,9 @@ import pytest
 
 from backend.tutor.ingest.fetch import USER_AGENT, Fetcher, FetchResult, HttpCacheStore
 from backend.tutor.ingest.net import (
+    RealYouTube,
     CaptionsBlocked,
+    Cue,
     DataApiYouTube,
     NoCaptions,
     SearchUnavailable,
@@ -283,7 +285,7 @@ def test_data_api_video_meta_comments_and_playlist():
     yt = DataApiYouTube(httpx.Client(transport=httpx.MockTransport(handler)), api_key="k")
     meta = yt.video_meta("abcdefghijk")
     assert (meta.title, meta.channel, meta.duration_s) == ("Pods", "Chan", 3723)
-    assert [(c.start_s, c.title) for c in meta.chapters] == [(0, "Intro"), (90, "Pods"), (245, "Services")]
+    assert meta.chapters == []  # the API gives no structured chapters; timestamp parsing is not done here
     assert yt.top_comments("abcdefghijk") == ["nice"]
     assert yt.playlist_items("PLx", 1) == ["v1"]
 
@@ -300,3 +302,88 @@ def test_make_net_selects_adapters(tmp_path):
 def test_fixture_files_are_valid_json():
     for p in FIXTURES.rglob("*.json"):
         json.loads(p.read_text())
+
+
+@pytest.mark.parametrize("url", ["http://[abc", "https://a.test:notaport/x", "http://", "https:///x", "ht!tp://a.test"])
+def test_malformed_urls_are_an_error_outcome_not_an_exception(url):
+    f, _ = make_fetcher(lambda req: html(LONG), interval=0)
+    r = f.get(url)
+    assert r.outcome == "error" and r.reason
+
+
+def test_malformed_redirect_location_is_an_error_outcome():
+    def handler(req):
+        if req.url.path == "/robots.txt":
+            return httpx.Response(404)
+        return httpx.Response(302, headers={"location": "http://[abc"})
+
+    f, _ = make_fetcher(handler, interval=0)
+    r = f.get("https://a.test/x")
+    assert r.outcome == "error" and r.reason
+
+
+class _FakeApi:
+    """Stands in for youtube_transcript_api.YouTubeTranscriptApi (new-style, instance fetch)."""
+
+    exc: Exception | None = None
+
+    def fetch(self, video_id):
+        if self.exc:
+            raise self.exc
+        return [type("S", (), {"start": 1.0, "duration": 2.0, "text": "hi\nthere"})()]
+
+
+@pytest.fixture
+def yt_api(monkeypatch):
+    import youtube_transcript_api as mod
+
+    api = type("Api", (_FakeApi,), {"exc": None})
+    monkeypatch.setattr(mod, "YouTubeTranscriptApi", api)
+    return api
+
+
+def _errors():
+    from youtube_transcript_api import (
+        CouldNotRetrieveTranscript, IpBlocked, NoTranscriptFound, RequestBlocked, TranscriptsDisabled,
+        VideoUnavailable,
+    )
+    return IpBlocked, RequestBlocked, TranscriptsDisabled, NoTranscriptFound, VideoUnavailable, CouldNotRetrieveTranscript
+
+
+def test_captions_success_maps_cues(yt_api):
+    cues = RealYouTube(httpx.Client()).captions("abcdefghijk")
+    assert [(c.start, c.dur, c.text) for c in cues] == [(1.0, 2.0, "hi there")]
+
+
+@pytest.mark.parametrize(
+    "make, expected",
+    [
+        (lambda: _errors()[0]("v"), CaptionsBlocked),
+        (lambda: _errors()[1]("v"), CaptionsBlocked),
+        (lambda: _errors()[2]("v"), NoCaptions),
+        (lambda: _errors()[3]("v", ["en"], None), NoCaptions),
+        (lambda: _errors()[4]("v"), NoCaptions),
+        (lambda: RuntimeError("HTTP 429 Too Many Requests"), CaptionsBlocked),
+        (lambda: RuntimeError("too many requests"), CaptionsBlocked),
+        (lambda: httpx.ConnectError("connection refused"), NoCaptions),
+        (lambda: KeyError("x"), NoCaptions),
+    ],
+)
+def test_captions_errors_map_to_the_two_promised_exceptions(yt_api, make, expected):
+    yt_api.exc = make()
+    with pytest.raises(expected) as info:
+        RealYouTube(httpx.Client()).captions("abcdefghijk")
+    assert type(info.value) is expected
+    assert str(info.value)
+
+
+def test_captions_old_style_get_transcript(monkeypatch):
+    import youtube_transcript_api as mod
+
+    class Old:
+        @staticmethod
+        def get_transcript(video_id):
+            return [{"start": 0.5, "duration": 1.5, "text": "old"}]
+
+    monkeypatch.setattr(mod, "YouTubeTranscriptApi", Old)
+    assert RealYouTube(httpx.Client()).captions("abcdefghijk") == [Cue(0.5, 1.5, "old")]
