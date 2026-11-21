@@ -9,9 +9,11 @@ from __future__ import annotations
 import copy
 import itertools
 import json as _json
+import os
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterator
 
 from anthropic.types import Message
@@ -69,6 +71,11 @@ def example_from_schema(schema: dict) -> dict:
 def _default_text(kwargs: dict) -> str:
     fmt = (kwargs.get("output_config") or {}).get("format") or {}
     if fmt.get("type") == "json_schema":
+        replies_dir = os.environ.get("FAKE_LLM_REPLIES_DIR")  # <dir>/<schema title>.json, when present
+        if replies_dir and (title := fmt["schema"].get("title")):
+            fixture = Path(replies_dir) / f"{title}.json"
+            if fixture.is_file():
+                return fixture.read_text(encoding="utf-8")
         return _json.dumps(example_from_schema(fmt["schema"]))
     return DEFAULT_TEXT
 
