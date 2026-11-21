@@ -144,6 +144,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      - name: Generate a SearXNG secret for compose (it has no default)
+        run: echo "SEARXNG_SECRET=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - name: Bring the stack up and wait for healthy
         run: docker compose up -d --build --wait
