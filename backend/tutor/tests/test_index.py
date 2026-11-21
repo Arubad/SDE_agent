@@ -112,3 +112,15 @@ def test_make_embedder_hash_and_bge_is_lazy():
     assert isinstance(make_embedder(Settings(embedder="hash")), HashEmbedder)
     bge = make_embedder(Settings(embedder="bge"))  # must not load any model
     assert bge.dim == config.DENSE_DIM
+
+
+def test_reindex_shortened_document_removes_stale(engine, clean, index):
+    d = _doc(engine, "short")
+    n1 = index_document(engine, index, d, [])
+    d.markdown = "# Services\n\nOnly a short paragraph remains here."
+    n2 = index_document(engine, index, d, [])
+    assert 0 < n2 < n1
+    assert _count(index, document_id=str(d.id)) == n2
+    with session_scope(engine) as s:
+        rows = s.scalars(select(Section).where(Section.document_id == d.id)).all()
+    assert len(rows) == 1 and "short paragraph" in rows[0].text

@@ -3,6 +3,7 @@ shared by all roadmaps and filtered by the `roadmap_id` tenant payload index. Ne
 collection or `config.QDRANT_URL`."""
 from __future__ import annotations
 
+import warnings
 from collections.abc import Sequence
 
 from qdrant_client import QdrantClient
@@ -39,30 +40,35 @@ class PlatformIndex:
                 vectors_config={DENSE: qm.VectorParams(size=self.embedder.dim, distance=qm.Distance.COSINE)},
                 sparse_vectors_config={SPARSE: qm.SparseVectorParams(modifier=qm.Modifier.IDF)},
             )
-            self.client.create_payload_index(
-                self.collection, "roadmap_id",
-                qm.KeywordIndexParams(type=qm.KeywordIndexType.KEYWORD, is_tenant=True))
-            for field in ("skill_ids", "document_id"):
-                self.client.create_payload_index(self.collection, field, qm.PayloadSchemaType.KEYWORD)
+            with warnings.catch_warnings():  # local/in-memory clients warn that payload indexes are no-ops
+                warnings.filterwarnings("ignore", message="Payload indexes have no effect", category=UserWarning)
+                self.client.create_payload_index(
+                    self.collection, "roadmap_id",
+                    qm.KeywordIndexParams(type=qm.KeywordIndexType.KEYWORD, is_tenant=True))
+                for field in ("skill_ids", "document_id"):
+                    self.client.create_payload_index(self.collection, field, qm.PayloadSchemaType.KEYWORD)
         self._ready = True
 
     def upsert(self, roadmap_id: str, document_id: str, skill_ids: Sequence[str],
                children: list[ChildChunk], meta: dict) -> int:
         """Replace the document's points: delete the old ones, then upsert the new."""
         self.ensure()
-        self.client.delete(self.collection, points_selector=qm.FilterSelector(
-            filter=qm.Filter(must=[_eq("roadmap_id", roadmap_id), _eq("document_id", document_id)])), wait=True)
-        for i in range(0, len(children), BATCH):
+        points = []
+        for i in range(0, len(children), BATCH):  # embed everything before touching the old points
             part = children[i:i + BATCH]
             texts = [c.embed_text for c in part]
             dense, sparse = self.embedder.embed(texts), self.embedder.sparse(texts)
-            self.client.upsert(self.collection, points=[
-                qm.PointStruct(id=c.id, vector={DENSE: d, SPARSE: s}, payload={
+            points += [
+                qm.PointStruct(id=c.id, vector={DENSE: d, SPARSE: sp}, payload={
                     "roadmap_id": roadmap_id, "document_id": document_id, "parent_id": c.parent_id,
                     "skill_ids": list(skill_ids), "text": c.text, "path": SEP.join(c.path or []),
                     "url": meta.get("url", ""), "title": meta.get("title", ""), "kind": meta.get("kind", ""),
                     "start_s": c.start_s, "end_s": c.end_s})
-                for c, d, s in zip(part, dense, sparse)], wait=True)
+                for c, d, sp in zip(part, dense, sparse)]
+        self.client.delete(self.collection, points_selector=qm.FilterSelector(
+            filter=qm.Filter(must=[_eq("roadmap_id", roadmap_id), _eq("document_id", document_id)])), wait=True)
+        for i in range(0, len(points), BATCH):
+            self.client.upsert(self.collection, points=points[i:i + BATCH], wait=True)
         return len(children)
 
     def search(self, query: str, *, roadmap_id: str, skill_id: str | None = None, top_k: int = 8,
