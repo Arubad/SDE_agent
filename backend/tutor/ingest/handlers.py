@@ -96,13 +96,19 @@ def reserve_page(engine: Engine, resource_id, cap: int) -> bool:
     return row is not None
 
 
+def new_document_id() -> uuid.UUID:
+    """Id for a new Document. Random uuid4; the ingestion-agent eval rebinds this inside a run so the ids that
+    reach the agent's prompt are deterministic (without touching the global uuid.uuid4 the SDK also uses)."""
+    return uuid.uuid4()
+
+
 def _store(engine: Engine, res: Resource, *, url: str, kind: str, owner: bool, title: str = "",
            markdown: str = "", status: str = "ok", reason: str | None = None, meta: dict | None = None,
            content_hash: str | None = None) -> uuid.UUID | None:
     """Upsert the (roadmap, url) Document; meta is merged. Returns its id, or None when another resource
     owns the URL and this job is not the URL's owner (the existing document is left alone)."""
     stmt = pg_insert(Document).values(
-        id=uuid.uuid4(), roadmap_id=res.roadmap_id, resource_id=res.id, url=url, kind=kind, title=title,
+        id=new_document_id(), roadmap_id=res.roadmap_id, resource_id=res.id, url=url, kind=kind, title=title,
         markdown=markdown, status=status, reason=reason, meta=meta or {}, content_hash=content_hash)
     ex = stmt.excluded
     stmt = stmt.on_conflict_do_update(

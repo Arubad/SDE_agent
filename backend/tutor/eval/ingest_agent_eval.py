@@ -158,15 +158,17 @@ class EvalSearch(FixtureSearch):
 
 @contextlib.contextmanager
 def deterministic_uuids():
-    """Document ids are random uuid4s that reach the agent's prompt (`videos_without_transcript`); a counter makes
-    a run's requests identical every time, which replay needs. Roadmap/resource ids never reach the model."""
+    """Document ids reach the agent's prompt (`videos_without_transcript`); a counter makes a run's requests
+    identical every time, which replay needs. Only the pipeline's own id hook is rebound: the global uuid.uuid4
+    stays random because the Anthropic SDK draws from it per live request (replay does not), which would shift
+    the counter between record and replay."""
     counter = itertools.count(1)
-    real = uuid.uuid4
-    uuid.uuid4 = lambda: uuid.UUID(int=next(counter))
+    real = handlers.new_document_id
+    handlers.new_document_id = lambda: uuid.UUID(int=next(counter))
     try:
         yield
     finally:
-        uuid.uuid4 = real
+        handlers.new_document_id = real
 
 
 # -- one run -----------------------------------------------------------------------------------------

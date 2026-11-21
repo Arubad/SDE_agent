@@ -285,12 +285,20 @@ def test_defenses_on_vs_off_against_the_poisoned_page(engine, tmp_path, defenses
 def test_deterministic_uuids():
     import uuid
 
-    real = uuid.uuid4
+    from backend.tutor.ingest import handlers
+
+    real_global, real_hook = uuid.uuid4, handlers.new_document_id
     with E.deterministic_uuids():
-        first = [uuid.uuid4() for _ in range(3)]
+        first = [handlers.new_document_id() for _ in range(3)]
+        assert uuid.uuid4 is real_global  # the SDK's global uuid4 is not patched during the run
+        outside = {uuid.uuid4() for _ in range(3)}
+        assert len(outside) == 3 and not outside & set(first)  # still random
+        assert [handlers.new_document_id() for _ in range(3)] != first  # the counter advances
     with E.deterministic_uuids():
-        assert [uuid.uuid4() for _ in range(3)] == first  # same ids in every run
-    assert len(set(first)) == 3 and uuid.uuid4 is real and uuid.uuid4() not in first
+        assert [handlers.new_document_id() for _ in range(3)] == first  # same ids in every run
+    assert len(set(first)) == 3
+    assert handlers.new_document_id is real_hook and uuid.uuid4 is real_global
+    assert handlers.new_document_id() not in first  # restored: random again
 
 
 def test_main_exits_2_on_cost_guard_abort(monkeypatch, tmp_path, capsys):
