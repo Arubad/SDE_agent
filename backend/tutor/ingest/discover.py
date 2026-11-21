@@ -188,7 +188,7 @@ def discover(
             if isinstance(vid, str) and _VIDEO_ID.fullmatch(vid.strip()):
                 add("videos", vid.strip())
             ds = tag.get("data-src")
-            if isinstance(ds, str) and tag.name != "iframe":
+            if isinstance(ds, str):
                 handle_url(ds)
         except Exception:
             continue
@@ -198,6 +198,8 @@ def discover(
     root_path = root if root is not None else _default_root(base.path)
     if not root_path.startswith("/"):
         root_path = "/" + root_path
+    if not root_path.endswith("/"):
+        root_path += "/"
     page_key = urldefrag(url)[0]
     cands = []
     for idx, key in enumerate(order):

@@ -100,3 +100,54 @@ def test_malformed_input_does_not_raise():
     discover(html, "http://[abc")
     assert extract_page(html, "http://[abc").markdown is not None
     assert extract_page("", "https://a.test/").markdown == ""
+
+
+_PAD = "<p>" + "word " * 80 + "</p>"
+
+
+def test_bare_pre_must_be_fenced():
+    page = extract_page(f"<html><body><main><h1>T</h1>{_PAD}<pre>x=1\ny=2</pre>{_PAD}</main></body></html>", "https://a.test/")
+    assert "```\nx=1\ny=2\n```" in page.markdown
+
+
+def test_fallback_keeps_nested_pre_and_bare_text():
+    html = "<html><body><main><ul><li>step<pre>a = 1\nb = 2</pre></li></ul><div>bare div text</div></main></body></html>"
+    md = extract_page(html, "https://a.test/").markdown
+    assert "```\na = 1\nb = 2\n```" in md
+    assert "bare div text" in md
+
+
+def test_boilerplate_pre_does_not_force_fallback():
+    html = f"<html><body><main><h1>T</h1>{_PAD}</main><footer><pre>FOOTCODE</pre></footer></body></html>"
+    page = extract_page(html, "https://a.test/")
+    assert "FOOTCODE" not in page.markdown and page.word_count >= 80
+
+
+def test_cookie_class_on_body_does_not_wipe_page():
+    html = f'<html><body class="cookie-consent-open"><main class="consent-wrap"><h1>Real</h1>{_PAD}</main></body></html>'
+    assert "Real" in extract_page(html, "https://a.test/").markdown
+    sparse = '<html><body class="cookie-consent-open"><h1>Real</h1><p>short</p></body></html>'
+    assert "Real" in extract_page(sparse, "https://a.test/").markdown
+
+
+def test_lazy_iframe_data_src():
+    d = discover('<iframe data-src="https://www.youtube.com/embed/aaaaaaaaaa1"></iframe>', "https://a.test/")
+    assert d.videos == ["aaaaaaaaaa1"]
+
+
+def test_extract_never_raises(monkeypatch):
+    import backend.tutor.ingest.extract as ex
+
+    def boom(*a, **k):
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(ex, "_fallback_markdown", boom)
+    monkeypatch.setattr(ex.trafilatura, "extract", boom)
+    page = extract_page("<html><body><pre>a</pre></body></html>", "https://a.test/")
+    assert page.markdown == "" and page.word_count == 0
+
+
+def test_root_without_trailing_slash_is_a_boundary():
+    html = '<a href="/docs-old/x">o</a><a href="/docs/x">n</a>'
+    d = discover(html, "https://a.test/docs/", root="/docs")
+    assert d.links == ["https://a.test/docs/x"]

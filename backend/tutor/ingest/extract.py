@@ -1,11 +1,12 @@
 """Turn crawled HTML into clean Markdown. Pure functions; never raise on malformed HTML."""
 from __future__ import annotations
 
+import html as html_lib
 import re
 from dataclasses import dataclass
 
 import trafilatura
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 
 MIN_WORDS = 50
 _DROP_TAGS = ("nav", "header", "footer", "aside", "script", "style", "noscript", "template")
@@ -54,46 +55,68 @@ def _is_cookie(tag: Tag) -> bool:
     return bool(_COOKIE_RE.search(ident))
 
 
-def _fallback_markdown(soup: BeautifulSoup) -> str:
+_STRUCTURAL = {"html", "body", "main", "article", "head"}
+
+
+def _strip_boilerplate(soup: BeautifulSoup) -> None:
+    """Remove nav/header/footer/aside/scripts and small cookie containers, in place."""
     for tag in soup.find_all(list(_DROP_TAGS)):
         tag.decompose()
     for tag in soup.find_all(attrs={"role": "navigation"}):
         tag.decompose()
+    total = len(soup.get_text(" ", strip=True)) or 1
     for tag in [t for t in soup.find_all(True) if _is_cookie(t)]:
+        if tag.name in _STRUCTURAL or tag.decomposed:
+            continue
+        if tag.find(["main", "article"]) is not None:
+            continue
+        if len(tag.get_text(" ", strip=True)) * 2 > total:
+            continue
         tag.decompose()
+
+
+def _text(node: Tag) -> str:
+    return " ".join(node.get_text(" ", strip=True).split())
+
+
+def _fallback_markdown(soup: BeautifulSoup) -> str:
+    _strip_boilerplate(soup)
     root = soup.find("main") or soup.find("article") or soup.body or soup
     out: list[str] = []
 
     def walk(node: Tag) -> None:
         for child in node.children:
+            if isinstance(child, NavigableString):
+                if not isinstance(child, Comment):
+                    text = " ".join(str(child).split())
+                    if text:
+                        out.append(text)
+                continue
             if not isinstance(child, Tag):
                 continue
             name = child.name
-            if name in _BLOCKS:
-                if name.startswith("h") and len(name) == 2:
-                    text = " ".join(child.get_text(" ", strip=True).split())
-                    if text:
-                        out.append("#" * int(name[1]) + " " + text)
-                elif name == "pre":
-                    code = child.get_text().strip("\n")
-                    if code.strip():
-                        out.append("```\n" + code + "\n```")
-                elif name == "table":
-                    md = _table_md(child)
-                    if md:
-                        out.append(md)
-                elif name == "li":
-                    text = " ".join(child.get_text(" ", strip=True).split())
-                    if text:
-                        out.append("- " + text)
-                elif name == "blockquote":
-                    text = " ".join(child.get_text(" ", strip=True).split())
-                    if text:
-                        out.append("> " + text)
-                else:
-                    text = " ".join(child.get_text(" ", strip=True).split())
-                    if text:
-                        out.append(text)
+            if name == "pre":
+                code = child.get_text().strip("\n")
+                if code.strip():
+                    out.append("```\n" + code + "\n```")
+            elif name in ("li", "blockquote") and child.find("pre") is not None:
+                walk(child)
+            elif name.startswith("h") and len(name) == 2 and name[1] in "123456":
+                if _text(child):
+                    out.append("#" * int(name[1]) + " " + _text(child))
+            elif name == "table":
+                md = _table_md(child)
+                if md:
+                    out.append(md)
+            elif name == "li":
+                if _text(child):
+                    out.append("- " + _text(child))
+            elif name == "blockquote":
+                if _text(child):
+                    out.append("> " + _text(child))
+            elif name == "p":
+                if _text(child):
+                    out.append(_text(child))
             else:
                 walk(child)
 
@@ -101,13 +124,26 @@ def _fallback_markdown(soup: BeautifulSoup) -> str:
     return "\n\n".join(out)
 
 
+def _squash(text: str) -> str:
+    return "".join(html_lib.unescape(text).split())
+
+
 def _pre_blocks(soup: BeautifulSoup) -> list[str]:
     blocks = []
     for pre in soup.find_all("pre"):
-        text = _norm(pre.get_text())
+        text = _squash(pre.get_text())
         if text:
             blocks.append(text)
     return blocks
+
+
+_FENCE_RE = re.compile(r"^(```|~~~)[^\n]*\n(.*?)^\1[ \t]*$", re.S | re.M)
+
+
+def _code_survives(markdown: str, pres: list[str]) -> bool:
+    """True when every source <pre> text sits inside a fenced code block."""
+    fenced = [_squash(m.group(2)) for m in _FENCE_RE.finditer(markdown)]
+    return all(any(block in f for f in fenced) for block in pres)
 
 
 def _title(html_soup: BeautifulSoup, meta_title: str | None) -> str:
@@ -120,6 +156,14 @@ def _title(html_soup: BeautifulSoup, meta_title: str | None) -> str:
 
 
 def extract_page(html: str, url: str) -> ExtractedPage:
+    """Never raises: on total failure returns empty markdown."""
+    try:
+        return _extract_page(html, url)
+    except Exception:
+        return ExtractedPage(title="", markdown="", lang=None, word_count=0)
+
+
+def _extract_page(html: str, url: str) -> ExtractedPage:
     """Extract main content as Markdown (headings, code blocks, tables kept; boilerplate removed)."""
     html = html or ""
     try:
@@ -153,13 +197,18 @@ def extract_page(html: str, url: str) -> ExtractedPage:
     except Exception:
         markdown = ""
 
-    pres = _pre_blocks(soup)
-    lost_code = any(block not in markdown for block in pres)
     title = _title(soup, meta_title)
-    if _word_count(markdown) < MIN_WORDS or lost_code:
-        fb_soup = BeautifulSoup(html, "html.parser")
-        fallback = _fallback_markdown(fb_soup)
-        if lost_code or _word_count(fallback) > _word_count(markdown):
-            markdown = fallback
+    try:
+        clean = BeautifulSoup(html, "html.parser")
+        _strip_boilerplate(clean)
+        pres = _pre_blocks(clean)
+        code_ok = _code_survives(markdown, pres)
+        if _word_count(markdown) < MIN_WORDS or not code_ok:
+            fallback = _fallback_markdown(BeautifulSoup(html, "html.parser"))
+            fb_ok = _code_survives(fallback, pres)
+            if (fb_ok, _word_count(fallback)) > (code_ok, _word_count(markdown)):
+                markdown = fallback
+    except Exception:
+        pass
     markdown = markdown.strip()
     return ExtractedPage(title=title, markdown=markdown, lang=lang, word_count=_word_count(markdown))
