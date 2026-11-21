@@ -1,5 +1,7 @@
 import { type FormEvent, useCallback, useEffect, useState } from "react";
-import { ApiError, createRoadmap, getHealth, type Health, listRoadmaps, type Roadmap } from "./api";
+import { ApiError, createRoadmap, getHealth, type Health, isAuthError, listRoadmaps, type Roadmap } from "./api";
+import { statusText } from "./format";
+import { RoadmapDetail } from "./RoadmapDetail";
 
 type HealthState = Health | "down" | null;
 
@@ -17,10 +19,6 @@ function HealthBadge({ health }: { health: HealthState }) {
       {provider} · db {dbOk ? "ok" : "down"}
     </span>
   );
-}
-
-function isAuthError(err: unknown): err is ApiError {
-  return err instanceof ApiError && (err.status === 401 || err.status === 429);
 }
 
 function PasscodeScreen({
@@ -148,7 +146,34 @@ function CreateRoadmapForm({
   );
 }
 
-function RoadmapList({ roadmaps }: { roadmaps: Roadmap[] }) {
+// The open roadmap lives in the URL hash (#/roadmaps/<slug>), so reloads and the back button work without a router.
+const ROUTE = /^#\/roadmaps\/([^/]+)$/;
+
+function slugFromHash(): string | null {
+  const m = ROUTE.exec(window.location.hash);
+  if (!m) return null;
+  try {
+    return decodeURIComponent(m[1]);
+  } catch {
+    return null;
+  }
+}
+
+function useSelectedSlug(): [string | null, (slug: string | null) => void] {
+  const [slug, setSlug] = useState<string | null>(slugFromHash);
+  useEffect(() => {
+    const onHash = () => setSlug(slugFromHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  const select = useCallback((next: string | null) => {
+    window.location.hash = next ? `#/roadmaps/${encodeURIComponent(next)}` : "";
+    setSlug(next);
+  }, []);
+  return [slug, select];
+}
+
+function RoadmapList({ roadmaps, onOpen }: { roadmaps: Roadmap[]; onOpen: (slug: string) => void }) {
   if (roadmaps.length === 0) return <p className="muted empty">No roadmaps yet. Paste one to get started.</p>;
   return (
     <ul className="roadmaps">
@@ -159,8 +184,11 @@ function RoadmapList({ roadmaps }: { roadmaps: Roadmap[] }) {
             <code className="slug">{r.slug}</code>
           </div>
           <div className="roadmap-meta">
-            <span className="status">{r.status}</span>
+            <span className="status">{statusText(r.status)}</span>
             <time dateTime={r.created_at}>{new Date(r.created_at).toLocaleDateString()}</time>
+            <button type="button" className="secondary small-button" onClick={() => onOpen(r.slug)}>
+              Open
+            </button>
           </div>
         </li>
       ))}
@@ -174,6 +202,7 @@ export function App() {
   // null: unlocked. Otherwise the passcode screen shows, with the lockout message for a 429.
   const [lock, setLock] = useState<{ error: string | null } | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [selected, select] = useSelectedSlug();
 
   const showPasscode = useCallback((err: ApiError) => {
     setLock({ error: err.status === 429 ? err.message : null });
@@ -214,6 +243,16 @@ export function App() {
               setLock(null);
             }}
           />
+        ) : selected ? (
+          <RoadmapDetail
+            key={selected}
+            slug={selected}
+            onUnauthorized={showPasscode}
+            onBack={() => {
+              select(null);
+              void load(); // statuses may have moved on
+            }}
+          />
         ) : (
           <>
             <h2 className="page-title">Roadmaps</h2>
@@ -224,7 +263,7 @@ export function App() {
             )}
             <div className="layout">
               <section aria-label="Your roadmaps">
-                {roadmaps === null ? <p className="muted">Loading…</p> : <RoadmapList roadmaps={roadmaps} />}
+                {roadmaps === null ? <p className="muted">Loading…</p> : <RoadmapList roadmaps={roadmaps} onOpen={select} />}
               </section>
               <CreateRoadmapForm
                 onCreated={(r) => setRoadmaps((prev) => [r, ...(prev ?? [])])}

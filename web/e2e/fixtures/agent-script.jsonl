@@ -1,0 +1,10 @@
+# FAKE_LLM_SCRIPT for the main E2E server (see backend/core/fake_llm.py): one FakeReply per tool-loop model turn,
+# in order. The roadmap parse is a structured-output request and comes from FAKE_LLM_REPLIES_DIR instead.
+# 1. agent_plan run, turn 1: nothing to plan.
+{"text": "The crawler's defaults are fine for these resources."}
+# 2. agent_recover round 1, turn 1: search (the fixture net's "general:kubernetes tutorial" results).
+{"tool_uses": [["web_search", {"query": "kubernetes tutorial", "category": "general"}]]}
+# 3. turn 2: propose a search result for a skill no resource covers (fetchable in the fixture net).
+{"tool_uses": [["propose_resource", {"skill_id": "skill-debugging", "url": "https://example.test/kubernetes-intro", "title": "Kubernetes introduction", "reason": "No resource covers debugging; this page introduces the cluster layout you inspect when debugging."}]]}
+# 4. turn 3: done. Later turns (round 2) get the default "Fake answer." and end at once.
+{"text": "Proposed one page for the debugging skill."}
