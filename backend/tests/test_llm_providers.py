@@ -96,3 +96,61 @@ def test_request_key_ignores_cache_control():
               "messages": [{"role": "user", "content": "q"}]}
     assert request_key(plain) == request_key(cached)
     assert request_key(plain) != request_key({**plain, "messages": [{"role": "user", "content": "other"}]})
+
+
+SECRET_REQUEST = {"model": "m", "max_tokens": 10, "system": "key sk-ant-api03-abcdefghijklmnop1234",
+                  "messages": [{"role": "user", "content": "mail jane.doe@example.com about it"}]}
+
+
+def _written(tmp_path) -> str:
+    files = list(tmp_path.glob("*.json"))
+    assert len(files) == 1
+    return files[0].read_text(encoding="utf-8")
+
+
+def test_recordings_are_redacted_on_write(monkeypatch, tmp_path):
+    """Sync client: request and response are redacted in the file; the key is of the unredacted request."""
+    monkeypatch.setattr(config, "LLM_RECORDINGS_DIR", str(tmp_path))
+    monkeypatch.setattr(llm, "_foundry_client", lambda: FakeAnthropic())
+    monkeypatch.setattr(config, "LLM_PROVIDER", "record")
+    with fake_llm.script([FakeReply(text="write to bob@corp.example with sk-ant-api03-zzzzzzzzzzzzzz")]):
+        recorded = llm.haiku_client().messages.create(**SECRET_REQUEST)
+    blob = _written(tmp_path)
+    for leaked in ("sk-ant-api03", "jane.doe@example.com", "bob@corp.example"):
+        assert leaked not in blob
+    assert (tmp_path / f"{request_key(SECRET_REQUEST)}.json").exists()
+
+    monkeypatch.setattr(config, "LLM_PROVIDER", "replay")
+    hit = llm.haiku_client().messages.create(**SECRET_REQUEST)  # the same unredacted request still matches
+    assert hit.content[0].text == "write to [email] with [secret]"
+    assert recorded.content[0].text.startswith("write to bob@")  # the live caller still sees the real reply
+
+
+def test_async_recordings_are_redacted_on_write(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "LLM_RECORDINGS_DIR", str(tmp_path))
+    monkeypatch.setattr(llm, "_foundry_async_client", lambda: FakeAsyncAnthropic())
+
+    async def run_stream():
+        client = llm.haiku_async_client()
+        try:
+            async with client.messages.stream(**SECRET_REQUEST) as stream:
+                return await stream.get_final_message()
+        finally:
+            await client.close()
+
+    monkeypatch.setattr(config, "LLM_PROVIDER", "record")
+    with fake_llm.script([FakeReply(text="ping bob@corp.example")]):
+        asyncio.run(run_stream())
+    blob = _written(tmp_path)
+    for leaked in ("sk-ant-api03", "jane.doe@example.com", "bob@corp.example"):
+        assert leaked not in blob
+    monkeypatch.setattr(config, "LLM_PROVIDER", "replay")
+    assert asyncio.run(run_stream()).content[0].text == "ping [email]"
+
+
+def test_legacy_bare_message_recordings_still_load(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "LLM_RECORDINGS_DIR", str(tmp_path))
+    message = FakeAnthropic().messages.create(**SECRET_REQUEST)
+    (tmp_path / f"{request_key(SECRET_REQUEST)}.json").write_text(message.model_dump_json(), encoding="utf-8")
+    monkeypatch.setattr(config, "LLM_PROVIDER", "replay")
+    assert llm.haiku_client().messages.create(**SECRET_REQUEST).content[0].text == message.content[0].text

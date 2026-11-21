@@ -3,6 +3,10 @@
 `record` wraps a real client and writes each response; `replay` serves them back without network access and
 raises ReplayMiss for any request that was never recorded. The key ignores `cache_control`, so turning prompt
 caching on or off does not invalidate recordings.
+
+A recording is `{"request": ..., "response": ...}`, both run through `redact_obj` (secrets, emails, phone numbers)
+before they are written. The key is computed on the UNREDACTED request, so replaying the same request still hits;
+replay returns the redacted response. A bare message (the older format) still loads.
 """
 from __future__ import annotations
 
@@ -15,6 +19,7 @@ from anthropic.types import Message
 
 from backend.core import config
 from backend.core.fake_llm import StaticStream
+from backend.core.redact import redact_obj
 
 
 class ReplayMiss(RuntimeError):
@@ -41,16 +46,18 @@ def _path(kwargs: dict) -> Path:
 
 
 def _save(kwargs: dict, message) -> None:
-    path = _path(kwargs)
+    path = _path(kwargs)  # keyed on the unredacted request
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(message.model_dump(mode="json"), indent=2, ensure_ascii=False), encoding="utf-8")
+    body = {"request": redact_obj(_canonical(kwargs)), "response": redact_obj(message.model_dump(mode="json"))}
+    path.write_text(json.dumps(body, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def _load(kwargs: dict) -> Message:
     path = _path(kwargs)
     if not path.exists():
         raise ReplayMiss(f"no recording {path.name} in {path.parent}; re-run with LLM_PROVIDER=record")
-    return Message.model_validate(json.loads(path.read_text(encoding="utf-8")))
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return Message.model_validate(data["response"] if "response" in data and "request" in data else data)
 
 
 # --- record -----------------------------------------------------------------------
