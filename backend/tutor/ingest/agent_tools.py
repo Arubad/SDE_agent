@@ -43,34 +43,16 @@ CATEGORIES = ("general", "videos")
 NOT_ALLOWED = "URL not allowed: not from a search result or the roadmap"
 
 
-_SKIP = re.compile(r"[\s/\\]*")
 _WRAPPED = re.compile(r"\s*<" + TAG + r">\s*(.*?)\s*</" + TAG + r">\s*", re.S)
-
-
-def _plain(text: str) -> str:
-    """For MATCHING only: NFKC (fullwidth letters and brackets become ASCII) without format characters (Cf:
-    zero-width spaces, joiners, bidi marks) or nonspacing marks (Mn: combining marks, variation selectors)."""
-    return "".join(ch for ch in unicodedata.normalize("NFKC", text) if unicodedata.category(ch) not in ("Cf", "Mn"))
-
-
-def _escape(text: str) -> str:
-    """Replace every bracket that opens a disguised copy of the tag (a "<", or anything NFKC turns into "<",
-    followed after whitespace, slashes, backslashes, Cf or Mn characters by "untrusted", any case or width) with
-    "&lt;". Every other character is kept exactly as it was, so a wrapped URL still equals the allowed one."""
-    out = []
-    for i, ch in enumerate(text):
-        if unicodedata.normalize("NFKC", ch) == "<":
-            rest = _plain(text[i + 1:i + 120])
-            if rest[_SKIP.match(rest).end():].lower().startswith("untrusted"):
-                out.append("&lt;")
-                continue
-        out.append(ch)
-    return "".join(out)
+# Every character NFKC turns into "<" ("<", U+FE64 small, U+FF1C fullwidth; computed so a newer Unicode cannot
+# add one unnoticed). Inside untrusted content each becomes "&lt;", so no tag can ever be formed there,
+# whatever padding follows. Linear time (str.translate); text without such a character is unchanged.
+_LT = str.maketrans({chr(c): "&lt;" for c in range(0x110000) if unicodedata.normalize("NFKC", chr(c)) == "<"})
 
 
 def wrap(text: str) -> str:
-    """Untrusted web text, fenced; an opening or closing copy of the tag inside it is escaped."""
-    return f"<{TAG}>{_escape(str(text or ''))}</{TAG}>"
+    """Untrusted web text, fenced; every "<"-like character inside it is escaped, so it cannot close the fence."""
+    return f"<{TAG}>{str(text or '').translate(_LT)}</{TAG}>"
 
 
 def unwrap(value):
