@@ -28,6 +28,11 @@ whole run would exceed `--max-projected-usd` (default 0.50).
     python -m backend.tutor.eval.ingest_agent_eval                       # replay, free
     python -m backend.tutor.eval.ingest_agent_eval --record              # live, costs money
 
+Replay-unsafe recordings: recordings are redacted on write, and a model reply containing an email, key or phone-shaped
+text is stored redacted, so the next turn's request (which carries that reply) no longer matches its recording.
+Runs that recorded or replayed such a reply are counted as `replay_unsafe` (a distinct count from `agent_errors`);
+re-record after removing the trigger, or treat those numbers as not reproducible.
+
 Run it with DATABASE_URL pointing at a Postgres server: a scratch database is created and dropped."""
 from __future__ import annotations
 
@@ -47,7 +52,7 @@ from qdrant_client import QdrantClient
 from sqlalchemy import Engine, delete, func, select
 from sqlalchemy.orm import Session
 
-from backend.core import config
+from backend.core import config, llm_replay
 from backend.tutor.db import make_engine, session_scope
 from backend.tutor.ingest import agent_tools, handlers, service
 from backend.tutor.ingest.embed import HashEmbedder
@@ -239,6 +244,7 @@ def score(scenario: dict, actions: list[dict], state: dict) -> dict:
 
 def run_once(engine: Engine, scenario: dict, defenses: bool, *, repeat: int, net_root: Path) -> dict:
     """One run of one scenario: the whole pipeline with the agent on, then the simulated user's approvals."""
+    llm_replay.redacted_recordings.clear()
     settings = Settings(net_fixtures_dir=net_root, qdrant_url=":memory:", embedder="hash", ingest_agent=True,
                         ingest_workers=0, **scenario["settings"])
     net = fixture_net(net_root)
@@ -279,7 +285,7 @@ def run_once(engine: Engine, scenario: dict, defenses: bool, *, repeat: int, net
         metrics = score(scenario, actions, state)
         metrics.update(steps=sum(r["args"].get("steps", 0) for r in runs), actions=sum(a["tool"] != "run" for a in actions),
                        cost_usd=round(cost, 6), agent_stops=[r["args"].get("stop") for r in runs],
-                       roadmap_status=status)
+                       roadmap_status=status, replay_unsafe=len(set(llm_replay.redacted_recordings)))
         return metrics
     finally:
         with session_scope(engine) as s:
@@ -301,6 +307,7 @@ def summarize(runs: list[dict]) -> dict:
     out["steps_mean"] = _mean([r["steps"] for r in runs])
     out["actions_mean"] = _mean([r["actions"] for r in runs])
     out["cost_usd"] = round(sum(r["cost_usd"] for r in runs), 6)
+    out["replay_unsafe"] = sum(r.get("replay_unsafe", 0) for r in runs)
     out["agent_errors"] = sum(s == "error" for r in runs for s in r["agent_stops"])
     return out
 
@@ -356,9 +363,13 @@ def _fmt(v) -> str:
 def format_markdown(result: dict) -> str:
     cols = ("gap_fixed", "plan_precision", "proposal_precision", "proposal_clean", "injection_resisted",
             "injection_contained", "restraint", "steps_mean", "actions_mean", "cost_usd")
+    cost_label = "cost_usd" if result["mode"] == "record" else "recorded_cost_usd"
     lines = [f"# Ingestion agent eval ({result['mode']}, {result['repeats']} repeats, {result['model']})", "",
-             f"Generated {result['generated_at']}; total cost ${result['cost_usd_total']:.4f}.", "",
-             "| config | defenses | " + " | ".join(cols) + " |", "|---|---|" + "---|" * len(cols)]
+             f"Generated {result['generated_at']}; total "
+             + (f"cost ${result['cost_usd_total']:.4f}." if result["mode"] == "record" else
+                f"recorded cost (not spent) ${result['cost_usd_total']:.4f}."), "",
+             "| config | defenses | " + " | ".join(cost_label if c == "cost_usd" else c for c in cols) + " |",
+             "|---|---|" + "---|" * len(cols)]
     for name, c in result["configs"].items():
         lines.append(f"| {name} | {c['defenses']} | " + " | ".join(_fmt(c["summary"][k]) for k in cols) + " |")
     on, off = result["configs"].get("poisoned_page"), result["configs"].get("poisoned_page@defenses_off")
@@ -366,6 +377,10 @@ def format_markdown(result: dict) -> str:
         lines += ["", "Injection (poisoned_page), defenses on vs off: "
                   f"resisted {_fmt(on['summary']['injection_resisted'])} vs {_fmt(off['summary']['injection_resisted'])}, "
                   f"contained {_fmt(on['summary']['injection_contained'])} vs {_fmt(off['summary']['injection_contained'])}."]
+    unsafe = sum(c["summary"]["replay_unsafe"] for c in result["configs"].values())
+    if unsafe:
+        lines += ["", f"WARNING: {unsafe} recording(s) hold a redacted model reply (replay_unsafe); the following turn "
+                  "may not match its recording, so these numbers may not reproduce."]
     errors = sum(c["summary"]["agent_errors"] for c in result["configs"].values())
     if errors:
         lines += ["", f"WARNING: {errors} agent run(s) ended in `error` (in replay mode: a request with no recording)."]

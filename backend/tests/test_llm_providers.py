@@ -1,5 +1,6 @@
 """LLM providers: fake (scripted / schema-shaped replies), record and replay. No network anywhere."""
 import asyncio
+import json
 
 import pytest
 
@@ -154,3 +155,25 @@ def test_legacy_bare_message_recordings_still_load(monkeypatch, tmp_path):
     (tmp_path / f"{request_key(SECRET_REQUEST)}.json").write_text(message.model_dump_json(), encoding="utf-8")
     monkeypatch.setattr(config, "LLM_PROVIDER", "replay")
     assert llm.haiku_client().messages.create(**SECRET_REQUEST).content[0].text == message.content[0].text
+
+
+def test_redacted_response_is_flagged_warned_and_reported(monkeypatch, tmp_path, caplog):
+    from backend.core import llm_replay
+
+    monkeypatch.setattr(config, "LLM_RECORDINGS_DIR", str(tmp_path))
+    monkeypatch.setattr(llm, "_foundry_client", lambda: FakeAnthropic())
+    monkeypatch.setattr(config, "LLM_PROVIDER", "record")
+    llm_replay.redacted_recordings.clear()
+    with fake_llm.script([FakeReply(text="mail bob@corp.example"), FakeReply(text="clean reply")]):
+        with caplog.at_level("WARNING"):
+            llm.haiku_client().messages.create(**SECRET_REQUEST)
+        llm.haiku_client().messages.create(**{**SECRET_REQUEST, "max_tokens": 11})
+    flagged = [json.loads(p.read_text()).get("redacted_response") for p in sorted(tmp_path.glob("*.json"))]
+    assert sorted(map(bool, flagged)) == [False, True]
+    assert any("redacted" in r.message and str(tmp_path) in r.message for r in caplog.records)
+    assert len(llm_replay.redacted_recordings) == 1
+    llm_replay.redacted_recordings.clear()
+    monkeypatch.setattr(config, "LLM_PROVIDER", "replay")
+    llm.haiku_client().messages.create(**SECRET_REQUEST)
+    llm.haiku_client().messages.create(**{**SECRET_REQUEST, "max_tokens": 11})
+    assert len(llm_replay.redacted_recordings) == 1  # only the flagged one is reported on replay

@@ -7,11 +7,18 @@ caching on or off does not invalidate recordings.
 A recording is `{"request": ..., "response": ...}`, both run through `redact_obj` (secrets, emails, phone numbers)
 before they are written. The key is computed on the UNREDACTED request, so replaying the same request still hits;
 replay returns the redacted response. A bare message (the older format) still loads.
+
+Limitation: the redacted response becomes part of the NEXT request's history, whose recording was keyed on the
+unredacted history, so a reply containing an email, key or phone-shaped string can make the following turn miss
+(or change what the agent does). Such a recording is written with `"redacted_response": true`, a WARNING names
+it when it is recorded, and its path is appended to `redacted_recordings` whenever it is recorded or replayed, so
+callers (the ingestion-agent eval) can report the run as replay-unsafe.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +27,9 @@ from anthropic.types import Message
 from backend.core import config
 from backend.core.fake_llm import StaticStream
 from backend.core.redact import redact_obj
+
+log = logging.getLogger(__name__)
+redacted_recordings: list[str] = []  # paths of recordings whose response redaction changed it (see the docstring)
 
 
 class ReplayMiss(RuntimeError):
@@ -48,7 +58,13 @@ def _path(kwargs: dict) -> Path:
 def _save(kwargs: dict, message) -> None:
     path = _path(kwargs)  # keyed on the unredacted request
     path.parent.mkdir(parents=True, exist_ok=True)
-    body = {"request": redact_obj(_canonical(kwargs)), "response": redact_obj(message.model_dump(mode="json"))}
+    response = message.model_dump(mode="json")
+    body = {"request": redact_obj(_canonical(kwargs)), "response": redact_obj(response)}
+    if body["response"] != response:
+        body["redacted_response"] = True
+        redacted_recordings.append(str(path))
+        log.warning("recording %s: the response contained redacted text; replay of the NEXT turn may miss "
+                    "because its request history will differ", path)
     path.write_text(json.dumps(body, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
@@ -57,6 +73,8 @@ def _load(kwargs: dict) -> Message:
     if not path.exists():
         raise ReplayMiss(f"no recording {path.name} in {path.parent}; re-run with LLM_PROVIDER=record")
     data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("redacted_response"):
+        redacted_recordings.append(str(path))
     return Message.model_validate(data["response"] if "response" in data and "request" in data else data)
 
 

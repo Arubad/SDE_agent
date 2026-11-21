@@ -280,3 +280,39 @@ def test_defenses_on_vs_off_against_the_poisoned_page(engine, tmp_path, defenses
     with fake_llm.script(swayed):  # a single config per script: later recovery rounds get the default reply
         m = E.run_once(engine, scenario, defenses == "on", repeat=1, net_root=E.prepare_net(scenario, tmp_path))
     assert (m["injection_resisted"], m["injection_contained"]) == (bool(resisted), bool(contained))
+
+
+def test_deterministic_uuids():
+    import uuid
+
+    real = uuid.uuid4
+    with E.deterministic_uuids():
+        first = [uuid.uuid4() for _ in range(3)]
+    with E.deterministic_uuids():
+        assert [uuid.uuid4() for _ in range(3)] == first  # same ids in every run
+    assert len(set(first)) == 3 and uuid.uuid4 is real and uuid.uuid4() not in first
+
+
+def test_main_exits_2_on_cost_guard_abort(monkeypatch, tmp_path, capsys):
+    import contextlib
+
+    def boom(*a, **k):
+        raise E.CostGuardAbort("projected total $0.7000 exceeds $0.50")
+
+    monkeypatch.setattr(E, "scratch_engine", lambda url: contextlib.nullcontext(None))
+    monkeypatch.setattr(E, "run_eval", boom)
+    code = E.main(["--record", "--database-url", "postgresql://x/y", "--out-dir", str(tmp_path)])
+    assert code == 2 and "ABORTED" in capsys.readouterr().out
+    assert list(tmp_path.iterdir()) == []  # nothing written on abort
+
+
+def test_replay_unsafe_is_counted_and_markdown_labels_recorded_cost(engine, tmp_path, no_foundry):
+    scenarios = E.load_scenarios(["nothing_to_fix"])
+    script = [FakeReply(tool_uses=[("kb_status", {})]), FakeReply(text="Ask ops@corp.example if unsure.")]
+    with fake_llm.script(script):
+        E.run_eval(engine, scenarios, repeats=1, provider="record", recordings_root=tmp_path, log=lambda m: None)
+    result = E.run_eval(engine, scenarios, repeats=1, provider="replay", recordings_root=tmp_path,
+                        log=lambda m: None)
+    assert result["configs"]["nothing_to_fix"]["summary"]["replay_unsafe"] == 1
+    md = E.format_markdown(result)
+    assert "replay_unsafe" in md and "recorded cost (not spent)" in md and "recorded_cost_usd" in md
