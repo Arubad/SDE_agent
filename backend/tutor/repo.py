@@ -48,3 +48,11 @@ def create_roadmap(session: Session, *, slug: str, title: str, source_text: str)
 
 def list_roadmaps(session: Session) -> list[Roadmap]:
     return list(session.scalars(select(Roadmap).order_by(Roadmap.created_at.desc(), Roadmap.id)))
+
+
+def get_roadmap_by_slug(session: Session, slug: str, *, lock: bool = False) -> Roadmap | None:
+    """Fetch by slug; `lock=True` takes a row lock (FOR UPDATE) so state transitions on one roadmap serialise."""
+    stmt = select(Roadmap).where(Roadmap.slug == slug)
+    if lock:
+        stmt = stmt.with_for_update()
+    return session.scalars(stmt).first()

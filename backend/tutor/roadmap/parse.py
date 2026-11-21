@@ -55,7 +55,9 @@ def _slug(text: str) -> str:
 
 
 def _unique(prefix: str, wanted: str, taken: set[str]) -> str:
-    base = f"{prefix}-{_slug(wanted) or 'x'}"
+    slug = _slug(wanted) or "x"
+    # Already-prefixed ids stay as they are, so normalising a normalised spec (the review PUT) is a no-op.
+    base = slug if slug.startswith(f"{prefix}-") else f"{prefix}-{slug}"
     candidate, n = base, 2
     while candidate in taken:
         candidate, n = f"{base}-{n}", n + 1

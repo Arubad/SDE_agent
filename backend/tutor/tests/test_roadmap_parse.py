@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -99,3 +100,11 @@ def test_too_many_resources_raises():
          "note": "", "focus": [], "skill_ids": []} for j in range(21)]) for i in range(10)]
     with pytest.raises(ValueError):
         normalize_spec(raw, "")
+
+
+def test_normalize_is_idempotent():
+    raw = json.loads((FIXTURES / "llm_replies" / "RoadmapSpec.json").read_text())
+    text = (FIXTURES / "roadmaps" / "kubernetes.txt").read_text()
+    once = normalize_spec(raw, text)
+    twice = normalize_spec(once.model_dump(mode="json"), text)
+    assert twice == once
