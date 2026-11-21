@@ -1,0 +1,19 @@
+# Self-hosted SearXNG for the roadmap tutor's resource resolver. Mounted read-only by compose.yaml.
+# secret_key is deliberately absent: SearXNG reads it from the SEARXNG_SECRET environment variable.
+use_default_settings:
+  engines:
+    keep_only:
+      - duckduckgo
+      - youtube
+
+general:
+  instance_name: roadmap-tutor-search
+
+search:
+  formats:
+    - html
+    - json
+
+server:
+  limiter: false          # loopback-only service behind the API; the bot limiter would block JSON calls
+  image_proxy: false
