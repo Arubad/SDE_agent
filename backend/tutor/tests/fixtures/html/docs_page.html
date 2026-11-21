@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Pods | Concepts</title></head>
+<body>
+<div id="cookie-banner" class="cookie-consent">COOKIEBANNER_SENTINEL We use cookies. <button>Accept</button></div>
+<header><nav role="navigation"><a href="/docs/">NAV_SENTINEL Home</a> <a href="/docs/concepts/">Concepts</a></nav></header>
+<aside class="sidebar"><ul>
+<li><a href="/docs/concepts/workloads/">Workloads</a></li>
+<li><a href="/docs/concepts/workloads/pods/">Pods</a></li>
+<li><a href="/docs/concepts/services/service/">Services</a></li>
+<li><a href="/docs/concepts/services/service/#ports">Services ports</a></li>
+<li><a href="/docs/concepts/logo.png">Logo</a></li>
+<li><a href="/blog/unrelated/">Blog</a></li>
+<li><a href="https://other.example.com/docs/concepts/pods/">Offsite pods</a></li>
+</ul></aside>
+<main><article>
+<h1>Pods</h1>
+<p>Pods are the smallest deployable units of computing that you can create and manage in Kubernetes. A Pod is a group of one or more containers, with shared storage and network resources, and a specification for how to run the containers.</p>
+<h2>Using Pods</h2>
+<p>The following is an example of a Pod which consists of a container running the image nginx. You normally do not create Pods directly; you create them using workload resources such as Deployments and Jobs.</p>
+<pre><code>apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.14.2</code></pre>
+<h3>Pod lifecycle</h3>
+<p>Pods are considered to be relatively ephemeral rather than durable entities. Each Pod is given a unique identifier and is scheduled to a node where it remains until termination or deletion.</p>
+<table><thead><tr><th>Phase</th><th>Meaning</th></tr></thead>
+<tbody><tr><td>Pending</td><td>Accepted but not yet running</td></tr>
+<tr><td>Running</td><td>Bound to a node and at least one container is running</td></tr></tbody></table>
+</article></main>
+<footer>FOOTER_SENTINEL Copyright the project authors. All rights reserved.</footer>
+</body></html>
