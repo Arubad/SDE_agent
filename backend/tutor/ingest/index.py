@@ -133,15 +133,19 @@ def _drop_near_duplicates(children: list[ChildChunk], others: list[str]) -> list
     return kept
 
 
-def index_document(engine: Engine, index: PlatformIndex, document, skill_ids: Sequence[str]) -> int:
+def index_document(engine: Engine, index: PlatformIndex, document, skill_ids: Sequence[str], *,
+                   dedupe: bool = True) -> int:
     """Chunk the document; replace its Section rows, then its Qdrant points; return the child count.
-    A video's `meta["duration_s"]` (when > 0) becomes the end of its last chapter."""
+    A video's `meta["duration_s"]` (when > 0) becomes the end of its last chapter. `dedupe=False` skips the
+    cross-document near-duplicate scan (a bulk import of already-deduplicated documents: the scan scrolls every
+    other child of the roadmap per document, O(n^2) overall)."""
     doc_id, rid = str(document.id), str(document.roadmap_id)
     duration = (document.meta or {}).get("duration_s")
     parents, children = chunk_markdown(document.markdown or "", doc_title=document.title or document.url,
                                        doc_key=doc_id, embedder=index.embedder,
                                        final_end_s=float(duration) if duration else None)
-    children = _drop_near_duplicates(children, index.other_texts(rid, doc_id))
+    if dedupe:
+        children = _drop_near_duplicates(children, index.other_texts(rid, doc_id))
     live = {c.parent_id for c in children}
     parents = [p for p in parents if p.id in live]
     with session_scope(engine) as s:

@@ -98,6 +98,35 @@ def test_score_questions_on_fixture_index(engine, clean, index, demo):
     assert res["child"]["hit@5"] == 1.0 and res["parent"]["hit@5"] >= res["child"]["hit@5"]
 
 
-def test_v2_row_parsed_from_demo_results():
-    row = sde_retrieval.v2_row("test")
-    assert row["hit@5"] == 0.97 and row["mrr@10"] == 0.85 and row["n"] == 33
+def test_v2_row_parsed_from_markdown(tmp_path):
+    (tmp_path / "retrieval_dev_latest.md").write_text(
+        "Split: **dev** (n=12)\n\n| config | hit@1 | hit@5 | MRR@10 | doc hit@5 | p50 latency |\n|---|---|---|---|---|---|\n"
+        "| v2_dense | 0.10 | 0.20 | 0.30 | 0.40 | 1 ms |\n| v2_hybrid | 0.51 | 0.62 | 0.73 | 0.84 | 2 ms |\n")
+    assert sde_retrieval.v2_row("dev", tmp_path) == {"n": 12, "hit@1": 0.51, "hit@5": 0.62, "mrr@10": 0.73, "doc_hit@5": 0.84}
+    assert sde_retrieval.v2_row("nope", tmp_path) is None
+    real = sde_retrieval.v2_row("test")  # the demo's real file: shape and ranges only
+    assert real is None or (0 <= real["hit@5"] <= 1 and real["n"] > 0)
+
+
+def test_single_evidence_quote_questions_scored(engine, clean, index, demo):
+    imp.import_sde(engine, index, limit=5)
+    with session_scope(engine) as s:
+        rid = str(s.scalar(select(Roadmap.id).where(Roadmap.slug == "sde-mastery")))
+    q = [{"id": "d1", "question": "topic2 guide explains point 3 about topic2 systems",
+          "evidence_quote": "The topic2 guide explains point 3 about topic2 systems in detail."}]
+    res = sde_retrieval.score_questions(engine, index, rid, q)
+    assert res["child"]["n"] == 1 and res["child"]["hit@5"] == 1.0
+
+
+def test_index_document_dedupe_flag(engine, clean, index):
+    from backend.tutor.ingest.index import index_document
+    from backend.tutor.tests.test_index import BODY, _doc
+    a, b = _doc(engine, "dd", md=BODY, url="https://x.dev/a"), None
+    with session_scope(engine) as s:
+        b = Document(roadmap_id=a.roadmap_id, url="https://x.dev/b", kind="page", title="B", markdown=BODY, meta={})
+        s.add(b)
+        s.flush()
+        s.expunge_all()
+    n1 = index_document(engine, index, a, [])
+    assert index_document(engine, index, b, []) == 0  # identical body: dropped as a near-duplicate
+    assert index_document(engine, index, b, [], dedupe=False) == n1

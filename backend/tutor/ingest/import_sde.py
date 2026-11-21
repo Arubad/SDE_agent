@@ -7,6 +7,8 @@ derive deterministically from the demo `doc_id`, so a re-run updates in place an
 each document's sections and points."""
 from __future__ import annotations
 
+import sys
+import time
 import uuid
 from collections import Counter
 
@@ -18,6 +20,7 @@ from backend.tutor.ingest.index import PlatformIndex, index_document
 from backend.tutor.models import Document, Resource, Roadmap
 from backend.tutor.roadmap.spec import ResourceSpec, RoadmapSpec, SkillSpec, StageSpec
 
+PROGRESS_EVERY = 25
 SLUG = "sde-mastery"
 TITLE = "SDE Mastery"
 _NS = uuid.UUID("5de00000-0000-4000-8000-000000000014")
@@ -118,8 +121,13 @@ def import_sde(engine: Engine, index: PlatformIndex, *, limit: int | None = None
     if stale:  # drop the points of removed documents; the rest is re-indexed below
         index.delete_roadmap(str(rid))
     children, per_doc = 0, {}
-    for row, skill_ids in rows:
-        per_doc[row.resource_id] = index_document(engine, index, row, skill_ids)
+    t0 = time.monotonic()
+    for i, (row, skill_ids) in enumerate(rows, 1):
+        # dedupe=False: clean_documents already dropped duplicate documents, and the per-document cross-scan
+        # would make a ~670-document import quadratic.
+        per_doc[row.resource_id] = index_document(engine, index, row, skill_ids, dedupe=False)
+        if i % PROGRESS_EVERY == 0:
+            print(f"indexed {i}/{len(rows)} documents ({time.monotonic() - t0:.0f}s)", file=sys.stderr, flush=True)
         children += per_doc[row.resource_id]
     with session_scope(engine) as s:
         for resource_id, n in per_doc.items():
