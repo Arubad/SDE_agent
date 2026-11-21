@@ -4,6 +4,7 @@
     python -m backend.tutor ingest <slug> [--until-idle]  run the ingestion workers in the foreground
     python -m backend.tutor recheck <slug>                re-check every resource URL (ok / changed / dead)
     python -m backend.tutor report <slug>                 print the ingestion report as JSON
+    python -m backend.tutor import-sde [--limit N]        import the demo SDE knowledge base as roadmap sde-mastery
 """
 from __future__ import annotations
 
@@ -62,6 +63,21 @@ def _command(args, settings) -> None:
         ctx.engine.dispose()
 
 
+def _import_sde(args, settings) -> None:
+    from backend.tutor.db import make_engine, migrate
+    from backend.tutor.ingest.embed import make_embedder
+    from backend.tutor.ingest.import_sde import import_sde
+    from backend.tutor.ingest.index import make_index
+
+    migrate(settings.database_url)
+    engine = make_engine(settings.database_url)
+    try:
+        out = import_sde(engine, make_index(settings, make_embedder(settings)), limit=args.limit)
+        print(json.dumps(out, indent=2))
+    finally:
+        engine.dispose()
+
+
 def main(argv: list[str] | None = None) -> None:
     from backend.tutor.settings import load_settings
 
@@ -77,6 +93,8 @@ def main(argv: list[str] | None = None) -> None:
     ingest.add_argument("--until-idle", action="store_true",
                         help="run inline and stop once no job is due (instead of waiting for a final status)")
     sub.add_parser("recheck", help="re-check every resource URL of a roadmap").add_argument("slug")
+    imp = sub.add_parser("import-sde", help="import the demo SDE knowledge base as the roadmap sde-mastery")
+    imp.add_argument("--limit", type=int, help="import only the first N documents")
     sub.add_parser("report", help="print a roadmap's ingestion report as JSON").add_argument("slug")
     args = parser.parse_args(argv)
     settings = load_settings()
@@ -85,6 +103,9 @@ def main(argv: list[str] | None = None) -> None:
         from backend.tutor.db import create_database_if_missing
 
         create_database_if_missing(settings.database_url)
+    if args.command == "import-sde":
+        _import_sde(args, settings)
+        return
     if args.command:
         _command(args, settings)
         return
