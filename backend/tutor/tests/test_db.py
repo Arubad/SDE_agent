@@ -146,3 +146,31 @@ def test_migration_engine_has_connect_timeout(monkeypatch):
     with pytest.raises(Exception):
         migrate(DOWN_URL)
     assert captured and all(kw.get("connect_args", {}).get("connect_timeout") == 5 for kw in captured)
+
+
+def test_migration_0002_round_trip(db_url):
+    import uuid
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+
+    tables = {"resources", "jobs", "documents", "sections", "http_cache"}
+    name = f"tutor_mig_{uuid.uuid4().hex[:8]}"
+    admin = create_engine(make_url(db_url).set(database="postgres"), isolation_level="AUTOCOMMIT")
+    url = make_url(db_url).set(database=name).render_as_string(hide_password=False)
+    with admin.connect() as c:
+        c.execute(text(f'CREATE DATABASE "{name}"'))
+    eng = create_engine(url)
+    try:
+        migrate(url)
+        assert tables <= set(inspect(eng).get_table_names())
+        downgrade(url, "0001")
+        names = set(inspect(eng).get_table_names())
+        assert not tables & names and "roadmaps" in names
+        migrate(url)
+        assert tables <= set(inspect(eng).get_table_names())
+    finally:
+        eng.dispose()
+        with admin.connect() as c:
+            c.execute(text(f'DROP DATABASE IF EXISTS "{name}"'))
+        admin.dispose()
