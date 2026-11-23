@@ -469,8 +469,9 @@ only, with no URLs, and its line breaks were lost when pasted. That is realistic
 These are taken only where they fit the planned work; the rest was declined.
 - **Phase 3 additions:**
   - **Allow/deny/ask gate in the MCP gateway.** Registry rules, with deny beating ask and ask beating allow. An `ask`
-    tool runs only after an approver has seen the raw JSON payload (tool, server, agent, arguments). The write tools
-    of the ingestion and learner servers are `ask` by default.
+    tool runs only after an approver has seen the raw JSON payload (tool, server, agent, arguments). By default
+    `ask` covers the ingestion server's write tools and the learner's `forget`. `remember` and `set_mastery` stay
+    allowed, because the tutor calls them on every turn.
   - **Idempotency keys on MCP write tools.** On the ingestion server's `create_roadmap` and `approve_roadmap`, a
     repeated key replays the stored result, and a key reused with different arguments is an error.
 - **Later phases:**
