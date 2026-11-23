@@ -44,6 +44,39 @@ def test_parse_timestamps_valid_and_invalid():
     assert parse_timestamps("0:00 A\n1:00 B\n2:00 C", None)[2].start_s == 120
 
 
+def test_parse_timestamps_accepts_emoji_prefixed_chapters():
+    text = ("Chapters:\n"
+            "⌨️ 0:00:00 Introduction\n"
+            "⌨️ 0:06:23 Kubernetes Fundamentals and Lab\n"
+            "⌨️ 0:22:09 Cluster Architecture, Installation & Configuration\n"
+            "⌨️ 0:45:10 Wrap Up\n")
+    assert parse_timestamps(text, 3000) == [
+        Chapter(0, "Introduction"),
+        Chapter(383, "Kubernetes Fundamentals and Lab"),
+        Chapter(1329, "Cluster Architecture, Installation & Configuration"),
+        Chapter(2710, "Wrap Up"),
+    ]
+
+
+@pytest.mark.parametrize("prefix", ["• ", "- ", "▶ ", "👉 ", "⌨️ ", "🔹 ", "✅ ", "👨‍💻 "])
+@pytest.mark.parametrize("wrap", [lambda s: s, lambda s: f"({s})"])
+def test_parse_timestamps_accepts_bullet_and_emoji_variants(prefix, wrap):
+    text = "\n".join(f"{prefix}{wrap(stamp)} {title}" for stamp, title in
+                     [("0:00", "Intro"), ("1:00", "Two"), ("2:00", "Three")])
+    assert parse_timestamps(text, 600) == [Chapter(0, "Intro"), Chapter(60, "Two"), Chapter(120, "Three")]
+
+
+def test_parse_timestamps_prefix_is_not_part_of_title():
+    text = "👉 0:00 Intro\n👉 1:00 Two\n👉 2:00 Three"
+    assert [c.title for c in parse_timestamps(text, 600)] == ["Intro", "Two", "Three"]
+
+
+def test_parse_timestamps_prose_line_is_not_a_chapter():
+    assert parse_timestamps("0:00 A\n1:00 B\nAt 2:00 we deploy", 600) == []
+    text = "0:00 A\n1:00 B\nAt 2:00 we deploy\n3:00 C"
+    assert parse_timestamps(text, 600) == [Chapter(0, "A"), Chapter(60, "B"), Chapter(180, "C")]
+
+
 def test_route_order_creator_comments_split_whole(yt):
     emb = HashEmbedder()
 

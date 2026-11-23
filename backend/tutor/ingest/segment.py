@@ -9,7 +9,7 @@ import re
 from backend.tutor.ingest.net import Chapter, Cue, VideoMeta
 
 _TS_LINE = re.compile(
-    r"^\s*[\(\[]?\s*((?:\d{1,2}:)?\d{1,2}:\d{2})\s*[\)\]]?\s*[-–—:|.]?\s*(.*?)\s*$")
+    r"^\s*(?:[^\w\s()\[\]]{1,8}\s*)?[\(\[]?\s*((?:\d{1,2}:)?\d{1,2}:\d{2})\s*[\)\]]?\s*[-–—:|.]?\s*(.*?)\s*$")
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 TITLE_MAX = 60
 
