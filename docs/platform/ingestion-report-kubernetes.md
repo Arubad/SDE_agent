@@ -147,7 +147,8 @@ fetched HTML, video descriptions and comments), not from the pipeline's output:
 - **Pages:** 6 kubernetes.io pages, committed under `eval/fixtures/ingestion/` (CC BY 4.0, see `NOTICE.md`).
 - **Videos:** all 9, kept in the git-ignored `eval/cache/`, because YouTube data is not redistributed.
 
-Results, run `20261123T142354Z`, full mode, bge, no LLM calls:
+Results, run `20261123T150015Z` (a re-run of `20261123T142354Z` with identical metrics), full mode, bge, no LLM
+calls:
 
 | Metric | Value |
 |---|---|

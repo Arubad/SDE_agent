@@ -38,6 +38,7 @@ LABELS_FILE = HERE / "data" / "ingestion_labels.json"
 COMMITTED_DIR = HERE / "fixtures" / "ingestion"
 CACHE_DIR = HERE / "cache"
 RESULTS_DIR = HERE / "results"
+REPO_ROOT = HERE.resolve().parents[2]
 TOLERANCE_S = 30.0
 NOT_CACHED = "skipped: not cached"
 SCORED_ROUTES = ("comments", "transcript_split")
@@ -214,6 +215,16 @@ def format_markdown(result: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def display_path(path: Path) -> str:
+    """A path as committed results show it: relative to the repo, or just its name when outside it (never an
+    absolute local path)."""
+    resolved = Path(path).resolve()
+    try:
+        return resolved.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return resolved.name
+
+
 def write_results(result: dict, out_dir: Path) -> tuple[Path, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = result["timestamp"]
@@ -245,7 +256,7 @@ def main(argv: list[str] | None = None) -> int:
         embedder, name, roots = make_embedder(settings), settings.embedder, [args.fixtures, args.cache]
     result = run_eval(json.loads(args.labels.read_text()), roots, embedder)
     result.update(timestamp=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
-                  mode="ci" if args.ci else "full", embedder=name, labels=str(args.labels))
+                  mode="ci" if args.ci else "full", embedder=name, labels=display_path(args.labels))
     js, md = write_results(result, args.out_dir)
     print(format_markdown(result))
     print(f"wrote {js} and {md}")

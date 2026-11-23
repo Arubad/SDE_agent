@@ -1,6 +1,6 @@
 # Ingestion eval
 
-Run 20261123T142354Z (full; embedder bge; no LLM calls). 6 pages and 9 videos scored, 0 skipped.
+Run 20261123T150015Z (full; embedder bge; no LLM calls). 6 pages and 9 videos scored, 0 skipped.
 
 | Metric | Value |
 |---|---|

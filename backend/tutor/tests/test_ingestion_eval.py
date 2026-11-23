@@ -79,6 +79,24 @@ def test_main_ci_writes_results(tmp_path, monkeypatch):
     assert len(list(out.glob("ingestion_2*.json"))) == 1
 
 
+def test_results_never_hold_absolute_local_paths(tmp_path):
+    """Results are committed: a path in them is repo-relative, or just a file name when outside the repo."""
+    out = tmp_path / "out"
+    assert E.main(["--ci", "--out-dir", str(out)]) == 0  # the default labels file, inside the repo
+    (js,) = out.glob("ingestion_2*.json")
+    result = json.loads(js.read_text())
+    assert result["labels"] == "backend/tutor/eval/data/ingestion_labels.json"
+    labels = tmp_path / "labels.json"
+    labels.write_text(json.dumps(LABELS))
+    out2 = tmp_path / "out2"
+    E.main(["--ci", "--labels", str(labels), "--fixtures", str(make_root(tmp_path)), "--out-dir", str(out2)])
+    (js2,) = out2.glob("ingestion_2*.json")
+    assert json.loads(js2.read_text())["labels"] == "labels.json"
+    for f in (js, js2, out / "ingestion_latest.md", out2 / "ingestion_latest.md"):
+        text = f.read_text()
+        assert str(Path.home()) not in text and str(tmp_path) not in text
+
+
 def test_capture_routes_pages_by_licence_and_rebuilds_video_fixtures(engine, tmp_path):
     from sqlalchemy import text
 

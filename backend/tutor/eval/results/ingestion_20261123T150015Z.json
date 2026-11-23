@@ -156,7 +156,7 @@
       "boundary_f1": 0.3
     }
   ],
-  "timestamp": "20261123T142354Z",
+  "timestamp": "20261123T150015Z",
   "mode": "full",
   "embedder": "bge",
   "labels": "backend/tutor/eval/data/ingestion_labels.json"
