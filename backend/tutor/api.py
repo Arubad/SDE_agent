@@ -1,10 +1,12 @@
-"""Platform HTTP API: health, roadmaps, public-mode passcode guard, tracing and the SPA."""
+"""Platform HTTP API: health, roadmaps, public-mode passcode guard, tracing, the own MCP servers (/mcp/<name>/),
+the MCP gateway and the SPA."""
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-from contextlib import asynccontextmanager
+import os
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -25,6 +27,10 @@ from backend.tutor.ingest.embed import make_embedder
 from backend.tutor.ingest.index import make_index
 from backend.tutor.ingest.net import make_net
 from backend.tutor.jobs.worker import JobContext, WorkerPool, maybe_settle
+from backend.tutor.mcp.build import OWN_SERVERS, build_own_servers
+from backend.tutor.mcp.gateway import Gateway
+from backend.tutor.mcp.http import mount_mcp
+from backend.tutor.mcp.registry import load_registry
 from backend.tutor.repo import DuplicateRoadmap, create_roadmap, get_roadmap_by_slug, list_roadmaps
 from backend.tutor.roadmap.parse import normalize_spec
 from backend.tutor.settings import Settings
@@ -110,32 +116,37 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         settings.validate()
-        owns_engine = engine is None
-        if owns_engine:
-            migrate(settings.database_url)
-            app.state.engine = make_engine(settings.database_url)
-        else:
-            app.state.engine = engine
-        app.state.tracer_provider = setup_tracing(settings.otel_endpoint)
-        app.state.net = make_net(settings, app.state.engine)
-        pool = None
-        if handlers and settings.ingest_workers > 0:
-            # Built only when workers run; the embedder loads its models lazily, on first use.
-            index = make_index(settings, make_embedder(settings))
-            ctx = JobContext(engine=app.state.engine, net=app.state.net, settings=settings, index=index)
-            pool = WorkerPool(ctx, handlers, settings.ingest_workers, on_settled=on_settled,
-                              tracer_provider=app.state.tracer_provider)
-            pool.start()
-        try:
-            yield
-        finally:
-            if pool is not None:
-                pool.stop()
-            provider = app.state.tracer_provider
-            if provider is not None:
-                provider.shutdown()
+        async with AsyncExitStack() as stack:  # unwinds in reverse: MCP apps, workers, gateway, tracing, engine
+            owns_engine = engine is None
             if owns_engine:
-                app.state.engine.dispose()
+                migrate(settings.database_url)
+                app.state.engine = make_engine(settings.database_url)
+                stack.callback(app.state.engine.dispose)
+            else:
+                app.state.engine = engine
+            app.state.tracer_provider = setup_tracing(settings.otel_endpoint)
+            if app.state.tracer_provider is not None:
+                stack.callback(app.state.tracer_provider.shutdown)
+            app.state.net = make_net(settings, app.state.engine)
+            # The embedder loads its models lazily, on first use; the index makes no request until then either.
+            embedder = make_embedder(settings)
+            index = make_index(settings, embedder)
+            servers = build_own_servers(app.state.engine, app.state.net, index, embedder, settings, on_settled)
+            # Task 10 makes the registry strict (its agent patterns name namespaces that Task 10 adds).
+            registry = load_registry(settings.mcp_registry, os.environ, allow_unknown=True)
+            app.state.gateway = Gateway(registry, engine=app.state.engine, inproc=servers, env=os.environ)
+            app.state.gateway.start()  # a loop thread only: no server is contacted before its first use
+            stack.callback(app.state.gateway.stop)
+            app.state.worker_pool = None
+            if handlers and settings.ingest_workers > 0:
+                ctx = JobContext(engine=app.state.engine, net=app.state.net, settings=settings, index=index,
+                                 gateway=app.state.gateway)
+                app.state.worker_pool = WorkerPool(ctx, handlers, settings.ingest_workers, on_settled=on_settled,
+                                                   tracer_provider=app.state.tracer_provider)
+                app.state.worker_pool.start()
+                stack.callback(app.state.worker_pool.stop)
+            await stack.enter_async_context(serve_mcp(servers))
+            yield
 
     app = FastAPI(title="Roadmap Tutor", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -167,6 +178,8 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
                 if not ok:
                     return _error(401, "Passcode required")
             return await call_next(request)
+
+    serve_mcp = mount_mcp(app, OWN_SERVERS, settings, lockout_key=_lockout_key)  # before the SPA catch-all
 
     @app.get("/api/health")
     def health(request: Request):
@@ -330,7 +343,7 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
 
         @app.get("/{full_path:path}", include_in_schema=False)
         def spa(full_path: str):
-            if full_path == "api" or full_path.startswith("api/"):
+            if full_path.split("/", 1)[0] in ("api", "mcp"):
                 return JSONResponse({"detail": "Not Found"}, status_code=404)
             candidate = (dist / full_path).resolve()
             if full_path and candidate.is_file() and candidate.is_relative_to(dist):
