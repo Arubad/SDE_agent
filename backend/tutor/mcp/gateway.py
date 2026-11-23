@@ -11,9 +11,9 @@
   - structured content `{"passages": [...]}` -> passed through unchanged (citations need the raw text);
   - other structured content -> `{"data": <it>}`; no structured content -> `{"data": {"text": <joined text>}}`.
   For an `untrusted` server every string leaf of `data` (and an error's text) is fenced with `untrusted.wrap`.
-  Then the whole result is capped at `CAP` characters of its JSON: the largest string leaves are cut and get
+  Then the whole result is capped at `results.CAP` characters of its JSON: the largest string leaves are cut and get
   ` [truncated N chars]` appended (after the fence, which is never cut). `CallContext.raw` (crawler only) skips
-  the wrap and uses `RAW_CAP`.
+  the wrap and uses `results.RAW_CAP`. (Shaping lives in `results.py`.)
 - External (non-inproc) servers' tool descriptions reach the model fenced and capped (DESC_CHARS), and every
   `description` inside their input schemas is cut to SCHEMA_DESC_CHARS; own (inproc) descriptions are our code.
 - Timeouts: connecting has its own budget (`max(timeout_s, stdio_connect_s)` for stdio, which may download a
@@ -43,6 +43,7 @@ from mcp.shared.exceptions import McpError
 from backend.core.redact import redact
 from backend.core.trace import Trace
 from backend.tutor.mcp.registry import Registry, ServerSpec, effective_enabled, missing_env
+from backend.tutor.mcp.results import _finish, _shape
 from backend.tutor.untrusted import wrap
 
 if TYPE_CHECKING:
@@ -50,8 +51,6 @@ if TYPE_CHECKING:
 
     from backend.tutor.mcp.policy import UrlPolicy
 
-CAP = 20_000
-RAW_CAP = 5 * 1024 * 1024
 RAW_AGENT = "crawler"
 ERROR_CHARS = 300
 RETRY_DOWN_S = 30.0  # tool_defs skips a server that failed this recently; call() always retries
@@ -476,7 +475,7 @@ class Gateway:
                             error=None if live else conn.error, checked_at=conn.checked_at, note=spec.note)
 
 
-# ---- results -------------------------------------------------------------------------------------------------------
+# ---- helpers -------------------------------------------------------------------------------------------------------
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -486,97 +485,9 @@ async def _quiet_close(client: Client) -> None:
         await client.close()
 
 
-def _text(result) -> str:
-    return "\n".join(b.text for b in result.content if getattr(b, "text", None) is not None)
-
-
-def _shape(result, spec: ServerSpec) -> dict:
-    """fastmcp CallToolResult -> the loop's shape, before wrapping and capping. Only an own (inproc) server's
-    `{"passages": [...]}` becomes passages; from any other server it is ordinary data."""
-    if result.is_error:
-        return {"error": _text(result)}
-    sc = result.structured_content
-    if spec.transport == "inproc" and isinstance(sc, dict) and isinstance(sc.get("passages"), list):
-        return {"passages": sc["passages"]}
-    if sc is not None:
-        return {"data": json.loads(json.dumps(sc, default=str))}
-    return {"data": {"text": _text(result)}}
-
-
 def _cap_descriptions(schema):
     """A copy of a JSON schema with every string `description` cut to SCHEMA_DESC_CHARS."""
     if isinstance(schema, dict):
         return {k: v[:SCHEMA_DESC_CHARS] if k == "description" and isinstance(v, str) else _cap_descriptions(v)
                 for k, v in schema.items()}
     return [_cap_descriptions(v) for v in schema] if isinstance(schema, list) else schema
-
-
-def _leaves(obj, out: list) -> list:
-    """(container, key) for every string leaf below `obj` (dict values and list items; keys are left alone)."""
-    items = obj.items() if isinstance(obj, dict) else enumerate(obj) if isinstance(obj, list) else ()
-    for k, v in items:
-        if isinstance(v, str):
-            out.append((obj, k))
-        else:
-            _leaves(v, out)
-    return out
-
-
-def _size(obj) -> int:
-    return len(json.dumps(obj, ensure_ascii=False))
-
-
-def _marker(n: int) -> str:
-    return f" [truncated {n} chars]"
-
-
-def _cut(text: str, excess: int) -> tuple[str, int] | None:
-    """(kept text, chars cut) so that text + marker is at least `excess` chars shorter than text, or None when
-    cutting the whole text would save less than the marker costs."""
-    cut = excess + len(_marker(excess))
-    cut = excess + len(_marker(cut))  # the marker's own length depends on the number in it
-    if cut > len(text):
-        if len(text) <= len(_marker(len(text))):
-            return None
-        cut = len(text)
-    return text[:len(text) - cut], cut
-
-
-# Passages feed backend/agent/citations.py, which indexes these keys directly.
-_PASSAGE_KEYS = ("chunk_id", "url", "text", "title")
-
-
-def _passages(found: list, cap: int, canonical: str) -> dict:
-    """Valid passages only, trailing ones dropped until the JSON fits; the first is kept (its text cut)."""
-    ok = [p for p in found if isinstance(p, dict) and all(isinstance(p.get(k), str) for k in _PASSAGE_KEYS)]
-    if not ok:
-        return {"error": f"{canonical} returned no valid passages"}
-    out = {"passages": ok}
-    while len(ok) > 1 and _size(out) > cap:
-        ok.pop()
-    if (excess := _size(out) - cap) > 0 and (cut := _cut(ok[0]["text"], excess)):
-        ok[0] = {**ok[0], "text": cut[0] + _marker(cut[1])}
-    return out
-
-
-def _finish(out: dict, spec: ServerSpec, ctx: CallContext, canonical: str) -> dict:
-    """Wrap every string leaf (untrusted server, not raw), then cut the largest leaves, marker included in the
-    budget, until the JSON fits; a leaf too small to pay for its marker is never touched."""
-    cap = RAW_CAP if ctx.raw else CAP
-    if "passages" in out:
-        return _passages(out["passages"], cap, canonical)
-    fence = spec.untrusted and not ctx.raw
-    leaves = _leaves(out, [])
-    raw = [c[k] for c, k in leaves]
-    for i, (c, k) in enumerate(leaves):
-        c[k] = wrap(raw[i]) if fence else raw[i]
-    total = _size(out)
-    for i in sorted(range(len(leaves)), key=lambda j: -len(raw[j])):
-        if total <= cap:
-            break
-        if (cut := _cut(raw[i], total - cap)) is None:
-            continue
-        c, k = leaves[i]
-        c[k] = (wrap(cut[0]) if fence else cut[0]) + _marker(cut[1])
-        total = _size(out)
-    return out
