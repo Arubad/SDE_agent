@@ -152,4 +152,29 @@ describe("api", () => {
 
     expect(getCode()).toBeNull();
   });
+
+  it("setServerEnabled sends PUT with the access code", async () => {
+    const { setServerEnabled, setCode } = await load();
+    setCode("pw");
+    const health = { name: "web", state: "disabled", enabled: false };
+    fetchMock.mockResolvedValue(jsonResponse(200, health));
+
+    await expect(setServerEnabled("web", false)).resolves.toEqual(health);
+
+    const [path, init] = fetchMock.mock.calls[0];
+    expect(path).toBe("/api/mcp/servers/web");
+    expect(init.method).toBe("PUT");
+    expect(init.body).toBe(JSON.stringify({ enabled: false }));
+    expect(sentHeaders().get("X-Access-Code")).toBe("pw");
+  });
+
+  it("checkServer POSTs and listServers GETs, encoding the name", async () => {
+    const { checkServer, listServers } = await load();
+    fetchMock.mockResolvedValue(jsonResponse(200, []));
+    await listServers();
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/mcp/servers");
+    await checkServer("a b");
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/mcp/servers/a%20b/check");
+    expect(fetchMock.mock.calls[1][1].method).toBe("POST");
+  });
 });

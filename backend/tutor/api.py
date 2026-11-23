@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import asdict
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 from sqlalchemy import Engine, select, text
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
@@ -28,6 +29,7 @@ from backend.tutor.ingest.net import make_net
 from backend.tutor.jobs.worker import JobContext, WorkerPool, maybe_settle
 from backend.tutor.mcp.build import OWN_SERVERS, build_gateway, build_own_servers
 from backend.tutor.mcp.http import mount_mcp
+from backend.tutor.mcp.registry import set_enabled
 from backend.tutor.repo import DuplicateRoadmap, create_roadmap, get_roadmap_by_slug, list_roadmaps
 from backend.tutor.roadmap.parse import normalize_spec
 from backend.tutor.settings import Settings
@@ -46,6 +48,10 @@ class RoadmapIn(BaseModel):
 
 class SpecIn(BaseModel):
     spec: dict
+
+
+class ServerEnabledIn(BaseModel):
+    enabled: StrictBool
 
 
 class ApproveIn(BaseModel):
@@ -187,6 +193,28 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
         except SQLAlchemyError:
             return JSONResponse({"status": "degraded", "db": "down", **body}, status_code=503)
         return {"status": "ok", "db": "ok", **body}
+
+    @app.get("/api/mcp/servers")
+    async def get_mcp_servers(request: Request):
+        return [asdict(h) for h in await request.app.state.gateway.health()]
+
+    def _known_server(request: Request, name: str) -> bool:
+        return any(s.name == name for s in request.app.state.gateway.registry.servers)
+
+    @app.post("/api/mcp/servers/{name}/check")
+    async def check_mcp_server(request: Request, name: str):
+        if not _known_server(request, name):
+            return _error(404, f"No MCP server '{name}'")
+        return asdict(await request.app.state.gateway.check(name))
+
+    @app.put("/api/mcp/servers/{name}")
+    async def put_mcp_server(request: Request, name: str, body: ServerEnabledIn):
+        if not _known_server(request, name):
+            return _error(404, f"No MCP server '{name}'")
+        gateway = request.app.state.gateway
+        await run_in_threadpool(set_enabled, request.app.state.engine, name, body.enabled)
+        await gateway.reset(name)  # drop the connection and the cached tools and health
+        return asdict(await gateway.check(name))
 
     @app.get("/api/roadmaps")
     def get_roadmaps(request: Request):

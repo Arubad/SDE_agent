@@ -2,6 +2,7 @@ import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { ApiError, createRoadmap, getHealth, type Health, isAuthError, listRoadmaps, type Roadmap } from "./api";
 import { statusText } from "./format";
 import { RoadmapDetail } from "./RoadmapDetail";
+import { Settings } from "./Settings";
 
 type HealthState = Health | "down" | null;
 
@@ -147,6 +148,7 @@ function CreateRoadmapForm({
 }
 
 // The open roadmap lives in the URL hash (#/roadmaps/<slug>), so reloads and the back button work without a router.
+const SETTINGS_HASH = "#/settings";
 const ROUTE = /^#\/roadmaps\/([^/]+)$/;
 
 function slugFromHash(): string | null {
@@ -203,6 +205,12 @@ export function App() {
   const [lock, setLock] = useState<{ error: string | null } | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selected, select] = useSelectedSlug();
+  const [onSettings, setOnSettings] = useState(() => window.location.hash === SETTINGS_HASH);
+  useEffect(() => {
+    const onHash = () => setOnSettings(window.location.hash === SETTINGS_HASH);
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
 
   const showPasscode = useCallback((err: ApiError) => {
     setLock({ error: err.status === 429 ? err.message : null });
@@ -231,7 +239,11 @@ export function App() {
           <span className="logo" aria-hidden="true">◆</span>
           <h1>Roadmap Tutor</h1>
         </div>
-        <HealthBadge health={health} />
+        <nav className="topnav" aria-label="Main">
+          <a href="#">Roadmaps</a>
+          <a href={SETTINGS_HASH}>Settings</a>
+          <HealthBadge health={health} />
+        </nav>
       </header>
       <main className="page">
         {lock ? (
@@ -241,6 +253,13 @@ export function App() {
               setRoadmaps(list);
               setLoadError(null);
               setLock(null);
+            }}
+          />
+        ) : onSettings ? (
+          <Settings
+            onUnauthorized={showPasscode}
+            onBack={() => {
+              window.location.hash = "";
             }}
           />
         ) : selected ? (

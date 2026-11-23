@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hostOf, pagesText, reasonText, safeHref, skippedUrlText } from "./format";
+import { hostOf, pagesText, reasonText, safeHref, serverStateLabel, skippedUrlText } from "./format";
 
 describe("format", () => {
   it("maps reason codes to readable text and falls back to the code", () => {
@@ -50,5 +50,14 @@ describe("format", () => {
   it("shows the host of a URL", () => {
     expect(hostOf("https://www.youtube.com/watch?v=x")).toBe("youtube.com");
     expect(hostOf("nonsense")).toBe("");
+  });
+
+  it("labels a server's state", () => {
+    expect(serverStateLabel("ok")).toBe("ok");
+    expect(serverStateLabel("down")).toBe("down");
+    expect(serverStateLabel("disabled")).toBe("off");
+    expect(serverStateLabel("missing_env", "missing env: GITHUB_TOKEN, X_KEY")).toBe("needs GITHUB_TOKEN, X_KEY");
+    expect(serverStateLabel("missing_env", null)).toBe("needs a key");
+    expect(serverStateLabel("weird")).toBe("weird");
   });
 });

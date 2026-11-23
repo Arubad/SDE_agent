@@ -74,3 +74,15 @@ const STATUS_LABELS: Record<string, string> = {
 export function statusText(status: string): string {
   return STATUS_LABELS[status] ?? status;
 }
+
+/** The badge text for an MCP server's state. A missing-env server names the variables its error lists
+ * ("missing env: A, B"); the payload carries no values, so that is all there is to show. */
+export function serverStateLabel(state: string, error?: string | null): string {
+  if (state === "ok" || state === "down") return state;
+  if (state === "disabled") return "off";
+  if (state === "missing_env") {
+    const names = /^missing env:\s*(.+)$/.exec(error ?? "")?.[1]?.trim();
+    return names ? `needs ${names}` : "needs a key";
+  }
+  return state;
+}

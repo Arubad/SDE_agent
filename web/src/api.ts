@@ -272,3 +272,33 @@ export function approveProposal(slug: string, id: string): Promise<ProposalResul
 export function dismissProposal(slug: string, id: string): Promise<ProposalResult> {
   return post<ProposalResult>(roadmapPath(slug, `/resources/${encodeURIComponent(id)}/dismiss`));
 }
+
+// --- MCP servers (shapes from backend/tutor/mcp/gateway.py:ServerHealth; never carries secrets) ----------
+
+export interface ServerHealth {
+  name: string;
+  namespace: string;
+  transport: string;
+  enabled: boolean;
+  state: "ok" | "down" | "disabled" | "missing_env";
+  tools: number;
+  latency_ms: number | null;
+  error: string | null;
+  checked_at: string | null;
+  note: string;
+}
+
+export function listServers(): Promise<ServerHealth[]> {
+  return request<ServerHealth[]>("/api/mcp/servers");
+}
+
+export function checkServer(name: string): Promise<ServerHealth> {
+  return request<ServerHealth>(`/api/mcp/servers/${encodeURIComponent(name)}/check`, { method: "POST" });
+}
+
+export function setServerEnabled(name: string, enabled: boolean): Promise<ServerHealth> {
+  return request<ServerHealth>(`/api/mcp/servers/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    body: JSON.stringify({ enabled }),
+  });
+}
