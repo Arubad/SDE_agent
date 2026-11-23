@@ -220,7 +220,7 @@ def fetch_page(ctx, job: Job) -> dict:
         return {"duplicate": True}
     fr = ctx.net.fetcher.get(url)
     if fr.outcome == "needs_browser":
-        rendered = _render(ctx, res, url)
+        rendered = _render(ctx, res, fr.url, own=owner and depth == 0)
         if isinstance(rendered, RenderResult):
             page = extract_page(rendered.html, rendered.final_url)
             if _has_text(page):
@@ -241,13 +241,18 @@ def _has_text(page) -> bool:
     return bool(page.markdown.strip()) and page.word_count > 0
 
 
-def _render(ctx, res: Resource, url: str) -> RenderResult | str:
-    """A `needs_browser` page rendered in the gateway's browser, or why not (kept as the skipped page's detail)."""
+def _render(ctx, res: Resource, final_url: str, *, own: bool) -> RenderResult | str:
+    """A `needs_browser` page rendered in the gateway's browser, or why not (kept as the skipped page's detail).
+    The browser opens `final_url`, where the fetch's redirects ended (every hop address-checked), which also seeds
+    the render's URL policy. The scope host is the resource's crawl scope (`_scope_url`), except for the resource's
+    own page (`own`: owner, depth 0), whose scope is where it ended up: it is about to be recorded as
+    `meta.final_url` (apex -> www)."""
     if not ctx.settings.browser_render:
         return "browser rendering is off"
     if ctx.gateway is None:
         return "browser unavailable: no gateway"
-    return render_page(ctx.gateway, url, scope_host=(urlsplit(_scope_url(res)).hostname or "").lower(),
+    scope = final_url if own else _scope_url(res)
+    return render_page(ctx.gateway, final_url, scope_host=(urlsplit(scope).hostname or "").lower(),
                        resolver=ctx.net.fetcher.resolver)
 
 

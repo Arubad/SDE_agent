@@ -190,6 +190,29 @@ def test_rendered_links_are_discovered_within_caps(engine, tmp_path, clock):
     assert (res.status, res.stats["pages"], res.stats["rendered_by_browser"]) == ("done", 3, 1)
 
 
+def test_redirected_spa_is_rendered_at_its_final_url(engine, tmp_path, clock):
+    """apex -> www: the browser opens where the fetch ended (fr.url), and the resource's own page takes its policy
+    and scope host from there, so the render is not "left the site"."""
+    apex, www = "https://apex.test/docs/", "https://www.apex.test/docs/"
+    rendered = _page("Rendered docs", _prose("Client routing"), '<a href="/docs/p1">P1</a>')
+    site = _site(tmp_path / "net", {
+        apex: {"status": 301, "body": "", "headers": {"location": www}},
+        www: SPA,
+        "https://www.apex.test/docs/p1": _page("P1", _prose("Topic 1"))})
+    calls = []
+    with _gateway(_playwright({apex: (www, rendered), www: (www, rendered)}, calls)) as gw:
+        ctx = _ctx(engine, site)
+        ctx.gateway = gw
+        rid = _roadmap(engine, "apex", [("docs", "doc", apex)])
+        _drain(ctx, rid, clock)
+    assert calls[0] == ("navigate", www) and [c[0] for c in calls] == ["navigate", "evaluate", "close"]
+    doc = next(d for d in _docs(engine, rid) if d.url == apex)
+    assert (doc.status, doc.meta["rendered"], doc.meta["final_url"]) == ("ok", "browser", www)
+    res = _resources(engine, rid)["docs"]
+    assert res.meta["final_url"] == www  # recorded: the rendered links are crawled on www
+    assert sorted(d.url for d in _docs(engine, rid)) == [apex, "https://www.apex.test/docs/p1"]
+
+
 def _render(pages, calls, url=ROOT, scope_host="spa.test"):
     with _gateway(_playwright(pages, calls)) as gw:
         return render_page(gw, url, scope_host=scope_host, resolver=public_resolver)
