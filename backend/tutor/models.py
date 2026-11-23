@@ -4,9 +4,11 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -193,6 +195,59 @@ class McpServerState(Base):
 
     name: Mapped[str] = mapped_column(Text, primary_key=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class LearnerSettings(Base):
+    """Singleton row (id=1). `consent_*` null means the learner has not been asked yet."""
+
+    __tablename__ = "learner_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    consent_personal: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    consent_raw_messages: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    retention_days: Mapped[int] = mapped_column(Integer, nullable=False, default=90, server_default="90")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class SkillProgress(Base):
+    """Per-skill learning progress; always kept, whatever the consent."""
+
+    __tablename__ = "skill_progress"
+    __table_args__ = (CheckConstraint("mastery >= 0 AND mastery <= 1", name="ck_skill_progress_mastery"),)
+
+    roadmap_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), _roadmap_fk(), primary_key=True)
+    skill_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    mastery: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default="0")
+    weak_spots: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
+    next_review_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    unlock_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class LearnerFact(Base):
+    """A semantic fact about the learner. `roadmap_id` null = about the learner in general. `embedding` has no
+    fixed dimension; `embedder` names the model that made it, and searches only compare the same embedder."""
+
+    __tablename__ = "learner_facts"
+    __table_args__ = (CheckConstraint("kind IN ('fact', 'preference', 'goal')", name="ck_learner_facts_kind"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    roadmap_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), _roadmap_fk(), nullable=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding = mapped_column(Vector(), nullable=False)
+    embedder: Mapped[str] = mapped_column(Text, nullable=False)
+    provenance: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
