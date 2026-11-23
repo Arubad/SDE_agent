@@ -4,7 +4,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from backend.tutor.ingest.fetch import USER_AGENT, Fetcher, FetchResult, HttpCacheStore, public_resolver
+from backend.tutor.ingest.fetch import (PRIVATE_ADDRESS, USER_AGENT, Fetcher, FetchResult, HttpCacheStore,
+                                        public_resolver)
 from backend.tutor.ingest.net import (
     RealYouTube,
     CaptionsBlocked,
@@ -70,9 +71,65 @@ def test_robots_denied():
 
 
 def test_missing_robots_allows_everything():
-    f, _ = make_fetcher(lambda req: httpx.Response(404) if req.url.path == "/robots.txt" else html(LONG))
+    seen = []
+
+    def handler(req):
+        seen.append(str(req.url))
+        return httpx.Response(404) if req.url.path == "/robots.txt" else html(LONG)
+
+    f, _ = make_fetcher(handler)
     r = f.get("https://a.test/x")
     assert r.outcome == "ok" and r.status == 200 and r.content_type == "text/html"
+    assert f.get("https://a.test/y").outcome == "ok"
+    assert seen.count("https://a.test/robots.txt") == 1  # a 4xx robots.txt is a real answer: cached as allow
+
+
+@pytest.mark.parametrize("failure", ["connect_error", "timeout", "http_503"])
+def test_unreachable_robots_is_a_retryable_error_and_not_cached(failure):
+    """RFC 9309: an unreachable robots.txt (network error or 5xx) means "do not crawl now". The page is not
+    requested, the outcome is a retryable `error`, and nothing is cached: the next fetch asks again."""
+    seen, broken = [], [True]
+
+    def handler(req):
+        seen.append(str(req.url))
+        if req.url.path == "/robots.txt":
+            if not broken[0]:
+                return httpx.Response(200, text="User-agent: *\nDisallow: /private\n")
+            if failure == "connect_error":
+                raise httpx.ConnectError("connection reset", request=req)
+            if failure == "timeout":
+                raise httpx.ReadTimeout("timed out", request=req)
+            return httpx.Response(503, text="busy")
+        return html(LONG)
+
+    f, _ = make_fetcher(handler, interval=0)
+    r = f.get("https://a.test/x")
+    assert r.outcome == "error" and r.reason.startswith("robots.txt unreachable")
+    assert r.reason != PRIVATE_ADDRESS  # handlers retry every `error` except a private address
+    assert "https://a.test/x" not in seen  # the page itself was never requested
+    assert f.get("https://a.test/x").outcome == "error"
+    assert seen.count("https://a.test/robots.txt") == 2  # not cached: asked again
+    broken[0] = False  # the blip is over: the real rules are fetched and then cached
+    assert f.get("https://a.test/x").outcome == "ok"
+    assert f.get("https://a.test/private/y").outcome == "robots_denied"
+    assert seen.count("https://a.test/robots.txt") == 3
+
+
+def test_politeness_bucket_and_robots_origin_use_the_normalised_host():
+    seen = []
+
+    def handler(req):
+        seen.append(str(req.url))
+        return httpx.Response(404) if req.url.path == "/robots.txt" else html(LONG)
+
+    f, t = make_fetcher(handler, interval=1.0)
+    f.get("https://Example.com:443/1")  # robots + page
+    f.get("https://example.com/2")
+    f.get("https://user:pw@EXAMPLE.com./3")
+    assert sum(u.endswith("/robots.txt") for u in seen) == 1  # one robots.txt for all three spellings
+    assert len(t.sleeps) == 3  # one bucket: robots->1, 1->2, 2->3
+    f.get("https://example.com:8443/4")  # a non-default port is another origin and another bucket
+    assert sum(u.endswith("/robots.txt") for u in seen) == 2 and len(t.sleeps) == 4
 
 
 def test_domain_interval_is_respected():

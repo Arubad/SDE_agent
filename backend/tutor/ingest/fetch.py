@@ -151,6 +151,27 @@ class _Early(Exception):
         self.result = result
 
 
+@dataclass(frozen=True)
+class _Unreachable:
+    """robots.txt could not be fetched (network error or 5xx): no answer, so nothing to cache."""
+    reason: str
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def host_key(url: str) -> str:
+    """The host a politeness bucket and a robots.txt origin are keyed on: lower-case, no trailing dot, no
+    credentials, the scheme's default port dropped (`https://u:p@Example.com.:443/` -> `example.com`). May raise
+    ValueError (a bad port), like urlsplit itself."""
+    parts = urlsplit(url)
+    host = (parts.hostname or "").rstrip(".")  # .hostname is already lower-cased and without userinfo
+    if ":" in host:
+        host = f"[{host}]"  # an IPv6 literal
+    port = parts.port
+    return host if port in (None, _DEFAULT_PORTS.get(parts.scheme.lower())) else f"{host}:{port}"
+
+
 def _visible_text(html: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "noscript", "template"]):
@@ -172,7 +193,7 @@ class Fetcher:
         self._guard = threading.Lock()
         self._host_locks: dict[str, threading.Lock] = {}
         self._last: dict[str, float] = {}
-        self._robots: dict[str, RobotFileParser | None] = {}  # None = everything allowed
+        self._robots: dict[str, RobotFileParser | None] = {}  # origin -> rules; None = everything allowed
         self._robots_locks: dict[str, threading.Lock] = {}
 
     # -- politeness -----------------------------------------------------------------------------
@@ -191,28 +212,30 @@ class Fetcher:
             self._last[host] = self._clock()
 
     def _robots_allow(self, url: str) -> bool:
-        parts = urlsplit(url)
-        origin = f"{parts.scheme}://{parts.netloc}"
+        """Only a real answer is cached. While robots.txt is unreachable (network error or 5xx) the page is not
+        fetched: this raises an `error` outcome, which the job queue retries with its normal backoff."""
+        origin = f"{urlsplit(url).scheme.lower()}://{host_key(url)}"
         with self._lock_for(self._robots_locks, origin):
             if origin not in self._robots:
-                self._robots[origin] = self._load_robots(origin)
+                rp = self._load_robots(origin)
+                if isinstance(rp, _Unreachable):
+                    raise _Early(FetchResult(url, 0, "", b"", "error", f"robots.txt unreachable: {rp.reason}"))
+                self._robots[origin] = rp
             rp = self._robots[origin]
         return True if rp is None else rp.can_fetch(self._ua, url)
 
-    def _load_robots(self, origin: str) -> RobotFileParser | None:
+    def _load_robots(self, origin: str) -> RobotFileParser | None | _Unreachable:
         try:
             raw = self._download(f"{origin}/robots.txt", {}, check_robots=False)
-        except _Early:
-            return None
-        rp = RobotFileParser()
-        if raw.status >= 500:
-            rp.disallow_all = True
-            rp.modified()  # RFC 9309: robots.txt unreachable means complete disallow
-        elif raw.status == 200:
+        except _Early as e:
+            return _Unreachable(e.result.reason or "fetch error")
+        if raw.status >= 500:  # RFC 9309: unreachable means complete disallow; not cached, so asked again later
+            return _Unreachable(f"HTTP {raw.status}")
+        if raw.status == 200:
+            rp = RobotFileParser()
             rp.parse(raw.body.decode("utf-8", "replace").splitlines())
-        else:
-            return None  # missing or inaccessible robots.txt: everything is allowed
-        return rp
+            return rp
+        return None  # missing or inaccessible (4xx) robots.txt: everything is allowed
 
     # -- transport ------------------------------------------------------------------------------
     def _download(self, url: str, headers: dict[str, str], *, check_robots: bool,
@@ -231,7 +254,7 @@ class Fetcher:
                 if (check_robots and (parts.hostname or "").lower() not in ROBOTS_EXEMPT_HOSTS
                         and not self._robots_allow(url)):
                     raise _Early(FetchResult(url, 0, "", b"", "robots_denied", "disallowed by robots.txt"))
-                self._wait_turn(parts.netloc)
+                self._wait_turn(host_key(url))
                 with self._client.stream("GET", url, headers=headers, timeout=TIMEOUT_S,
                                          follow_redirects=False) as resp:
                     if resp.is_redirect and resp.headers.get("location"):

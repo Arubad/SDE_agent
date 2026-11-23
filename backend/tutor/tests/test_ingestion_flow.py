@@ -350,6 +350,32 @@ def test_fetch_error_retried_then_permanent(engine, tmp_path, clock):
     assert _report(engine, rid)["skipped"] == [{"url": "https://flow.test/err", "reason": "error"}]
 
 
+def test_robots_blip_is_retried_through_the_queue(engine, tmp_path, clock):
+    """A robots.txt that times out once is not taken as allow-all (nor cached): the page job retries with
+    the normal backoff, and the retry fetches the real robots.txt and the page."""
+    import httpx
+
+    site = _site(tmp_path / "net", {"https://flow.test/robots.txt": {"body": "User-agent: *\nAllow: /\n",
+                                                                     "content_type": "text/plain"},
+                                    "https://flow.test/page": _page("Page", _prose("Robots blip"))})
+    ctx = _ctx(engine, site)
+    real, calls = ctx.net.fetcher._client, []
+
+    def handler(req):
+        if req.url.path == "/robots.txt":
+            calls.append(1)
+            if len(calls) == 1:
+                raise httpx.ReadTimeout("timed out", request=req)
+        return real.send(req)
+    ctx.net.fetcher._client = httpx.Client(transport=httpx.MockTransport(handler))
+    rid = _roadmap(engine, "blip", [("p", "doc", "https://flow.test/page")])
+    _drain(ctx, rid, clock)
+    with Session(engine) as s:
+        job = s.scalars(select(Job).where(Job.roadmap_id == rid, Job.type == "fetch_page")).one()
+        assert (job.status, job.attempts) == ("done", 2)
+    assert len(calls) == 2 and _resources(engine, rid)["p"].status == "done" and _status(engine, rid) == "ready"
+
+
 def test_robots_denied_page_reported(engine, tmp_path, clock):
     site = _site(tmp_path / "net", {
         "https://robots.test/robots.txt": {"content_type": "text/plain", "body": "User-agent: *\nDisallow: /private"},
