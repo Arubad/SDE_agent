@@ -251,3 +251,17 @@ class LearnerFact(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class McpIdempotency(Base):
+    """A claimed MCP write. `result` is null while the call runs; a failed call deletes its claim."""
+
+    __tablename__ = "mcp_idempotency"
+
+    tool: Mapped[str] = mapped_column(Text, primary_key=True)
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    args_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    result: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
