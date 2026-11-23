@@ -2,6 +2,7 @@
 DNS is a fake resolver (no network)."""
 import asyncio
 import contextlib
+import inspect
 import json
 import threading
 import time
@@ -10,6 +11,7 @@ from pathlib import Path
 import pytest
 from fastmcp import Client, FastMCP
 
+from backend.tutor.ingest.fetch import system_resolver
 from backend.tutor.mcp.gateway import CallContext, Gateway
 from backend.tutor.mcp.policy import UrlPolicy
 from backend.tutor.mcp.registry import Registry, RegistryError, ServerSpec, load_registry
@@ -162,10 +164,38 @@ def test_private_and_loopback_refused_even_if_listed():
     assert p.refusal("http://127.0.0.1:8000/other") is not None
 
 
-def test_default_resolver_still_refuses_literals():
-    p = UrlPolicy()
-    p.allow_sources(["http://127.0.0.1/", "https://example.org/"])
-    assert p.refusal("http://127.0.0.1/") is not None and p.refusal("https://example.org/x") is None
+def test_default_resolver_is_real_dns():
+    assert inspect.signature(UrlPolicy).parameters["resolver"].default is system_resolver
+    p = UrlPolicy()  # literals never reach the resolver, so this needs no network
+    p.allow_sources(["http://127.0.0.1/", "http://169.254.169.254/"])
+    assert p.refusal("http://127.0.0.1/") is not None and p.refusal("http://169.254.169.254/") is not None
+
+
+def test_listed_host_resolving_private_refused():
+    p = UrlPolicy(resolver=lambda host: ["10.0.0.5"] if host == "internal.corp.example" else ["93.184.216.34"])
+    p.allow_sources(["https://internal.corp.example/wiki"])
+    p.allow_text("look at https://internal.corp.example/wiki")
+    assert p.refusal("https://internal.corp.example/wiki") is not None
+
+
+async def test_dns_runs_off_the_gateway_loop():
+    threads = []
+
+    def recording(host):
+        threads.append(threading.current_thread().name)
+        return ["93.184.216.34"]
+
+    fetched, navs = [], []
+    p = UrlPolicy(resolver=recording)
+    p.allow_sources(["https://allowed.example/"])
+    threads.clear()
+    servers = {"web": _web(fetched), "playwright": _browser(navs, {})}
+    with _gateway([_spec("web"), _browser_spec()], servers, cls=_FakeExternal) as gw:
+        ctx = CallContext(agent="all", policy=p)
+        await gw.call("web.fetch", {"url": "https://allowed.example/x"}, ctx)  # argument check
+        await gw.call("web.search", {"query": "q"}, ctx)  # search-result filtering
+        await gw.call("browser.navigate", {"url": "https://allowed.example/y"}, ctx)  # Page URL check
+    assert len(threads) >= 3 and "mcp-gateway" not in threads
 
 
 # ---- the URL policy in the gateway -------------------------------------------------------------------------------
@@ -274,8 +304,20 @@ async def test_ask_without_approver_is_refused():
         for name in ("learner.forget", "learner__forget"):
             out = await gw.call(name, {"topic": "x"}, ctx)
             assert out == {"error": "approval required for learner.forget"}
+        assert state["connects"] == 0 and calls == []
+
+
+async def test_url_policy_refuses_before_anyone_is_asked():
+    calls, asked = [], []
+    s, state = _counted("learner", calls)
+    with _gateway([_spec("learner")], {"learner": s}, ask=["learner.fetch"], deny=["learner.forget"]) as gw:
+        ctx = CallContext(agent="all", policy=_policy("https://ok.example/"), approve=asked.append)
+        out = await gw.call("learner.fetch", {"url": "http://127.0.0.1/"}, ctx)
+        assert out["error"].startswith("refused by URL policy: ") and asked == []
         out = await gw.call("learner.forget", {"topic": "x", "url": "http://127.0.0.1/"}, ctx)
-        assert out == {"error": "approval required for learner.forget"}  # the gate runs before the URL policy
+        assert out == {"error": "tool learner.forget is not allowed for all"}  # deny before the URL policy
+        out = await gw.call("learner.fetch", {"url": "https://ok.example/a"}, ctx)
+        assert out == {"error": "learner.fetch was not approved"} and len(asked) == 1  # list.append -> None
         assert state["connects"] == 0 and calls == []
 
 

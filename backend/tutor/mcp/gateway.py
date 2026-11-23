@@ -7,10 +7,12 @@
   `wire_name(...)` (`^[a-zA-Z0-9_-]{1,64}$`) on the wire to Claude. `call` accepts either.
 - Allow-lists: an agent sees and may call only the canonical names its registry patterns match (`fnmatch`).
 - The gate (`decision`): registry `rules.deny` beats `rules.ask` beats the allow-list; a denied tool is not listed
-  either. An `ask` call runs only if `CallContext.approve` returns True for `{"tool", "server", "agent", "args"}`.
-  Then, with a `CallContext.policy`, every `url` / `*_url` argument must pass the URL policy (`policy.py`). Both
-  run before anything connects whenever the canonical name is known without listing (every canonical name and
-  every unhashed wire name); a hashed wire name not listed yet is listed first, but never called before the gate.
+  either. Then, with a `CallContext.policy`, every `url` / `*_url` argument must pass the URL policy (`policy.py`).
+  Only then is an `ask` call put to `CallContext.approve` (`{"tool", "server", "agent", "args"}`; it runs only on
+  True), so nobody is asked about a call that would be refused anyway. All of it runs before anything connects
+  whenever the canonical name is known without listing (every canonical name and every unhashed wire name); a
+  hashed wire name not listed yet is listed first, but never called before the gate. URL checks (which may
+  resolve DNS) run in a worker thread, never on the gateway loop.
 - With a policy, after the call and before fencing: `web.search` result URLs become allowed sources, and a
   `browser.*` result whose `Page URL:` is refused becomes an error, after an internal `browser.navigate` to
   `about:blank` (not gated, not policed, never shown; its failure is ignored).
@@ -92,6 +94,11 @@ def wire_name(canonical: str, *, namespace: str | None = None) -> str:
 
 @dataclass
 class CallContext:
+    """One agent's view of a call. `approve` is called (in a worker thread) for every `ask` tool; it may be sync,
+    or async, but a coroutine it returns is awaited on the gateway's own event loop: it must not await anything
+    bound to another loop (e.g. a Future of the web app's loop). Prefer a sync approver, or bridge explicitly with
+    `asyncio.run_coroutine_threadsafe(..., app_loop).result()` inside a sync one."""
+
     agent: str
     policy: UrlPolicy | None = None  # None: no URL checks (the crawler's jobs carry their own scope)
     trace: Trace | None = None
@@ -472,19 +479,19 @@ class Gateway:
 
     # ---- the gate and the URL policy ---------------------------------------------------------------------------
     async def _gate(self, spec: ServerSpec, canonical: str, args: dict, ctx: CallContext) -> dict | None:
-        """The refusal for this call, or None: allow/deny/ask first, then the URL arguments. Nothing connects."""
+        """The refusal for this call, or None: deny, then the URL arguments (DNS off the loop), then the approver
+        for an `ask` tool. Nothing connects."""
         verdict = self.decision(ctx.agent, canonical)
         if verdict == "deny":
             return {"error": f"tool {canonical} is not allowed for {ctx.agent}"}
+        if ctx.policy is not None and (urls := arg_urls(args)):
+            if (reason := await asyncio.to_thread(_first_refusal, ctx.policy, urls)) is not None:
+                return {"error": f"refused by URL policy: {reason}"}
         # (a disabled or unconfigured server is reported by _call; nobody is asked about a call that cannot run)
         if verdict == "ask" and self._blocked(spec) is None and not await self._approved(spec, canonical, args, ctx):
             if ctx.approve is None:
                 return {"error": f"approval required for {canonical}"}
             return {"error": f"{canonical} was not approved"}
-        if ctx.policy is not None:
-            for url in arg_urls(args):
-                if (reason := ctx.policy.refusal(url)) is not None:
-                    return {"error": f"refused by URL policy: {reason}"}
         return None
 
     async def _approved(self, spec: ServerSpec, canonical: str, args: dict, ctx: CallContext) -> bool:
@@ -503,17 +510,16 @@ class Gateway:
 
     async def _after(self, conn: _Conn, tool: _Tool, out: dict, ctx: CallContext) -> dict | None:
         """On the raw shaped result (before fencing and capping): web.search results become allowed sources; a
-        browser result whose `Page URL:` is off-policy is replaced by an error and the page is reset."""
-        spec = tool.spec
-        if tool.canonical == "web.search":
-            ctx.policy.allow_sources(search_result_urls(out.get("data")))
-        if spec.namespace != "browser":
+        browser result whose `Page URL:` is off-policy is replaced by an error and the page is reset. The policy
+        calls (DNS) run off the loop."""
+        if tool.canonical == "web.search" and (found := search_result_urls(out.get("data"))):
+            await asyncio.to_thread(ctx.policy.allow_sources, found)
+        if tool.spec.namespace != "browser":
             return None
-        for text in (c[k] for c, k in _leaves(out, [])):
-            for url in page_urls(text):
-                if url != BLANK and (reason := ctx.policy.refusal(url)) is not None:
-                    await self._blank(conn)
-                    return {"error": f"navigation left the allowed sites: {reason}"}
+        urls = [u for c, k in _leaves(out, []) for u in page_urls(c[k]) if u != BLANK]
+        if urls and (reason := await asyncio.to_thread(_first_refusal, ctx.policy, urls)) is not None:
+            await self._blank(conn)
+            return {"error": f"navigation left the allowed sites: {reason}"}
         return None
 
     async def _blank(self, conn: _Conn) -> None:
@@ -562,6 +568,11 @@ class Gateway:
 
 
 # ---- helpers -------------------------------------------------------------------------------------------------------
+def _first_refusal(policy: UrlPolicy, urls: list[str]) -> str | None:
+    """The first URL's refusal reason (worker thread: `refusal` may resolve DNS)."""
+    return next((r for u in urls if (r := policy.refusal(u)) is not None), None)
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 

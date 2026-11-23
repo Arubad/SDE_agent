@@ -78,6 +78,20 @@ def test_agent_pattern_matching_no_namespace(tmp_path):
     assert load_registry(p, {}, allow_unknown=True).agents["teacher"] == ("kb.*", "nope.*")
 
 
+def test_patterns_for_dotted_namespaces_validate(tmp_path):
+    servers = [{"name": "deepwiki", "namespace": "repo.deepwiki", "transport": "http", "url": "https://x.invalid/mcp"},
+               {"name": "context7", "namespace": "docs.context7", "transport": "http", "url": "https://y.invalid/mcp"}]
+    for pat in ("repo.*", "docs.*", "repo.deepwiki.*", "repo.deepwiki.read_wiki", "*", "repo.deep*", "*.read_wiki"):
+        reg = load_registry(_write(tmp_path, servers, {"teacher": [pat]}), {})
+        assert reg.agents["teacher"] == (pat,)
+        p = tmp_path / "servers.json"
+        p.write_text(json.dumps({"servers": servers, "agents": {}, "rules": {"ask": [pat]}}))
+        assert load_registry(p, {}).ask == (pat,)
+    for pat in ("bogus.*", "repo.other.*", "docs.context8.x"):
+        with pytest.raises(RegistryError, match="matches no server namespace"):
+            load_registry(_write(tmp_path, servers, {"teacher": [pat]}), {})
+
+
 def test_missing_env_reported(tmp_path):
     p = _write(tmp_path, [{"name": "github", "namespace": "repo", "transport": "http",
                            "url": "https://example.invalid/mcp", "requires_env": ["GITHUB_TOKEN"]}])

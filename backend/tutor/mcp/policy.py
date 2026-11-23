@@ -11,14 +11,16 @@ A URL passes `refusal` when all of these hold:
   (in any `queue.normalize_url`-equivalent spelling) and same-site navigation; ports and paths are not compared.
 Sources that fail the first two checks are never added, so a refused search result allows nothing.
 
-Refusal reasons are fixed strings: they reach the model, and the URL itself may be page-written text."""
+Refusal reasons are fixed strings: they reach the model, and the URL itself may be page-written text.
+`allow_sources`, `allow_text` and `refusal` may resolve DNS (real DNS by default; tests inject a resolver), so
+the gateway calls them off its event loop."""
 from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
 from urllib.parse import urlsplit
 
-from backend.tutor.ingest.fetch import PRIVATE_ADDRESS, Resolver, address_refusal, public_resolver
+from backend.tutor.ingest.fetch import PRIVATE_ADDRESS, Resolver, address_refusal, system_resolver
 
 MAX_URL = 2048
 NOT_HTTP = "only absolute http(s) URLs with a host"
@@ -78,7 +80,7 @@ def _host(url: str) -> str | None:
 
 
 class UrlPolicy:
-    def __init__(self, *, resolver: Resolver = public_resolver):
+    def __init__(self, *, resolver: Resolver = system_resolver):
         self._resolver = resolver
         self._hosts: set[str] = set()
 

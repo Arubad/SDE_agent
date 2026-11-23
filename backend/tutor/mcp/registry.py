@@ -115,9 +115,17 @@ def load_registry(path: Path, env: Mapping[str, str], *, allow_unknown: bool = F
         owners = [(f"agent {a!r}", pats) for a, pats in agents.items()]
         for owner, pats in [*owners, *((f"rules.{k}", v) for k, v in rules.items())]:
             for pat in pats:
-                if not any(fnmatchcase(ns, pat.split(".", 1)[0]) for ns in namespaces):
+                if not any(_could_match(pat, ns) for ns in namespaces):
                     raise RegistryError(f"{owner}: pattern {pat!r} matches no server namespace")
     return Registry(servers=servers, agents=agents, **rules)
+
+
+def _could_match(pattern: str, namespace: str) -> bool:
+    """Whether `pattern` could match some canonical `<namespace>.<tool>`, dotted namespaces included: it matches a
+    probe name, or its literal head (before the first `*?[`) and `namespace.` agree as far as both go."""
+    head = namespace + "."
+    lit = re.split(r"[*?\[]", pattern, maxsplit=1)[0]
+    return fnmatchcase(head + "x", pattern) or head.startswith(lit) or lit.startswith(head)
 
 
 def _rules(raw: object) -> dict[str, tuple[str, ...]]:
