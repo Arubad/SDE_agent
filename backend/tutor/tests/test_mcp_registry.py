@@ -30,6 +30,7 @@ def test_committed_registry_loads():
     reg = load_registry(COMMITTED, {}, allow_unknown=True)
     assert isinstance(reg, Registry)
     assert {s.namespace for s in reg.servers} >= {"kb", "learner", "ingest", "web"}
+    assert all(sp.untrusted for sp in reg.servers)
     assert reg.agents["crawler"] == ("browser.navigate", "browser.evaluate", "browser.close")
 
 
