@@ -1,0 +1,18 @@
+{
+ "meta": {
+  "title": "The Kubernetes Course 2025",
+  "channel": "Fixture Academy",
+  "description": "",
+  "duration_s": 60.0,
+  "chapters": []
+ },
+ "cues": [
+  {
+   "start": 0.0,
+   "dur": 6.0,
+   "text": "A Deployment manages ReplicaSets so you can roll out and roll back versions."
+  }
+ ],
+ "comments": [],
+ "captions_error": null
+}

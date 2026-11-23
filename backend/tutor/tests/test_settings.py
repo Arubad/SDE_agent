@@ -42,3 +42,61 @@ def test_public_mode_false_spellings(value):
 def test_public_mode_rejects_unknown_values(value):
     with pytest.raises(SettingsError, match="PUBLIC_MODE"):
         load_settings({"PUBLIC_MODE": value})
+
+
+def test_repr_hides_secrets():
+    assert "tutor:tutor" not in repr(load_settings({}))
+    assert "sekret-key" not in repr(load_settings({"YOUTUBE_API_KEY": "sekret-key"}))
+
+
+def test_transcript_routes_parse():
+    assert load_settings({"TRANSCRIPT_ROUTES": "gemini,captions"}).transcript_routes == ("gemini", "captions")
+    assert load_settings({}).transcript_routes == ("captions",)
+    with pytest.raises(SettingsError):
+        load_settings({"TRANSCRIPT_ROUTES": "whisper"})
+    with pytest.raises(SettingsError):
+        load_settings({"TRANSCRIPT_ROUTES": "ytdlp_cookies"})
+    s = load_settings({"TRANSCRIPT_ROUTES": "ytdlp_cookies", "YTDLP_COOKIES_BROWSER": "firefox"})
+    assert s.transcript_routes == ("ytdlp_cookies",) and s.ytdlp_cookies_browser == "firefox"
+
+
+def test_bad_numbers_raise_settings_error():
+    with pytest.raises(SettingsError):
+        load_settings({"PORT": "abc"})
+    with pytest.raises(SettingsError):
+        load_settings({"INGEST_WORKERS": "-1"})
+    assert load_settings({"INGEST_WORKERS": "0"}).ingest_workers == 0
+
+
+def test_ingestion_defaults_and_embedder():
+    s = load_settings({})
+    assert (s.searxng_url, s.youtube_api_key, s.ytdlp_cookies_browser, s.net_fixtures_dir) == (
+        "http://127.0.0.1:8888", None, None, None)
+    assert (s.ingest_workers, s.crawl_max_depth, s.crawl_max_pages) == (2, 2, 50)
+    assert (s.domain_interval_s, s.playlist_max_videos, s.embedder) == (1.0, 50, "bge")
+    assert load_settings({"EMBEDDER": "hash"}).embedder == "hash"
+    assert load_settings({"NET_FIXTURES_DIR": "/x"}).net_fixtures_dir == Path("/x")
+    assert load_settings({"PLATFORM_QDRANT_URL": ":memory:"}).qdrant_url == ":memory:"
+    with pytest.raises(SettingsError):
+        load_settings({"EMBEDDER": "openai"})
+
+
+def test_empty_searxng_url_disables_search_but_unset_keeps_default():
+    assert load_settings({"SEARXNG_URL": ""}).searxng_url is None
+    assert load_settings({"SEARXNG_URL": "  "}).searxng_url is None
+    assert load_settings({}).searxng_url == "http://127.0.0.1:8888"
+    assert load_settings({"SEARXNG_URL": "http://s:1"}).searxng_url == "http://s:1"
+
+
+def test_domain_interval_accepts_zero_but_not_non_finite_or_negative():
+    assert load_settings({"DOMAIN_INTERVAL_S": "0"}).domain_interval_s == 0.0
+    assert load_settings({"DOMAIN_INTERVAL_S": "2.5"}).domain_interval_s == 2.5
+    for bad in ("inf", "nan", "-1", "abc"):
+        with pytest.raises(SettingsError, match="DOMAIN_INTERVAL_S"):
+            load_settings({"DOMAIN_INTERVAL_S": bad})
+
+
+def test_blank_cookies_browser_counts_as_unset():
+    assert load_settings({"YTDLP_COOKIES_BROWSER": "   "}).ytdlp_cookies_browser is None
+    with pytest.raises(SettingsError):
+        load_settings({"TRANSCRIPT_ROUTES": "ytdlp_cookies", "YTDLP_COOKIES_BROWSER": "  "})

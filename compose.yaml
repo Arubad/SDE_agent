@@ -1,6 +1,7 @@
 # Local roadmap-tutor stack. Every published port binds to 127.0.0.1 only.
 #   docker compose up -d --wait                          api + postgres + qdrant
 #   docker compose --profile observability up -d --wait  adds Phoenix at http://127.0.0.1:6006
+# SEARXNG_SECRET must be set (export it or put it in a root .env); compose refuses to start without it.
 # See docs/platform/running-locally.md.
 name: roadmap-tutor
 
@@ -23,6 +24,7 @@ services:
       HOST: 0.0.0.0
       PORT: "8000"
       WEB_DIST: /app/web/dist
+      SEARXNG_URL: http://searxng:8080
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
@@ -53,6 +55,18 @@ services:
       - qdrant_data:/qdrant/storage
     ports:
       - "127.0.0.1:6333:6333"
+    restart: unless-stopped
+
+  searxng:
+    image: searxng/searxng:2026.11.6-ac11e14c5
+    # The secret is read from the environment, never from the mounted settings file. Generate one with
+    #   export SEARXNG_SECRET=$(openssl rand -hex 32)      (or put SEARXNG_SECRET=... in a root .env)
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?set SEARXNG_SECRET (e.g. export SEARXNG_SECRET=$(openssl rand -hex 32))}
+    volumes:
+      - ./docker/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    ports:
+      - "127.0.0.1:8888:8080"
     restart: unless-stopped
 
   phoenix:

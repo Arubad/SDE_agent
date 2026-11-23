@@ -1,0 +1,14 @@
+{
+ "https://docs.ok.example/basics": {
+  "status": 200,
+  "content_type": "text/html",
+  "headers": {},
+  "file": "p00.html"
+ },
+ "https://docs.ok.example/services": {
+  "status": 200,
+  "content_type": "text/html",
+  "headers": {},
+  "file": "p01.html"
+ }
+}

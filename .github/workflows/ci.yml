@@ -80,6 +80,13 @@ jobs:
           pip install -r requirements-platform.txt pytest
       - name: "Platform tests (Postgres required: DB tests fail instead of skipping)"
         run: python -m pytest backend/tests backend/tutor/tests -q
+      - name: "Ingestion eval (--ci: committed fixtures, hash embedder, no network or model)"
+        run: python -m backend.tutor.eval.ingestion_eval --ci --out-dir "$RUNNER_TEMP/ingestion-eval"
+      # Replays the committed Haiku recordings (eval/recordings/ingest_agent/): no network, no model, no cost.
+      # --strict fails the job on a request with no recording (a prompt or tool change broke them), an agent
+      # error or a replay-unsafe recording. Re-recording (--record) costs money and is done by hand.
+      - name: "Ingestion agent eval (replay of the committed recordings, --strict)"
+        run: python -m backend.tutor.eval.ingest_agent_eval --strict --out-dir "$RUNNER_TEMP/ingest-agent-eval"
 
   web:
     runs-on: ubuntu-latest
@@ -144,6 +151,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      - name: Generate a SearXNG secret for compose (it has no default)
+        run: echo "SEARXNG_SECRET=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - name: Bring the stack up and wait for healthy
         run: docker compose up -d --build --wait

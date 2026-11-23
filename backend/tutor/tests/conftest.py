@@ -6,6 +6,22 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
 
+@pytest.fixture(autouse=True)
+def _fake_llm_provider(monkeypatch):
+    """No network in tests: force the fake LLM provider whatever the shell or backend/.env says.
+
+    Also clears the fake client's scripted queue and recorded requests so nothing leaks between tests.
+    A test that needs another provider (e.g. replay-mode eval) can override it with its own
+    monkeypatch.setattr(config, "LLM_PROVIDER", ...) inside the test.
+    """
+    from backend.core import config, fake_llm
+
+    monkeypatch.setattr(config, "LLM_PROVIDER", "fake")
+    fake_llm.reset()
+    yield
+    fake_llm.reset()
+
+
 @pytest.fixture(scope="session")
 def db_url():
     server_url = os.environ.get("DATABASE_URL")

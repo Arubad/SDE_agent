@@ -1,0 +1,94 @@
+{
+  "general:kubernetes tutorial": [
+    {
+      "title": "Kubernetes introduction",
+      "url": "https://example.test/kubernetes-intro",
+      "snippet": "What Kubernetes is and how a cluster is laid out.",
+      "engine": "fixture"
+    }
+  ],
+  "videos:kubernetes tutorial": [
+    {
+      "title": "Kubernetes in 10 minutes",
+      "url": "https://www.youtube.com/watch?v=kube000001a",
+      "snippet": "Pods, Deployments and Services.",
+      "engine": "fixture"
+    }
+  ],
+  "videos:Kubernetes Roadmap - Complete Step-by-Step Learning Path youtube": [
+    {
+      "title": "Kubernetes Roadmap - Complete Step-by-Step Learning Path",
+      "url": "https://www.youtube.com/watch?v=k8sroadmp01",
+      "snippet": "",
+      "engine": "youtube"
+    }
+  ],
+  "videos:Kubernetes Tutorial for Beginners FULL COURSE in 4 Hours": [
+    {
+      "title": "Kubernetes Tutorial for Beginners [FULL COURSE in 4 Hours]",
+      "url": "https://www.youtube.com/watch?v=k8sbeginr01",
+      "snippet": "",
+      "engine": "youtube"
+    },
+    {
+      "title": "Kubernetes Tutorial for Beginners (blog write-up)",
+      "url": "https://example.test/k8s-beginners-blog",
+      "snippet": "",
+      "engine": "duckduckgo"
+    }
+  ],
+  "general:Kubernetes official documentation concepts kubernetes.io": [
+    {
+      "title": "Kubernetes Documentation Concepts Overview",
+      "url": "https://example.test/k8s-concepts-mirror",
+      "snippet": "",
+      "engine": "duckduckgo"
+    },
+    {
+      "title": "Concepts | Kubernetes Official Documentation",
+      "url": "https://kubernetes.io/docs/concepts/",
+      "snippet": "",
+      "engine": "duckduckgo"
+    }
+  ],
+  "general:Killercoda Kubernetes playground": [
+    {
+      "title": "Killercoda Interactive Environments",
+      "url": "https://killercoda.com/playgrounds",
+      "snippet": "",
+      "engine": "duckduckgo"
+    }
+  ],
+  "videos:The Kubernetes Course 2025 youtube": [
+    {
+      "title": "The Kubernetes Course 2025",
+      "url": "https://www.youtube.com/watch?v=k8scourse25",
+      "snippet": "",
+      "engine": "youtube"
+    }
+  ],
+  "videos:Kubernetes Tutorial: From Zero to Deployed 100% FREE": [
+    {
+      "title": "Kubernetes Tutorial: From Zero to Deployed (100% FREE)",
+      "url": "https://www.youtube.com/watch?v=k8szero0dep",
+      "snippet": "",
+      "engine": "youtube"
+    }
+  ],
+  "general:Kubernetes official tutorials kubernetes.io": [
+    {
+      "title": "Tutorials | Kubernetes Official Tutorials",
+      "url": "https://kubernetes.io/docs/tutorials/",
+      "snippet": "",
+      "engine": "duckduckgo"
+    }
+  ],
+  "videos:Certified Kubernetes Administrator Exam Preparation 2026 Update": [
+    {
+      "title": "Certified Kubernetes Administrator Exam Preparation (2026 Update)",
+      "url": "https://www.youtube.com/watch?v=k8scka2026a",
+      "snippet": "",
+      "engine": "youtube"
+    }
+  ]
+}

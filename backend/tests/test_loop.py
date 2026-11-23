@@ -73,3 +73,10 @@ def test_refusal_and_max_tokens_stop_cleanly():
     assert res.stop == "refusal" and res.text == "I can't help with that request."
     res, *_ = run([msg(text("partial ans"), stop="max_tokens")], [])
     assert res.stop == "truncated" and res.text == "partial ans"
+
+def test_loop_plain_data_tool_result():
+    turns = [msg(use("a", "kb_status"), stop="tool_use"), msg(text("done"))]
+    res, seen, *_ = run(turns, [{"data": {"a": 1}}])
+    block = seen[1][-1]["content"][0]
+    assert block["content"] == [{"type": "text", "text": '{"a": 1}'}] and not block.get("is_error")
+    assert res.passages == [] and res.tool_calls == [{"name": "kb_status", "args": {}, "ok": True, "refused": False}]

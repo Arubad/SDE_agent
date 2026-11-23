@@ -424,3 +424,43 @@ that introduces them.
 - Exact table columns, prompt wording, the UI component libraries (graph layout, code editor),
   semantic-split thresholds and mastery-update formula (documented in code), and how each external MCP
   server is launched (container vs `uvx`/`npx`), within the constraints above.
+
+## Phase 2 amendments (from the owner's real roadmap, 2026-11-19)
+The owner's test roadmap (`backend/tutor/tests/fixtures/roadmaps/kubernetes.txt`) names its resources by title
+only, with no URLs, and its line breaks were lost when pasted. That is realistic input, so the design adds:
+- **Resource resolution.** The parser gives each resource a search `query`, and an optional `url_hint` that the
+  model is never trusted to have right.
+  - The resolver searches the self-hosted SearXNG (its YouTube engine for videos) and proposes up to 3 scored
+    candidates. The approval screen lets the user pick one, paste a URL or skip.
+  - Nothing is ingested without approval, and a URL the model wrote that isn't in the source is never used
+    unverified.
+  - SearXNG joins compose in Phase 2, used directly over its JSON API; Phase 3 wraps it as MCP.
+- **Interactive sites** (e.g. Killercoda) are kept as `linked_only` resources for the tutor to recommend. They are
+  never crawled.
+- **Focus pages.** Sub-pages a resource names ("Components of a Cluster") are crawled first within the page cap.
+- **Deferred:**
+  - **Playwright rendering** of JS-only pages moves to Phase 3, since it needs the MCP gateway. Phase 2 reports
+    such pages as `needs_browser`.
+  - **The local Whisper route** moves to Phase 5. The routes in Phase 2 are captions (default), Gemini (opt-in)
+    and yt-dlp with cookies (opt-in).
+  - **Ingestion-time section and video summaries and starter quizzes** move to Phase 4, which first consumes
+    them. They are still generated once per section and stored, never per turn.
+- **Without `YOUTUBE_API_KEY`,** metadata and playlist expansion use yt-dlp in metadata-only mode (no download,
+  no cookies). Comment timestamps need the free API key.
+- **Fixture licensing.** Only kubernetes.io pages (CC BY 4.0) are committed as eval fixtures. Third-party pages
+  and transcripts stay in a git-ignored local cache.
+- **Ingestion agent (owner's request, 2026-11-19).** The deterministic job queue stays the engine. A Haiku tool
+  loop supervises it at two moments:
+  - **before the crawl (plan),** it picks which pages of a large site matter for the skills;
+  - **after the crawl settles (recover, up to 2 rounds),** it reviews gaps (skipped resources, videos without a
+    transcript, skills under 5 chunks). It finds replacements through search, retries transcripts on the routes
+    the owner enabled, and proposes new sources.
+
+  Limits:
+  - it acts only by enqueueing jobs or proposing resources, and proposals need the user's approval;
+  - its URLs follow the agent rule in "Security";
+  - spend is capped at $0.05 per roadmap;
+  - with the model unavailable, the pipeline completes without it.
+
+  It has its own eval: gap-fix rate, plan and proposal precision, restraint on a healthy roadmap, and injection
+  resistance with defenses on vs off.

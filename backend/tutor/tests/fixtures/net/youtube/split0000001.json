@@ -1,0 +1,315 @@
+{
+  "meta": {
+    "title": "Two topics in one video",
+    "channel": "Fixture Academy",
+    "description": "",
+    "duration_s": 600.0,
+    "chapters": []
+  },
+  "cues": [
+    {
+      "start": 0.0,
+      "dur": 10.0,
+      "text": "The kubernetes pod container scheduler node."
+    },
+    {
+      "start": 10.0,
+      "dur": 10.0,
+      "text": "The pod container scheduler node cluster."
+    },
+    {
+      "start": 20.0,
+      "dur": 10.0,
+      "text": "The container scheduler node cluster deployment."
+    },
+    {
+      "start": 30.0,
+      "dur": 10.0,
+      "text": "The scheduler node cluster deployment replica."
+    },
+    {
+      "start": 40.0,
+      "dur": 10.0,
+      "text": "The node cluster deployment replica kubelet."
+    },
+    {
+      "start": 50.0,
+      "dur": 10.0,
+      "text": "The cluster deployment replica kubelet kubernetes."
+    },
+    {
+      "start": 60.0,
+      "dur": 10.0,
+      "text": "The deployment replica kubelet kubernetes pod."
+    },
+    {
+      "start": 70.0,
+      "dur": 10.0,
+      "text": "The replica kubelet kubernetes pod container."
+    },
+    {
+      "start": 80.0,
+      "dur": 10.0,
+      "text": "The kubelet kubernetes pod container scheduler."
+    },
+    {
+      "start": 90.0,
+      "dur": 10.0,
+      "text": "The kubernetes pod container scheduler node."
+    },
+    {
+      "start": 100.0,
+      "dur": 10.0,
+      "text": "The pod container scheduler node cluster."
+    },
+    {
+      "start": 110.0,
+      "dur": 10.0,
+      "text": "The container scheduler node cluster deployment."
+    },
+    {
+      "start": 120.0,
+      "dur": 10.0,
+      "text": "The scheduler node cluster deployment replica."
+    },
+    {
+      "start": 130.0,
+      "dur": 10.0,
+      "text": "The node cluster deployment replica kubelet."
+    },
+    {
+      "start": 140.0,
+      "dur": 10.0,
+      "text": "The cluster deployment replica kubelet kubernetes."
+    },
+    {
+      "start": 150.0,
+      "dur": 10.0,
+      "text": "The deployment replica kubelet kubernetes pod."
+    },
+    {
+      "start": 160.0,
+      "dur": 10.0,
+      "text": "The replica kubelet kubernetes pod container."
+    },
+    {
+      "start": 170.0,
+      "dur": 10.0,
+      "text": "The kubelet kubernetes pod container scheduler."
+    },
+    {
+      "start": 180.0,
+      "dur": 10.0,
+      "text": "The kubernetes pod container scheduler node."
+    },
+    {
+      "start": 190.0,
+      "dur": 10.0,
+      "text": "The pod container scheduler node cluster."
+    },
+    {
+      "start": 200.0,
+      "dur": 10.0,
+      "text": "The container scheduler node cluster deployment."
+    },
+    {
+      "start": 210.0,
+      "dur": 10.0,
+      "text": "The scheduler node cluster deployment replica."
+    },
+    {
+      "start": 220.0,
+      "dur": 10.0,
+      "text": "The node cluster deployment replica kubelet."
+    },
+    {
+      "start": 230.0,
+      "dur": 10.0,
+      "text": "The cluster deployment replica kubelet kubernetes."
+    },
+    {
+      "start": 240.0,
+      "dur": 10.0,
+      "text": "The deployment replica kubelet kubernetes pod."
+    },
+    {
+      "start": 250.0,
+      "dur": 10.0,
+      "text": "The replica kubelet kubernetes pod container."
+    },
+    {
+      "start": 260.0,
+      "dur": 10.0,
+      "text": "The kubelet kubernetes pod container scheduler."
+    },
+    {
+      "start": 270.0,
+      "dur": 10.0,
+      "text": "The kubernetes pod container scheduler node."
+    },
+    {
+      "start": 280.0,
+      "dur": 10.0,
+      "text": "The pod container scheduler node cluster."
+    },
+    {
+      "start": 290.0,
+      "dur": 10.0,
+      "text": "The container scheduler node cluster deployment."
+    },
+    {
+      "start": 300.0,
+      "dur": 10.0,
+      "text": "The sourdough bread flour yeast dough."
+    },
+    {
+      "start": 310.0,
+      "dur": 10.0,
+      "text": "The bread flour yeast dough oven."
+    },
+    {
+      "start": 320.0,
+      "dur": 10.0,
+      "text": "The flour yeast dough oven bake."
+    },
+    {
+      "start": 330.0,
+      "dur": 10.0,
+      "text": "The yeast dough oven bake knead."
+    },
+    {
+      "start": 340.0,
+      "dur": 10.0,
+      "text": "The dough oven bake knead crust."
+    },
+    {
+      "start": 350.0,
+      "dur": 10.0,
+      "text": "The oven bake knead crust loaf."
+    },
+    {
+      "start": 360.0,
+      "dur": 10.0,
+      "text": "The bake knead crust loaf sourdough."
+    },
+    {
+      "start": 370.0,
+      "dur": 10.0,
+      "text": "The knead crust loaf sourdough bread."
+    },
+    {
+      "start": 380.0,
+      "dur": 10.0,
+      "text": "The crust loaf sourdough bread flour."
+    },
+    {
+      "start": 390.0,
+      "dur": 10.0,
+      "text": "The loaf sourdough bread flour yeast."
+    },
+    {
+      "start": 400.0,
+      "dur": 10.0,
+      "text": "The sourdough bread flour yeast dough."
+    },
+    {
+      "start": 410.0,
+      "dur": 10.0,
+      "text": "The bread flour yeast dough oven."
+    },
+    {
+      "start": 420.0,
+      "dur": 10.0,
+      "text": "The flour yeast dough oven bake."
+    },
+    {
+      "start": 430.0,
+      "dur": 10.0,
+      "text": "The yeast dough oven bake knead."
+    },
+    {
+      "start": 440.0,
+      "dur": 10.0,
+      "text": "The dough oven bake knead crust."
+    },
+    {
+      "start": 450.0,
+      "dur": 10.0,
+      "text": "The oven bake knead crust loaf."
+    },
+    {
+      "start": 460.0,
+      "dur": 10.0,
+      "text": "The bake knead crust loaf sourdough."
+    },
+    {
+      "start": 470.0,
+      "dur": 10.0,
+      "text": "The knead crust loaf sourdough bread."
+    },
+    {
+      "start": 480.0,
+      "dur": 10.0,
+      "text": "The crust loaf sourdough bread flour."
+    },
+    {
+      "start": 490.0,
+      "dur": 10.0,
+      "text": "The loaf sourdough bread flour yeast."
+    },
+    {
+      "start": 500.0,
+      "dur": 10.0,
+      "text": "The sourdough bread flour yeast dough."
+    },
+    {
+      "start": 510.0,
+      "dur": 10.0,
+      "text": "The bread flour yeast dough oven."
+    },
+    {
+      "start": 520.0,
+      "dur": 10.0,
+      "text": "The flour yeast dough oven bake."
+    },
+    {
+      "start": 530.0,
+      "dur": 10.0,
+      "text": "The yeast dough oven bake knead."
+    },
+    {
+      "start": 540.0,
+      "dur": 10.0,
+      "text": "The dough oven bake knead crust."
+    },
+    {
+      "start": 550.0,
+      "dur": 10.0,
+      "text": "The oven bake knead crust loaf."
+    },
+    {
+      "start": 560.0,
+      "dur": 10.0,
+      "text": "The bake knead crust loaf sourdough."
+    },
+    {
+      "start": 570.0,
+      "dur": 10.0,
+      "text": "The knead crust loaf sourdough bread."
+    },
+    {
+      "start": 580.0,
+      "dur": 10.0,
+      "text": "The crust loaf sourdough bread flour."
+    },
+    {
+      "start": 590.0,
+      "dur": 10.0,
+      "text": "The loaf sourdough bread flour yeast."
+    }
+  ],
+  "comments": [
+    "nice"
+  ],
+  "captions_error": null
+}

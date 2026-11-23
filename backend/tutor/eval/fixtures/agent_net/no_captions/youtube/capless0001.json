@@ -1,0 +1,12 @@
+{
+ "meta": {
+  "title": "Lesson 3: services and networking",
+  "channel": "Fixture Academy",
+  "description": "Services give pods a stable address. This lecture covers cluster IPs, node ports and DNS names for services in a cluster.",
+  "duration_s": 600.0,
+  "chapters": []
+ },
+ "cues": [],
+ "comments": [],
+ "captions_error": "none"
+}

@@ -1,5 +1,6 @@
 """LLM providers: fake (scripted / schema-shaped replies), record and replay. No network anywhere."""
 import asyncio
+import json
 
 import pytest
 
@@ -96,3 +97,133 @@ def test_request_key_ignores_cache_control():
               "messages": [{"role": "user", "content": "q"}]}
     assert request_key(plain) == request_key(cached)
     assert request_key(plain) != request_key({**plain, "messages": [{"role": "user", "content": "other"}]})
+
+
+SECRET_REQUEST = {"model": "m", "max_tokens": 10, "system": "key sk-ant-api03-abcdefghijklmnop1234",
+                  "messages": [{"role": "user", "content": "mail jane.doe@example.com about it"}]}
+
+
+def _written(tmp_path) -> str:
+    files = list(tmp_path.glob("*.json"))
+    assert len(files) == 1
+    return files[0].read_text(encoding="utf-8")
+
+
+def test_recordings_are_redacted_on_write(monkeypatch, tmp_path):
+    """Sync client: request and response are redacted in the file; the key is of the unredacted request."""
+    monkeypatch.setattr(config, "LLM_RECORDINGS_DIR", str(tmp_path))
+    monkeypatch.setattr(llm, "_foundry_client", lambda: FakeAnthropic())
+    monkeypatch.setattr(config, "LLM_PROVIDER", "record")
+    with fake_llm.script([FakeReply(text="write to bob@corp.example with sk-ant-api03-zzzzzzzzzzzzzz")]):
+        recorded = llm.haiku_client().messages.create(**SECRET_REQUEST)
+    blob = _written(tmp_path)
+    for leaked in ("sk-ant-api03", "jane.doe@example.com", "bob@corp.example"):
+        assert leaked not in blob
+    assert (tmp_path / f"{request_key(SECRET_REQUEST)}.json").exists()
+
+    monkeypatch.setattr(config, "LLM_PROVIDER", "replay")
+    hit = llm.haiku_client().messages.create(**SECRET_REQUEST)  # the same unredacted request still matches
+    assert hit.content[0].text == "write to [email] with [secret]"
+    assert recorded.content[0].text.startswith("write to bob@")  # the live caller still sees the real reply
+
+
+def test_async_recordings_are_redacted_on_write(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "LLM_RECORDINGS_DIR", str(tmp_path))
+    monkeypatch.setattr(llm, "_foundry_async_client", lambda: FakeAsyncAnthropic())
+
+    async def run_stream():
+        client = llm.haiku_async_client()
+        try:
+            async with client.messages.stream(**SECRET_REQUEST) as stream:
+                return await stream.get_final_message()
+        finally:
+            await client.close()
+
+    monkeypatch.setattr(config, "LLM_PROVIDER", "record")
+    with fake_llm.script([FakeReply(text="ping bob@corp.example")]):
+        asyncio.run(run_stream())
+    blob = _written(tmp_path)
+    for leaked in ("sk-ant-api03", "jane.doe@example.com", "bob@corp.example"):
+        assert leaked not in blob
+    monkeypatch.setattr(config, "LLM_PROVIDER", "replay")
+    assert asyncio.run(run_stream()).content[0].text == "ping [email]"
+
+
+def test_legacy_bare_message_recordings_still_load(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "LLM_RECORDINGS_DIR", str(tmp_path))
+    message = FakeAnthropic().messages.create(**SECRET_REQUEST)
+    (tmp_path / f"{request_key(SECRET_REQUEST)}.json").write_text(message.model_dump_json(), encoding="utf-8")
+    monkeypatch.setattr(config, "LLM_PROVIDER", "replay")
+    assert llm.haiku_client().messages.create(**SECRET_REQUEST).content[0].text == message.content[0].text
+
+
+def test_redacted_response_is_flagged_warned_and_reported(monkeypatch, tmp_path, caplog):
+    from backend.core import llm_replay
+
+    monkeypatch.setattr(config, "LLM_RECORDINGS_DIR", str(tmp_path))
+    monkeypatch.setattr(llm, "_foundry_client", lambda: FakeAnthropic())
+    monkeypatch.setattr(config, "LLM_PROVIDER", "record")
+    llm_replay.redacted_recordings.clear()
+    with fake_llm.script([FakeReply(text="mail bob@corp.example"), FakeReply(text="clean reply")]):
+        with caplog.at_level("WARNING"):
+            llm.haiku_client().messages.create(**SECRET_REQUEST)
+        llm.haiku_client().messages.create(**{**SECRET_REQUEST, "max_tokens": 11})
+    flagged = [json.loads(p.read_text()).get("redacted_response") for p in sorted(tmp_path.glob("*.json"))]
+    assert sorted(map(bool, flagged)) == [False, True]
+    assert any("redacted" in r.message and str(tmp_path) in r.message for r in caplog.records)
+    assert len(llm_replay.redacted_recordings) == 1
+    llm_replay.redacted_recordings.clear()
+    monkeypatch.setattr(config, "LLM_PROVIDER", "replay")
+    llm.haiku_client().messages.create(**SECRET_REQUEST)
+    llm.haiku_client().messages.create(**{**SECRET_REQUEST, "max_tokens": 11})
+    assert len(llm_replay.redacted_recordings) == 1  # only the flagged one is reported on replay
+
+
+def _write_script(path, lines):
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _create(**kw):
+    return FakeAnthropic().messages.create(model="m", max_tokens=10, messages=[{"role": "user", "content": "q"}],
+                                           **kw)
+
+
+def test_script_file_replies_are_consumed_in_order(monkeypatch, tmp_path):
+    script = _write_script(tmp_path / "script.jsonl", [
+        "# comment lines and blank lines are ignored",
+        "",
+        json.dumps({"tool_uses": [["web_search", {"query": "k8s"}]]}),
+        json.dumps({"text": "all done"}),
+    ])
+    monkeypatch.setenv("FAKE_LLM_SCRIPT", str(script))
+    first = _create()
+    assert first.stop_reason == "tool_use"
+    assert [(b.name, b.input) for b in first.content if b.type == "tool_use"] == [("web_search", {"query": "k8s"})]
+    second = _create()
+    assert second.stop_reason == "end_turn" and second.content[0].text == "all done"
+    assert _create().content[0].text == fake_llm.DEFAULT_TEXT  # exhausted: the default reply
+
+
+def test_structured_requests_use_the_replies_dir_before_the_script_file(monkeypatch, tmp_path):
+    replies = tmp_path / "replies"
+    replies.mkdir()
+    (replies / "Routing.json").write_text(json.dumps({"route": "web", "k": 7}), encoding="utf-8")
+    script = _write_script(tmp_path / "script.jsonl", [json.dumps({"text": "scripted"})])
+    monkeypatch.setenv("FAKE_LLM_REPLIES_DIR", str(replies))
+    monkeypatch.setenv("FAKE_LLM_SCRIPT", str(script))
+    assert llm.haiku_json(system="s", prompt="p", schema={**SCHEMA, "title": "Routing"}) == {"route": "web", "k": 7}
+    assert _create().content[0].text == "scripted"  # the script line was not used by the structured request
+
+
+def test_in_process_script_comes_before_the_script_file(monkeypatch, tmp_path):
+    script = _write_script(tmp_path / "script.jsonl", [json.dumps({"text": "from file"})])
+    monkeypatch.setenv("FAKE_LLM_SCRIPT", str(script))
+    with fake_llm.script([FakeReply(text="in process")]):
+        assert _create().content[0].text == "in process"
+        assert _create().content[0].text == "from file"
+
+
+def test_without_the_env_var_no_script_file_is_read(monkeypatch):
+    monkeypatch.delenv("FAKE_LLM_SCRIPT", raising=False)
+    assert _create().content[0].text == fake_llm.DEFAULT_TEXT

@@ -1,0 +1,32 @@
+{
+  "meta": {
+    "title": "Docker networking walkthrough",
+    "channel": "Fixture Academy",
+    "description": "Learn docker networking.",
+    "duration_s": 300.0,
+    "chapters": []
+  },
+  "cues": [
+    {
+      "start": 0.0,
+      "dur": 5.0,
+      "text": "Docker networks connect containers."
+    },
+    {
+      "start": 100.0,
+      "dur": 5.0,
+      "text": "Bridge networks are the default."
+    },
+    {
+      "start": 200.0,
+      "dur": 5.0,
+      "text": "Overlay networks span hosts."
+    }
+  ],
+  "comments": [
+    "Great video!",
+    "Timestamps:\n0:00 Intro\n1:40 Bridge networks\n3:20 Overlay networks",
+    "thanks"
+  ],
+  "captions_error": null
+}

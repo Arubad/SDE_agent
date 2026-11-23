@@ -1,0 +1,173 @@
+"""Roadmap review/approve service: parse + resolve, then approve into Resource rows and ingest jobs."""
+from __future__ import annotations
+
+import ipaddress
+import socket
+from urllib.parse import urlparse
+
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.orm import Session
+
+from backend.tutor.jobs import queue
+from backend.tutor.models import Resource, Roadmap
+from backend.tutor.roadmap.parse import normalize_spec, parse_roadmap
+from backend.tutor.roadmap.resolve import resolve_spec
+from backend.tutor.roadmap.spec import RoadmapSpec
+
+TERMINAL_STATUSES = ("ready", "ready_with_gaps", "failed")
+PARSE_STATUSES = ("draft", "parsed")
+
+
+class Conflict(Exception):
+    """The roadmap is in a state that does not allow this operation (HTTP 409)."""
+
+
+def parse_and_resolve(session: Session, net, roadmap: Roadmap) -> dict:
+    if roadmap.status not in PARSE_STATUSES:
+        raise Conflict(f"Roadmap is '{roadmap.status}'; it can only be parsed while draft or parsed.")
+    spec = parse_roadmap(roadmap.source_text)
+    resolution = resolve_spec(spec, net)
+    roadmap.spec = spec.model_dump(mode="json")
+    roadmap.status = "parsed"
+    session.flush()
+    return {"spec": roadmap.spec, "resolution": [r.model_dump(mode="json") for r in resolution]}
+
+
+def update_spec(session: Session, roadmap: Roadmap, raw_spec: dict) -> dict:
+    if roadmap.status != "parsed":
+        raise Conflict(f"Roadmap is '{roadmap.status}'; the spec can only be edited while parsed.")
+    roadmap.spec = normalize_spec(raw_spec, roadmap.source_text).model_dump(mode="json")
+    session.flush()
+    return roadmap.spec
+
+
+def validate_crawl_url(url: str) -> None:
+    """Raise ValueError unless `url` is an http(s) URL the crawler may fetch.
+
+    Only IP literals and `localhost` are checked: no DNS happens in the API. A hostname that resolves to a
+    private address (or is rebound after this check) is NOT caught here; the fetcher must enforce that at connect
+    time."""
+    parsed = urlparse(url.strip())
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"Only http(s) URLs are allowed: {url!r}")
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host:
+        raise ValueError(f"URL has no host: {url!r}")
+    if host == "localhost" or host.endswith(".localhost"):
+        raise ValueError(f"URL points at a local address: {url!r}")
+    addr = None
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        try:  # legacy forms the OS resolver also accepts: 2130706433, 0x7f.1, 127.1 (no DNS involved)
+            addr = ipaddress.IPv4Address(socket.inet_aton(host))
+        except OSError:
+            return  # an ordinary hostname
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+        addr = addr.ipv4_mapped
+    if (not addr.is_global or addr.is_loopback or addr.is_link_local or addr.is_private or addr.is_reserved
+            or addr.is_multicast or addr.is_unspecified):  # not is_global also covers CGNAT 100.64.0.0/10
+        raise ValueError(f"URL points at a private or reserved address: {url!r}")
+
+
+def approve(session: Session, roadmap: Roadmap, spec: RoadmapSpec, choices: dict[str, str | None], *,
+            agent: bool = True) -> None:
+    """Write Resource rows and enqueue ingest jobs, then set status `ingesting`.
+
+    With `agent` (settings.ingest_agent) one `agent_plan` job is enqueued for the pending resources instead; it
+    plans the crawl and then enqueues the same `ingest_resource` jobs (same keys) itself, so planned pages are
+    claimed first. Without it the `ingest_resource` jobs are enqueued directly, as before.
+
+    Per resource: a key in `choices` with a URL uses that URL; an explicit `None` -> `skipped`/`no_url`; an absent
+    key falls back to the spec's own `url` (user-authored, it survives normalisation only if it appears in the
+    source text) if any, else `skipped`/`no_url`. Every URL used is validated (`validate_crawl_url`).
+    """
+    if roadmap.status != "parsed":
+        raise Conflict(f"Roadmap is '{roadmap.status}'; it can only be approved while parsed.")
+    resources = [(stage.id, r) for stage in spec.stages for r in stage.resources]
+    known = {r.id for _, r in resources}
+    unknown = sorted(set(choices) - known)
+    if unknown:
+        raise ValueError(f"Unknown resource id(s) in choices: {', '.join(unknown)}")
+    chosen: dict[str, str | None] = {}
+    for _, r in resources:
+        url = (choices[r.id] if r.id in choices else r.url)
+        url = url.strip() if url else None
+        if url:
+            validate_crawl_url(url)  # the stripped URL is what gets validated and stored
+        chosen[r.id] = url or None
+
+    roadmap.spec = spec.model_dump(mode="json")
+    rows = []
+    for stage_id, r in resources:
+        url = chosen[r.id] or None
+        if not url:
+            status, reason = "skipped", "no_url"
+        elif r.kind == "interactive":
+            status, reason = "linked_only", None
+        else:
+            status, reason = "pending", None
+        rows.append(dict(roadmap_id=roadmap.id, key=r.id, stage_id=stage_id, skill_ids=r.skill_ids, title=r.title,
+                         kind=r.kind, url=url, focus=r.focus, status=status, reason=reason))
+    if rows:
+        session.execute(pg_insert(Resource).values(rows).on_conflict_do_nothing(index_elements=["roadmap_id", "key"]))
+    stored = session.scalars(select(Resource).where(Resource.roadmap_id == roadmap.id)
+                             .execution_options(populate_existing=True)).all()
+    pending = [res for res in stored if res.url and res.kind != "interactive" and res.status == "pending"]
+    if agent and pending:
+        keys = sorted(res.key for res in pending)  # a re-approve that adds resources plans them anew
+        queue.enqueue(session, type="agent_plan", roadmap_id=roadmap.id,
+                      payload={"resource_ids": [str(res.id) for res in pending]},
+                      key=queue.job_key("agent_plan", roadmap.id, *keys))
+    else:
+        for res in pending:
+            enqueue_ingest(session, res)
+    roadmap.status = "ingesting"
+    session.flush()
+
+
+def enqueue_ingest(session: Session, res: Resource) -> None:
+    queue.enqueue(session, type="ingest_resource", roadmap_id=res.roadmap_id, payload={"resource_id": str(res.id)},
+                  key=queue.job_key("ingest_resource", res.roadmap_id, res.key))
+
+
+def _proposal(session: Session, resource_id) -> Resource:
+    res = session.get(Resource, resource_id, with_for_update=True)
+    if res is None:
+        raise LookupError("No such resource")
+    if res.status != "proposed":
+        raise Conflict(f"Resource is '{res.status}'; only a proposed resource can be approved or dismissed.")
+    return res
+
+
+def approve_proposal(session: Session, resource_id) -> Resource:
+    """The user accepts a suggested resource: its URL is validated again, it becomes `pending` with an
+    `ingest_resource` job, and a settled roadmap goes back to `ingesting` (the progress view resumes)."""
+    res = _proposal(session, resource_id)
+    validate_crawl_url(res.url or "")
+    roadmap = session.get(Roadmap, res.roadmap_id, with_for_update=True)
+    res.status, res.reason = "pending", None
+    enqueue_ingest(session, res)
+    if roadmap.status in (*TERMINAL_STATUSES, "finalizing"):  # finalize sees the queued job and stands down
+        roadmap.status = "ingesting"
+    session.flush()
+    return res
+
+
+def dismiss_proposal(session: Session, resource_id) -> Resource:
+    res = _proposal(session, resource_id)
+    res.status = "dismissed"
+    session.flush()
+    return res
+
+
+def progress(session: Session, roadmap: Roadmap) -> dict:
+    session.refresh(roadmap)
+    res = session.scalars(select(Resource).where(Resource.roadmap_id == roadmap.id).order_by(Resource.key)).all()
+    return {
+        "jobs": queue.roadmap_job_counts(session, roadmap.id),
+        "resources": [{"key": r.key, "title": r.title, "kind": r.kind, "url": r.url, "status": r.status,
+                       "reason": r.reason, "stats": r.stats} for r in res],
+        "status": roadmap.status,
+    }

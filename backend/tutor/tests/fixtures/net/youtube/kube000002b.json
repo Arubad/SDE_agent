@@ -1,0 +1,6 @@
+{
+  "meta": {"title": "Kubernetes Deployments explained", "channel": "Fixture Academy", "description": "", "duration_s": 60.0, "chapters": []},
+  "cues": [{"start": 0.0, "dur": 6.0, "text": "A Deployment keeps the desired number of pods running."}],
+  "comments": [],
+  "captions_error": null
+}

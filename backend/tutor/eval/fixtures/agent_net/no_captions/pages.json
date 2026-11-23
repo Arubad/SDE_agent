@@ -1,0 +1,14 @@
+{
+ "https://course.net.example/transcripts/lesson-3": {
+  "status": 200,
+  "content_type": "text/html",
+  "headers": {},
+  "file": "p00.html"
+ },
+ "https://course.net.example/lesson-3": {
+  "status": 200,
+  "content_type": "text/html",
+  "headers": {},
+  "file": "p01.html"
+ }
+}

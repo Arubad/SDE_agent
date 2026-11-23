@@ -1,0 +1,322 @@
+{
+  "title": "Kubernetes Learning Roadmap",
+  "goals": [
+    "Understand and operate Kubernetes clusters"
+  ],
+  "weekly_hours": null,
+  "stages": [
+    {
+      "id": "stage-1",
+      "title": "Mental Models & Local Cluster Setup",
+      "timeframe": "Week 1",
+      "summary": "Understand why container orchestration exists and how a control plane coordinates worker nodes; spin up a lightweight local cluster.",
+      "skills": [
+        {
+          "id": "containers-vs-pods",
+          "title": "Containers vs. Pods",
+          "objectives": [
+            "Explain the difference between a container and a Pod"
+          ],
+          "prerequisites": []
+        },
+        {
+          "id": "control-plane",
+          "title": "Control plane components",
+          "objectives": [
+            "Name the API server, etcd, scheduler and controller manager and what each does"
+          ],
+          "prerequisites": [
+            "containers-vs-pods"
+          ]
+        },
+        {
+          "id": "worker-nodes",
+          "title": "Worker nodes",
+          "objectives": [
+            "Describe kubelet, kube-proxy and the container runtime"
+          ],
+          "prerequisites": [
+            "containers-vs-pods"
+          ]
+        },
+        {
+          "id": "yaml-manifests",
+          "title": "Declarative YAML manifests",
+          "objectives": [
+            "Write a basic manifest and apply it"
+          ],
+          "prerequisites": []
+        },
+        {
+          "id": "kubectl-basics",
+          "title": "Basic kubectl commands",
+          "objectives": [
+            "Use get, describe, logs and apply"
+          ],
+          "prerequisites": [
+            "yaml-manifests"
+          ]
+        }
+      ],
+      "resources": [
+        {
+          "id": "k8s-roadmap-video",
+          "title": "Kubernetes Roadmap - Complete Step-by-Step Learning Path",
+          "kind": "video",
+          "url": null,
+          "url_hint": null,
+          "query": "Kubernetes Roadmap - Complete Step-by-Step Learning Path youtube",
+          "note": "Good for mapping out terminology and sequence before watching long deep-dives.",
+          "focus": [],
+          "skill_ids": [
+            "containers-vs-pods"
+          ]
+        },
+        {
+          "id": "k8s-beginners-course",
+          "title": "Kubernetes Tutorial for Beginners [FULL COURSE in 4 Hours]",
+          "kind": "video",
+          "url": null,
+          "url_hint": null,
+          "query": "Kubernetes Tutorial for Beginners FULL COURSE in 4 Hours",
+          "note": "Classic visual walkthrough of core objects, architecture, Minikube setup, and YAML basics.",
+          "focus": [],
+          "skill_ids": [
+            "control-plane",
+            "worker-nodes",
+            "yaml-manifests"
+          ]
+        },
+        {
+          "id": "k8s-docs-concepts",
+          "title": "Kubernetes Official Documentation — Concepts & Tutorials",
+          "kind": "doc",
+          "url": null,
+          "url_hint": null,
+          "query": "Kubernetes official documentation concepts kubernetes.io",
+          "note": "Read alongside your videos.",
+          "focus": [
+            "Components of a Cluster",
+            "Workloads",
+            "Pods"
+          ],
+          "skill_ids": [
+            "control-plane",
+            "containers-vs-pods"
+          ]
+        },
+        {
+          "id": "killercoda",
+          "title": "Killercoda Interactive Environments",
+          "kind": "interactive",
+          "url": "https://killercoda.com/playgrounds",
+          "url_hint": null,
+          "query": "Killercoda Kubernetes playground",
+          "note": "Browser-based sandboxes for practising kubectl without a local VM.",
+          "focus": [],
+          "skill_ids": [
+            "kubectl-basics"
+          ]
+        }
+      ],
+      "practice_goals": []
+    },
+    {
+      "id": "stage-2",
+      "title": "Workloads, Configuration & Networking",
+      "timeframe": "Weeks 2–3",
+      "summary": "Manage Pod lifecycle, externalize configuration, and route traffic inside and outside the cluster.",
+      "skills": [
+        {
+          "id": "replicaset-deployment",
+          "title": "ReplicaSet and Deployment rollouts/rollbacks",
+          "objectives": [
+            "Roll out and roll back a Deployment"
+          ],
+          "prerequisites": []
+        },
+        {
+          "id": "configmap-secret",
+          "title": "ConfigMap and Secret",
+          "objectives": [
+            "Inject configuration into Pods"
+          ],
+          "prerequisites": []
+        },
+        {
+          "id": "services",
+          "title": "ClusterIP / NodePort / LoadBalancer Services",
+          "objectives": [
+            "Choose the right Service type"
+          ],
+          "prerequisites": []
+        },
+        {
+          "id": "dns",
+          "title": "DNS resolution",
+          "objectives": [
+            "Resolve Services by name inside the cluster"
+          ],
+          "prerequisites": [
+            "services"
+          ]
+        },
+        {
+          "id": "ingress-gateway",
+          "title": "Ingress and Gateway API",
+          "objectives": [
+            "Route external traffic to Services"
+          ],
+          "prerequisites": [
+            "services"
+          ]
+        }
+      ],
+      "resources": [
+        {
+          "id": "k8s-course-2025",
+          "title": "The Kubernetes Course 2025",
+          "kind": "video",
+          "url": null,
+          "url_hint": null,
+          "query": "The Kubernetes Course 2025 youtube",
+          "note": "Strong end-to-end breakdown covering architecture, kube-proxy, CoreDNS, Deployments, ConfigMaps/Secrets, Services, and Gateway API.",
+          "focus": [],
+          "skill_ids": [
+            "replicaset-deployment",
+            "configmap-secret",
+            "services",
+            "dns",
+            "ingress-gateway"
+          ]
+        },
+        {
+          "id": "zero-to-deployed",
+          "title": "Kubernetes Tutorial: From Zero to Deployed (100% FREE)",
+          "kind": "video",
+          "url": null,
+          "url_hint": null,
+          "query": "Kubernetes Tutorial: From Zero to Deployed 100% FREE",
+          "note": "Concise walkthrough taking a basic deployment through scaling, self-healing, and Kustomize.",
+          "focus": [],
+          "skill_ids": [
+            "replicaset-deployment"
+          ]
+        },
+        {
+          "id": "k8s-tutorials",
+          "title": "Kubernetes Official Tutorials",
+          "kind": "doc",
+          "url": null,
+          "url_hint": null,
+          "query": "Kubernetes official tutorials kubernetes.io",
+          "note": "",
+          "focus": [
+            "stateless application",
+            "Service exposure"
+          ],
+          "skill_ids": [
+            "services"
+          ]
+        }
+      ],
+      "practice_goals": []
+    },
+    {
+      "id": "stage-3",
+      "title": "State, Storage, Security & Packaging",
+      "timeframe": "Weeks 4–5",
+      "summary": "Real-world workloads need persistent state, least-privilege access, and repeatable deployments.",
+      "skills": [
+        {
+          "id": "volumes-pv-pvc",
+          "title": "Volumes, PersistentVolume, PersistentVolumeClaim, StorageClass",
+          "objectives": [
+            "Provision persistent storage for a Pod"
+          ],
+          "prerequisites": []
+        },
+        {
+          "id": "statefulset",
+          "title": "StatefulSet",
+          "objectives": [
+            "Run a stateful workload"
+          ],
+          "prerequisites": [
+            "volumes-pv-pvc"
+          ]
+        },
+        {
+          "id": "rbac",
+          "title": "RBAC",
+          "objectives": [
+            "Grant least-privilege access with roles, role bindings and service accounts"
+          ],
+          "prerequisites": []
+        },
+        {
+          "id": "helm-kustomize",
+          "title": "Packaging with Helm or Kustomize",
+          "objectives": [
+            "Template and package a deployment"
+          ],
+          "prerequisites": []
+        }
+      ],
+      "resources": [
+        {
+          "id": "cka-prep-2026",
+          "title": "Certified Kubernetes Administrator Exam Preparation (2026 Update)",
+          "kind": "video",
+          "url": null,
+          "url_hint": null,
+          "query": "Certified Kubernetes Administrator Exam Preparation 2026 Update",
+          "note": "Structured modules covering RBAC, Helm/Kustomize, autoscaling, PV/PVC/StorageClasses, and troubleshooting.",
+          "focus": [],
+          "skill_ids": [
+            "rbac",
+            "helm-kustomize",
+            "volumes-pv-pvc"
+          ]
+        }
+      ],
+      "practice_goals": []
+    },
+    {
+      "id": "stage-4",
+      "title": "Troubleshooting & Capstone Deployment",
+      "timeframe": "Week 6+",
+      "summary": "Cement your knowledge by breaking things intentionally and deploying a multi-component app.",
+      "skills": [
+        {
+          "id": "debugging",
+          "title": "Debugging common failures",
+          "objectives": [
+            "Diagnose CrashLoopBackOff, ImagePullBackOff, Pending pods and endpoint mismatches"
+          ],
+          "prerequisites": []
+        },
+        {
+          "id": "resource-limits",
+          "title": "Resource limits and requests",
+          "objectives": [
+            "Set sensible requests and limits"
+          ],
+          "prerequisites": []
+        },
+        {
+          "id": "observability",
+          "title": "Basic cluster observability",
+          "objectives": [
+            "Read metrics and logs"
+          ],
+          "prerequisites": []
+        }
+      ],
+      "resources": [],
+      "practice_goals": [
+        "Deploy a small multi-service app (API + worker + database/cache) using declarative manifests or Helm, expose an endpoint, inspect logs/events when something fails, and tear it down cleanly."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+ "meta": {
+  "title": "Kubernetes Tutorial: From Zero to Deployed (100% FREE)",
+  "channel": "Fixture Academy",
+  "description": "",
+  "duration_s": 60.0,
+  "chapters": []
+ },
+ "cues": [
+  {
+   "start": 0.0,
+   "dur": 6.0,
+   "text": "A Service gives a set of pods one stable virtual address inside the cluster."
+  }
+ ],
+ "comments": [],
+ "captions_error": null
+}

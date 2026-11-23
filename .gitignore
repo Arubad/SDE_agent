@@ -28,3 +28,6 @@ dist/
 
 # Local embedded Qdrant data
 backend/qdrant_local/
+
+# Ingestion eval: third-party pages, transcripts and YouTube data (not redistributed; see eval/fixtures/NOTICE.md)
+backend/tutor/eval/cache/

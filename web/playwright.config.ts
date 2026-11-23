@@ -6,6 +6,17 @@ const webDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(webDir, "..");
 const pgBase = (process.env.E2E_PG_URL ?? "postgresql+psycopg://tutor:tutor@127.0.0.1:5432").replace(/\/+$/, "");
 const command = `${process.env.PYTHON ?? "backend/venv/bin/python"} -m backend.tutor --create-db`;
+const fixtures = path.join(repoRoot, "backend", "tutor", "tests", "fixtures");
+
+// Ingestion runs for real inside the server, offline: the fixture net (pages, search results, YouTube), the
+// parse reply keyed by schema title, a hash embedder and an in-memory Qdrant.
+const ingestEnv = {
+  NET_FIXTURES_DIR: path.join(fixtures, "net"),
+  FAKE_LLM_REPLIES_DIR: path.join(fixtures, "llm_replies"),
+  EMBEDDER: "hash",
+  PLATFORM_QDRANT_URL: ":memory:",
+  INGEST_WORKERS: "1",
+};
 
 function server(port: number, database: string, extraEnv: Record<string, string>) {
   return {
@@ -22,6 +33,7 @@ function server(port: number, database: string, extraEnv: Record<string, string>
       LLM_PROVIDER: "fake",
       // backend/.env would otherwise override these values (config loads it with override=True).
       SKIP_DOTENV: "1",
+      ...ingestEnv,
       ...extraEnv,
     },
   };
@@ -38,11 +50,18 @@ export default defineConfig({
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: [
-    server(8765, "tutor_e2e_main", { PUBLIC_MODE: "false" }),
+    // The ingestion agent is on, driven by a scripted tool-use sequence (one proposal in the first recovery
+    // round; see e2e/fixtures/agent-script.jsonl). The script is consumed once per server process, so a
+    // reused main server (reuseExistingServer, local only) must be restarted before ingest.spec.ts runs again.
+    server(8765, "tutor_e2e_main", {
+      PUBLIC_MODE: "false",
+      INGEST_AGENT: "true",
+      FAKE_LLM_SCRIPT: path.join(webDir, "e2e", "fixtures", "agent-script.jsonl"),
+    }),
     // Wrong-passcode lockout lives in the server's memory (5 failures per IP per 15 minutes). A reused
     // public server (reuseExistingServer, local only) keeps that state between runs; passcode.spec.ts
     // makes two wrong attempts per run, so a reused server stays under the limit for two runs only.
     // Stop it (or wait 15 minutes) before a third.
-    server(8766, "tutor_e2e_public", { PUBLIC_MODE: "true", PREMIUM_PASSCODE: "e2e-pass-123" }),
+    server(8766, "tutor_e2e_public", { PUBLIC_MODE: "true", PREMIUM_PASSCODE: "e2e-pass-123", INGEST_AGENT: "false" }),
   ],
 });

@@ -306,9 +306,49 @@ itself. Everything actually runs on CPU. Deploy with `python deploy_to_hf.py`.
 
 ## Roadmap Tutor platform (in development)
 The next version is a roadmap tutor that runs as a local Docker Compose stack (API and web app, Postgres,
-Qdrant, optional Phoenix tracing), separate from the Space above. `docker compose up -d --wait` starts it at
-http://127.0.0.1:8000, and an optional Cloudflare Tunnel shares it behind the passcode. Setup, the tunnel and
-"Why not hosted?" are in [docs/platform/running-locally.md](docs/platform/running-locally.md).
+Qdrant, SearXNG, optional Phoenix tracing), separate from the Space above. Start it with
+`export SEARXNG_SECRET=$(openssl rand -hex 32)` and `docker compose up -d --wait`; it serves
+http://127.0.0.1:8000, and an optional Cloudflare Tunnel shares it behind the passcode. Setup, the tunnel, the
+CLI and "Why not hosted?" are in [docs/platform/running-locally.md](docs/platform/running-locally.md).
+
+**Adding a roadmap.** In the web app, paste the roadmap text. The model parses it into stages, skills and
+resources. In the spec review you approve or edit the spec, and for each resource you pick a search candidate or
+paste a URL. After you approve, the workers ingest it (crawl pages, expand playlists, get transcripts, split videos
+into chapters, read GitHub READMEs, chunk and embed) while the progress view streams events, and you get an
+ingestion report with a state for every resource and video. An ingestion agent (Claude Haiku, $0.05 budget per
+roadmap) plans the crawl and looks for skills with too little material. Its proposals are never ingested until you
+approve them.
+
+**YouTube and its terms.** Paths YouTube sanctions: the YouTube Data API (metadata, comments, playlists; set a
+free `YOUTUBE_API_KEY`), oEmbed, and the opt-in `gemini` transcript route (Google's official Gemini API with the
+video URL; it uses `GEMINI_API_KEY`). Paths YouTube's terms do not sanction: the default `captions` route
+(youtube-transcript-api reads an undocumented YouTube endpoint, not the official API), the yt-dlp metadata
+fallback that runs when no key is set, and the opt-in `ytdlp_cookies` route (yt-dlp with your browser cookies,
+needs `YTDLP_COOKIES_BROWSER`). You are responsible for following YouTube's terms. To stay on official paths, set
+`YOUTUBE_API_KEY` and `TRANSCRIPT_ROUTES=gemini`. The valid route names are `captions`, `ytdlp_cookies` and
+`gemini`. Without a key, metadata comes from yt-dlp (title, channel, description, duration and chapters; no
+cookies, nothing downloaded), then oEmbed (title and channel only). The key adds top comments (the source of
+comment timestamps) and more reliable metadata, and playlist expansion uses the API instead of yt-dlp.
+
+**Results.** All numbers below come from files in the repo, negative ones included.
+- Live ingestion of a Kubernetes roadmap: 13 resources, 12 done and 1 linked only (an interactive site, not
+  crawled); transcripts 9 of 9 videos (all captions); agent spend $0.0075. The run found three crawler and parser
+  defects, which were fixed. Full write-up: [docs/platform/ingestion-report-kubernetes.md](docs/platform/ingestion-report-kubernetes.md).
+- Ingestion eval ([ingestion_latest.md](backend/tutor/eval/results/ingestion_latest.md)): segment route accuracy
+  1.0 on 9 videos, extraction must-contain 0.94, leakage 0.0. **Negative:** when the creator's chapters are
+  hidden, the transcript split recovers their boundaries at F1 0.24 (+-30 s, 6 videos). Treat it as a fallback, not
+  a substitute. Run it with `python -m backend.tutor.eval.ingestion_eval` (`--ci` for the committed fixtures only).
+- Ingestion agent eval ([ingest_agent_latest.md](backend/tutor/eval/results/ingest_agent_latest.md), Haiku, 3
+  repeats per scenario): big_docs plan precision 1.00; thin_skill gap fixed 1.00 with proposal precision 1.00;
+  the poisoned page was resisted at 1.00 with the defenses on and off; nothing_to_fix restraint 1.00.
+  **Weak:** the dead_link and no_captions scenarios fixed the gap in only 0.33 of runs. The live recording cost
+  $0.047 is the cumulative live spend over the recordings; the latest recorded run in the file was $0.0411. Replays are free.
+- Retrieval over the demo's SDE knowledge base ([sde_retrieval_test_latest.md](backend/tutor/eval/results/sde_retrieval_test_latest.md),
+  33 questions): **negative.** The platform's parent-child chunking scores below the demo's `v2_hybrid` on the
+  demo's own questions: hit@5 0.88 (child chunks) and 0.94 (parent chunks) against 0.97, MRR@10 0.72 and 0.77
+  against 0.85. The comparison is indicative, not a controlled A/B. The platform re-chunks the same documents, and
+  the bulk import (`import-sde`) skips cross-document near-duplicate removal because the demo corpus is already
+  cleaned.
 
 ## Project layout
 ```
