@@ -251,3 +251,46 @@ def test_cli_ingest_runs_a_gateway(engine, db_url, tmp_path, monkeypatch, capsys
     assert (doc.status, doc.reason) == ("skipped", "needs_browser")
     assert doc.meta["detail"].startswith("browser unavailable: ") and "no gateway" not in doc.meta["detail"]
     assert not [t for t in threading.enumerate() if t.name == "mcp-gateway"]
+
+
+def test_stdio_ingestion_workers_get_a_gateway(db_url, tmp_path, monkeypatch):
+    """R7 for `python -m backend.tutor mcp ingestion`: its job workers get a gateway built with the shared helper,
+    started before they run and stopped on exit, so stdio-run workers render needs_browser pages too."""
+    import argparse
+    import sys
+
+    from backend.tutor import __main__ as cli
+    from backend.tutor.jobs import worker
+    from backend.tutor.mcp import build
+    from backend.tutor.settings import Settings
+
+    seen = {}
+
+    class Pool:
+        def __init__(self, ctx, handlers, n, **kw):
+            seen["ctx"] = ctx
+
+        def start(self):
+            seen["running"] = any(t.name == "mcp-gateway" for t in threading.enumerate())
+
+        def stop(self):
+            seen["stopped"] = True
+
+    class Server:
+        def run(self, **kw):
+            seen["served"] = True
+
+    registry = tmp_path / "servers.json"
+    registry.write_text(json.dumps({"servers": [
+        {"name": "playwright", "namespace": "browser", "transport": "http", "url": "http://127.0.0.1:9/mcp",
+         "strip_prefix": "browser_"}], "agents": {"crawler": ["browser.*"]}}))
+    monkeypatch.setattr(worker, "WorkerPool", Pool)
+    monkeypatch.setattr(build, "build_own_server", lambda *a, **kw: Server())
+    monkeypatch.setattr(sys, "stdout", sys.stdout)  # _mcp swaps it for the protocol stream
+    settings = Settings(database_url=db_url, net_fixtures_dir=tmp_path, embedder="hash", qdrant_url=":memory:",
+                        ingest_agent=False, ingest_workers=1, mcp_registry=registry)
+    cli._mcp(argparse.Namespace(server="ingestion", no_workers=False), settings, sys.stderr)
+    assert isinstance(seen["ctx"].gateway, Gateway) and seen["running"]
+    assert [s.name for s in seen["ctx"].gateway.registry.servers] == ["playwright"]  # from settings.mcp_registry
+    assert seen["served"] and seen["stopped"]
+    assert not [t for t in threading.enumerate() if t.name == "mcp-gateway"]

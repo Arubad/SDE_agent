@@ -206,8 +206,9 @@ claude mcp add --transport http roadmap-knowledge https://<tunnel-host>/mcp/know
 
 `python -m backend.tutor mcp <knowledge|learner|ingestion|web>` serves one server on stdin/stdout with the same
 dependencies as the API (it migrates the database named in `DATABASE_URL`, and reads the same environment). Logs go
-to stderr; stdout carries the protocol only. `ingestion` also runs the job workers in that process; pass
-`--no-workers` when the API (or another process) runs them already. For Claude Desktop
+to stderr; stdout carries the protocol only. `ingestion` also runs the job workers in that process, with their
+own MCP gateway (built from the same registry as the API's, so they render JavaScript-only pages through the
+browser too); pass `--no-workers` when the API (or another process) runs them already. For Claude Desktop
 (`claude_desktop_config.json`), with `<repo>` the absolute path of this repository:
 
 ```json

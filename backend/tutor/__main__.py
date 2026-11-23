@@ -110,19 +110,20 @@ def _protect_stdout():
 
 def _mcp(args, settings, protocol) -> None:
     """Serve one own MCP server on stdio, with the API's dependencies (migrated database, engine, net, index,
-    embedder). `ingestion` also runs the job workers (and the settle hook) unless --no-workers."""
+    embedder). `ingestion` also runs the job workers (and the settle hook) unless --no-workers, with a gateway
+    (`build_gateway`, as the API's workers have; stopped on exit) so they render `needs_browser` pages too."""
     from backend.tutor.db import make_engine, migrate
     from backend.tutor.ingest.embed import make_embedder
     from backend.tutor.ingest.handlers import HANDLERS, settled_hook
     from backend.tutor.ingest.index import make_index
     from backend.tutor.ingest.net import make_net
     from backend.tutor.jobs.worker import JobContext, WorkerPool
-    from backend.tutor.mcp.build import build_own_server
+    from backend.tutor.mcp.build import build_gateway, build_own_server
     from backend.tutor.telemetry import setup_tracing
 
     migrate(settings.database_url)
     engine = make_engine(settings.database_url)
-    pool = provider = None
+    pool = provider = gateway = None
     try:
         net = make_net(settings, engine)
         embedder = make_embedder(settings)
@@ -131,7 +132,9 @@ def _mcp(args, settings, protocol) -> None:
         server = build_own_server(args.server, engine, net, index, embedder, settings, on_settled)
         if args.server == "ingestion" and not args.no_workers and settings.ingest_workers > 0:
             provider = setup_tracing(settings.otel_endpoint)
-            ctx = JobContext(engine=engine, net=net, settings=settings, index=index)
+            gateway = build_gateway(engine, net, index, embedder, settings, on_settled)
+            gateway.start()  # a loop thread only: no server is contacted before its first use
+            ctx = JobContext(engine=engine, net=net, settings=settings, index=index, gateway=gateway)
             pool = WorkerPool(ctx, HANDLERS, settings.ingest_workers, on_settled=on_settled,
                               tracer_provider=provider)
             pool.start()
@@ -143,6 +146,8 @@ def _mcp(args, settings, protocol) -> None:
     finally:
         if pool is not None:
             pool.stop()
+        if gateway is not None:
+            gateway.stop()
         if provider is not None:
             provider.shutdown()
         engine.dispose()
