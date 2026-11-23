@@ -464,3 +464,24 @@ only, with no URLs, and its line breaks were lost when pasted. That is realistic
 
   It has its own eval: gap-fix rate, plan and proposal precision, restraint on a healthy roadmap, and injection
   resistance with defenses on vs off.
+
+## Phase 3 amendments (owner's architecture checklist, 2026-11-24)
+These are taken only where they fit the planned work; the rest was declined.
+- **Phase 3 additions:**
+  - **Allow/deny/ask gate in the MCP gateway.** Registry rules, with deny beating ask and ask beating allow. An `ask`
+    tool runs only after an approver has seen the raw JSON payload (tool, server, agent, arguments). The write tools
+    of the ingestion and learner servers are `ask` by default.
+  - **Idempotency keys on MCP write tools.** On the ingestion server's `create_roadmap` and `approve_roadmap`, a
+    repeated key replays the stored result, and a key reused with different arguments is an error.
+- **Later phases:**
+  - **Phase 4:** the tutor's approval interrupts (big replans, researcher proposals, `ask` tools) show the raw action
+    payload next to the human-readable summary.
+  - **Phase 6:** the red-team suite is organised by the OWASP agentic-AI threat categories, and the README reports a
+    pass rate per category. The tutor and ingestion evals add fault-injected trajectory scenarios: tool HTTP 500s,
+    malformed tool JSON, a worker crash mid-run and an MCP server outage. The README reports the completion rate.
+- **Declined:**
+  - OAuth 2.1 scoped MCP auth: the `mcp` 1.x pin, and one local user;
+  - SKILL.md runbooks;
+  - Langfuse: Phoenix stays;
+  - Temporal: the Postgres job queue stays.
+

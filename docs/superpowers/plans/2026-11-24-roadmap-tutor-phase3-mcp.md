@@ -73,6 +73,17 @@ Nothing has to be dropped. Task 1 pins this with tests, so a future dependency c
    model-facing consumers.
 8. **The stdio ingestion server starts its own worker pool** (`--no-workers` turns it off). `SKIP LOCKED` makes a
    second pool alongside the API safe.
+9. **Additions from the owner's architecture checklist (2026-11-24), only where they fit the existing tasks:**
+   - a deterministic allow/deny/ask gate in the gateway; `ask` hands the raw JSON payload to an approver (Task 4);
+   - idempotency keys on the ingestion server's write tools (Task 8).
+
+   Left out on purpose:
+   - OAuth 2.1, because of the `mcp` 1.x pin and the single-user local design;
+   - SKILL.md runbooks;
+   - Langfuse, since Phoenix already covers tracing;
+   - Temporal, since the Postgres queue already covers durable work.
+
+   Later-phase notes are in the spec's "Phase 3 amendments".
 
 ## Global Constraints
 - **The HF Space must keep working unchanged:**
@@ -314,16 +325,30 @@ async def test_call_timeout_is_enforced():
 
 ---
 
-### Task 4: The agent URL policy, enforced in the gateway
+### Task 4: The agent URL policy and the allow/deny/ask gate, enforced in the gateway
 
 **Files:**
 - Create: `backend/tutor/mcp/policy.py`
-- Modify: `backend/tutor/mcp/gateway.py`
+- Modify: `backend/tutor/mcp/gateway.py`, `backend/tutor/mcp/registry.py` (optional top-level `rules`),
+  `backend/tutor/mcp/servers.json`
 - Test: `backend/tutor/tests/test_mcp_policy.py`
 
 **Interfaces:**
 - Consumes: `fetch.address_refusal`, `fetch.public_resolver`, `queue.normalize_url`.
-- Produces:
+- Produces (allow/deny/ask gate, added 2026-11-24 at the owner's request):
+  - The registry accepts an optional top-level `"rules": {"deny": [patterns], "ask": [patterns]}`. The patterns are
+    globs over canonical tool names, validated like the `agents` patterns. `Registry` gains `deny: tuple[str, ...]`
+    and `ask: tuple[str, ...]`, both defaulting to empty.
+  - `Gateway.decision(agent: str, canonical: str) -> Literal["allow", "ask", "deny"]`. Precedence is deny, then ask,
+    then allow. Allow means the agent's own patterns match; anything else is deny.
+  - `CallContext.approve: Callable[[dict], bool | Awaitable[bool]] | None = None`.
+  - For an `ask` tool, the gateway builds the raw payload `{"tool": canonical, "server": name, "agent": agent,
+    "args": args}` and calls `ctx.approve(payload)` before anything reaches the server.
+    - No approver → `{"error": "approval required for <canonical>"}`.
+    - The approver returns false → `{"error": "<canonical> was not approved"}`.
+  - The committed `servers.json` gets `"rules": {"deny": [], "ask": ["ingest.create_roadmap",
+    "ingest.approve_roadmap", "learner.forget"]}`.
+- Produces (URL policy):
   - `UrlPolicy(*, resolver=public_resolver)`, with methods:
     - `allow_sources(urls: Iterable[str]) -> None`: adds roadmap resources, the user's URLs, or search results;
     - `allow_text(text: str) -> None`: adds the URLs found in a user message;
@@ -350,11 +375,21 @@ async def test_call_timeout_is_enforced():
   - `test_browser_final_url_off_policy_is_discarded`: a fake `browser_navigate` replies with page text and
     `- Page URL: http://10.0.0.5/admin` → the result is an error, the fake server records a follow-up navigation to
     `about:blank`, and the page text is not in the result;
-  - `test_no_policy_means_no_url_checks`: crawler calls carry their own policy (Task 11).
+  - `test_no_policy_means_no_url_checks`: crawler calls carry their own policy (Task 11);
+  - `test_deny_beats_ask_and_allow`: a tool in the agent's patterns, in `ask` and in `deny` → `deny`, and the server
+    is never reached;
+  - `test_ask_without_approver_is_refused`: the server is never reached;
+  - `test_ask_approver_sees_raw_payload_and_decides`: the approver receives exactly `{"tool", "server", "agent",
+    "args"}` with the unmodified arguments. True → the call runs; false → the "not approved" error, and the server
+    is not reached. An async approver works too;
+  - `test_rules_patterns_validated`: a `rules` pattern matching no namespace → `RegistryError` unless
+    `allow_unknown`.
 - [ ] **Step 2: Run them.** Expected: FAIL.
-- [ ] **Step 3: Implement `policy.py` and the gateway hooks.**
-- [ ] **Step 4: Run** `pytest backend/tutor/tests/test_mcp_policy.py -v`. Expected: PASS.
-- [ ] **Step 5: Commit** "Enforce the agent URL rule on every gateway call and browser navigation".
+- [ ] **Step 3: Implement `policy.py`, the registry `rules`, and the gateway hooks.** The gate runs before the URL
+  policy, and both run before any connection is made.
+- [ ] **Step 4: Run** `pytest backend/tutor/tests/test_mcp_policy.py backend/tutor/tests/test_mcp_registry.py
+  backend/tutor/tests/test_mcp_gateway.py -v`. Expected: PASS.
+- [ ] **Step 5: Commit** "Enforce the allow/deny/ask gate and the agent URL rule on every gateway call".
 
 ---
 
@@ -488,11 +523,13 @@ async def test_call_timeout_is_enforced():
 
 ---
 
-### Task 8: Own `ingestion` server, with progress and elicitation
+### Task 8: Own `ingestion` server, with progress, elicitation and idempotent writes
 
 **Files:**
-- Create: `backend/tutor/mcp/servers/ingestion.py`
-- Test: `backend/tutor/tests/test_mcp_ingestion_server.py`
+- Create: `backend/tutor/mcp/servers/ingestion.py`, `backend/tutor/mcp/idempotency.py`,
+  `backend/tutor/migrations/versions/0006_idempotency.py`
+- Modify: `backend/tutor/models.py` (`McpIdempotency`)
+- Test: `backend/tutor/tests/test_mcp_ingestion_server.py`, `backend/tutor/tests/test_mcp_idempotency.py`
 
 **Interfaces:**
 - Consumes: `create_roadmap`, `service.parse_and_resolve`, `normalize_spec`, `service.approve`, `service.progress`,
@@ -512,6 +549,19 @@ async def test_call_timeout_is_enforced():
     is `ready`, `partial` or `failed`, or the timeout passes, it reports progress:
     `ctx.report_progress(done_jobs, total_jobs, "<status>: <n> resources done")`.
   - `ingestion_report(slug: str) -> dict`: `build_report`.
+- Produces (idempotent writes, added 2026-11-24 at the owner's request):
+  - The table `mcp_idempotency` has pk `(tool, key)`, `args_hash text not null`, `result jsonb null` (null = still
+    running) and `created_at`.
+  - `run_idempotent(engine, tool: str, key: str | None, args: dict, fn: Callable[[], dict]) -> dict`:
+    - `key=None` → it just runs `fn()`;
+    - otherwise it claims the key with `INSERT ... ON CONFLICT DO NOTHING` and runs `fn()`. It stores the result on
+      success and deletes the claim on failure, so a retry can run again;
+    - the same key with the same `args_hash` (sha256 of the canonical JSON of the arguments, without the key)
+      returns the stored result without running `fn()` again;
+    - the same key with a different `args_hash` → `ValueError("idempotency key reused with different arguments")`;
+    - a claim that is still running → `ValueError("a request with this idempotency key is still running")`.
+  - `create_roadmap` and `approve_roadmap` take an optional `idempotency_key: str | None = Field(None,
+    max_length=128)` and run their work through `run_idempotent`.
 
 - [ ] **Step 1: Write the failing tests** (DB, fake LLM, fixture `Net`; the client uses an in-memory transport):
   - `test_create_roadmap_elicits_and_approves_on_accept`: the elicitation message contains every resource title →
@@ -520,11 +570,17 @@ async def test_call_timeout_is_enforced():
     `parsed`, zero jobs, `next` mentions `approve_roadmap`;
   - `test_wait_for_ingestion_reports_progress`: workers run inline (`ingest_roadmap(..., until_idle=True)` in a
     thread) → at least 2 progress notifications, and the final status is `ready` or `partial`;
-  - `test_unknown_slug_and_duplicate_slug_are_tool_errors`.
+  - `test_unknown_slug_and_duplicate_slug_are_tool_errors`;
+  - `test_create_roadmap_replay_with_same_key`: two calls with the same key and arguments → the same result, one
+    roadmap, and one parse call (count the fake LLM's calls);
+  - `test_idempotency_key_reused_with_different_args`: a tool error, and nothing created;
+  - `test_failed_call_releases_key`: `fn` raises → a retry with the same key runs again;
+  - `test_running_claim_is_reported`: a claim row with a null result → the "still running" error.
 - [ ] **Step 2: Run them.** Expected: FAIL.
 - [ ] **Step 3: Implement.** The DB and the model call run in `anyio.to_thread.run_sync`.
-- [ ] **Step 4: Run** `pytest backend/tutor/tests/test_mcp_ingestion_server.py -v`. Expected: PASS.
-- [ ] **Step 5: Commit** "Own ingestion MCP server: elicited approval and progress notifications".
+- [ ] **Step 4: Run** `pytest backend/tutor/tests/test_mcp_ingestion_server.py backend/tutor/tests/test_mcp_idempotency.py
+  -v`. Expected: PASS.
+- [ ] **Step 5: Commit** "Own ingestion MCP server: elicited approval, progress notifications, idempotent writes".
 
 ---
 
@@ -717,7 +773,8 @@ async def test_call_timeout_is_enforced():
   Record the outcomes, including failures, in `docs/platform/mcp.md` § "Live check (2026-11-…)".
 - [ ] **Step 2: Write `docs/platform/mcp.md`:**
   - the server map (own and external, with namespaces and defaults);
-  - the per-agent allow-lists;
+  - the per-agent allow-lists and the allow/deny/ask rules;
+  - idempotency keys on the ingestion write tools;
   - the URL rule and how each actor is checked;
   - the Playwright threat model: an isolated network and blocked origins; residual risk from sub-resources and LAN
     addresses; final-URL discard;
