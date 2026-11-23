@@ -517,6 +517,10 @@ async def test_inproc_passages_are_validated_and_trimmed_to_the_cap():
     def broken() -> dict:
         return {"passages": [{"text": "no ids"}]}
 
+    @s.tool
+    def empty() -> dict:
+        return {"passages": []}
+
     with _gateway([_spec("kb")], {"kb": s}) as gw:
         ctx = CallContext(agent="all")
         out = await gw.call("kb.many", {}, ctx)
@@ -528,6 +532,7 @@ async def test_inproc_passages_are_validated_and_trimmed_to_the_cap():
         assert len(json.dumps(out, ensure_ascii=False)) <= 20_000
         assert await gw.call("kb.malformed", {}, ctx) == {"passages": [_passage(3)]}
         assert await gw.call("kb.broken", {}, ctx) == {"error": "kb.broken returned no valid passages"}
+        assert await gw.call("kb.empty", {}, ctx) == {"passages": []}  # no hits is not an error
 
 
 async def test_server_error_text_from_connect_is_fenced():

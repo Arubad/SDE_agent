@@ -6,6 +6,14 @@
 - Names: a tool is `<namespace>.<tool>` (canonical, after `strip_prefix`) in the registry, traces and the UI, and
   `wire_name(...)` (`^[a-zA-Z0-9_-]{1,64}$`) on the wire to Claude. `call` accepts either.
 - Allow-lists: an agent sees and may call only the canonical names its registry patterns match (`fnmatch`).
+- The gate (`decision`): registry `rules.deny` beats `rules.ask` beats the allow-list; a denied tool is not listed
+  either. An `ask` call runs only if `CallContext.approve` returns True for `{"tool", "server", "agent", "args"}`.
+  Then, with a `CallContext.policy`, every `url` / `*_url` argument must pass the URL policy (`policy.py`). Both
+  run before anything connects whenever the canonical name is known without listing (every canonical name and
+  every unhashed wire name); a hashed wire name not listed yet is listed first, but never called before the gate.
+- With a policy, after the call and before fencing: `web.search` result URLs become allowed sources, and a
+  `browser.*` result whose `Page URL:` is refused becomes an error, after an internal `browser.navigate` to
+  `about:blank` (not gated, not policed, never shown; its failure is ignored).
 - Results come back in the agent loop's `ToolCaller` shape (`backend/agent/loop.py`):
   - a tool error -> `{"error": <its text>}`;
   - structured content `{"passages": [...]}` -> passed through unchanged (citations need the raw text);
@@ -23,13 +31,15 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
+import inspect
 import json
 import os
 import re
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -43,7 +53,8 @@ from mcp.shared.exceptions import McpError
 from backend.core.redact import redact
 from backend.core.trace import Trace
 from backend.tutor.mcp.registry import Registry, ServerSpec, effective_enabled, missing_env
-from backend.tutor.mcp.results import _finish, _shape
+from backend.tutor.mcp.policy import arg_urls, page_urls, search_result_urls
+from backend.tutor.mcp.results import _finish, _leaves, _shape
 from backend.tutor.untrusted import wrap
 
 if TYPE_CHECKING:
@@ -56,6 +67,8 @@ ERROR_CHARS = 300
 RETRY_DOWN_S = 30.0  # tool_defs skips a server that failed this recently; call() always retries
 DESC_CHARS, SCHEMA_DESC_CHARS = 1024, 300  # external tool descriptions (then fenced) and schema descriptions
 _BAD = re.compile(r"[^a-zA-Z0-9_-]")
+_HASHED = re.compile(r"_[0-9a-f]{8}$")  # what `_hashed` ends a wire name with
+BLANK = "about:blank"  # where the gateway sends a browser that left the allowed sites
 
 
 def _hashed(wire: str, canonical: str) -> str:
@@ -80,9 +93,10 @@ def wire_name(canonical: str, *, namespace: str | None = None) -> str:
 @dataclass
 class CallContext:
     agent: str
-    policy: UrlPolicy | None = None  # Task 4; ignored here
+    policy: UrlPolicy | None = None  # None: no URL checks (the crawler's jobs carry their own scope)
     trace: Trace | None = None
     raw: bool = False  # crawler only: no untrusted wrap, RAW_CAP instead of CAP
+    approve: Callable[[dict], bool | Awaitable[bool]] | None = None  # asked before every `ask` tool call
 
 
 @dataclass
@@ -351,6 +365,13 @@ class Gateway:
     def _allowed(self, agent: str, canonical: str) -> bool:
         return any(fnmatchcase(canonical, p) for p in self.registry.agents.get(agent, ()))
 
+    def decision(self, agent: str, canonical: str) -> Literal["allow", "ask", "deny"]:
+        """The registry `rules` over the agent's allow-list: deny, then ask, then allow. `ask` never grants a tool
+        the agent's own patterns do not match."""
+        if any(fnmatchcase(canonical, p) for p in self.registry.deny) or not self._allowed(agent, canonical):
+            return "deny"
+        return "ask" if any(fnmatchcase(canonical, p) for p in self.registry.ask) else "allow"
+
     def _could_allow(self, agent: str, namespace: str) -> bool:
         """Whether any of the agent's patterns could match some `<namespace>.<tool>` (conservative: a pattern's
         literal head and `namespace.` must agree as far as both go). False means refuse without connecting."""
@@ -367,7 +388,8 @@ class Gateway:
             return []
         live = await self._load_live()
         up = {s.name for s in live if self._conn(s).client is not None}
-        tools = {t.wire: t for t in self._names.values() if t.spec.name in up and self._allowed(agent, t.canonical)}
+        tools = {t.wire: t for t in self._names.values()
+                 if t.spec.name in up and self.decision(agent, t.canonical) != "deny"}
         return [{"name": w, "description": f"[{t.spec.namespace}] {t.description}", "input_schema": t.schema}
                 for w, t in sorted(tools.items())]
 
@@ -387,6 +409,11 @@ class Gateway:
             return {"error": f"raw results are only for the {RAW_AGENT} agent"}
         tool = self._names.get(name)
         owners = self._owners(name)
+        gated = None
+        if tool is None and owners and (name.startswith(owners[0][0].namespace + ".") or not _HASHED.search(name)):
+            gated = owners[0][1]  # the canonical is known without listing: gate it before anything connects
+            if (refused := await self._gate(owners[0][0], gated, args, ctx)) is not None:
+                return refused
         if tool is None:  # not listed yet (first use, after reset): list whichever servers could own it first
             candidates = [s for s, _ in owners] or list(self.registry.servers)
             candidates = [s for s in candidates if self._could_allow(ctx.agent, s.namespace) and not self._blocked(s)]
@@ -401,8 +428,8 @@ class Gateway:
         if guess is None:
             return {"error": f"unknown tool {name}"}
         spec, canonical = guess
-        if not self._allowed(ctx.agent, canonical):
-            return {"error": f"tool {canonical} is not allowed for {ctx.agent}"}
+        if canonical != gated and (refused := await self._gate(spec, canonical, args, ctx)) is not None:
+            return refused
         if (blocked := self._blocked(spec)) == "disabled":
             return {"error": f"{canonical}: server {spec.name} is disabled"}
         if blocked == "missing_env":
@@ -426,8 +453,8 @@ class Gateway:
         tool = self._names.get(name) or self._names.get(canonical)
         if tool is None or tool.spec.name != spec.name:
             return {"error": f"unknown tool {name}"}
-        if not self._allowed(ctx.agent, tool.canonical):  # the pre-connect check used a guessed name
-            return {"error": f"tool {tool.canonical} is not allowed for {ctx.agent}"}
+        if tool.canonical != canonical and (refused := await self._gate(spec, tool.canonical, args, ctx)) is not None:
+            return refused  # the name now resolves to another tool than the one gated (relisted meanwhile)
         try:
             result = await asyncio.wait_for(client.call_tool(tool.name, args, raise_on_error=False), spec.timeout_s)
         except McpError as e:  # the server answered with a protocol error: the connection is fine
@@ -438,7 +465,66 @@ class Gateway:
             if isinstance(e, TimeoutError):
                 return {"error": f"{canonical} timed out after {spec.timeout_s}s"}
             return self._unavailable(spec, canonical, self._scrub(spec, str(e) or type(e).__name__)[:ERROR_CHARS])
-        return _finish(_shape(result, spec), spec, ctx, canonical)
+        out = _shape(result, spec)
+        if ctx.policy is not None and (refused := await self._after(conn, tool, out, ctx)) is not None:
+            return refused
+        return _finish(out, spec, ctx, tool.canonical)
+
+    # ---- the gate and the URL policy ---------------------------------------------------------------------------
+    async def _gate(self, spec: ServerSpec, canonical: str, args: dict, ctx: CallContext) -> dict | None:
+        """The refusal for this call, or None: allow/deny/ask first, then the URL arguments. Nothing connects."""
+        verdict = self.decision(ctx.agent, canonical)
+        if verdict == "deny":
+            return {"error": f"tool {canonical} is not allowed for {ctx.agent}"}
+        # (a disabled or unconfigured server is reported by _call; nobody is asked about a call that cannot run)
+        if verdict == "ask" and self._blocked(spec) is None and not await self._approved(spec, canonical, args, ctx):
+            if ctx.approve is None:
+                return {"error": f"approval required for {canonical}"}
+            return {"error": f"{canonical} was not approved"}
+        if ctx.policy is not None:
+            for url in arg_urls(args):
+                if (reason := ctx.policy.refusal(url)) is not None:
+                    return {"error": f"refused by URL policy: {reason}"}
+        return None
+
+    async def _approved(self, spec: ServerSpec, canonical: str, args: dict, ctx: CallContext) -> bool:
+        """Only a literal True approves. The approver gets a copy of the raw arguments (so it cannot change the
+        call) and runs off the gateway loop; an async approver's coroutine is awaited here. Raising = refusing."""
+        if ctx.approve is None:
+            return False
+        try:
+            payload = {"tool": canonical, "server": spec.name, "agent": ctx.agent, "args": copy.deepcopy(args)}
+            answer = await asyncio.to_thread(ctx.approve, payload)
+            if inspect.isawaitable(answer):
+                answer = await answer
+        except Exception:
+            return False
+        return answer is True
+
+    async def _after(self, conn: _Conn, tool: _Tool, out: dict, ctx: CallContext) -> dict | None:
+        """On the raw shaped result (before fencing and capping): web.search results become allowed sources; a
+        browser result whose `Page URL:` is off-policy is replaced by an error and the page is reset."""
+        spec = tool.spec
+        if tool.canonical == "web.search":
+            ctx.policy.allow_sources(search_result_urls(out.get("data")))
+        if spec.namespace != "browser":
+            return None
+        for text in (c[k] for c, k in _leaves(out, [])):
+            for url in page_urls(text):
+                if url != BLANK and (reason := ctx.policy.refusal(url)) is not None:
+                    await self._blank(conn)
+                    return {"error": f"navigation left the allowed sites: {reason}"}
+        return None
+
+    async def _blank(self, conn: _Conn) -> None:
+        """`browser.navigate {"url": "about:blank"}`, past the gate and the URL policy, never shown to the model."""
+        nav = self._names.get(f"{conn.spec.namespace}.navigate")
+        client = conn.client
+        if nav is None or nav.spec.name != conn.spec.name or client is None:
+            return
+        with suppress(Exception):
+            await asyncio.wait_for(client.call_tool(nav.name, {"url": BLANK}, raise_on_error=False),
+                                   conn.spec.timeout_s)
 
     # ---- health ------------------------------------------------------------------------------------------------
     async def _health(self, refresh: bool) -> list[ServerHealth]:

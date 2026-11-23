@@ -48,6 +48,8 @@ class ServerSpec:
 class Registry:
     servers: tuple[ServerSpec, ...]
     agents: dict[str, tuple[str, ...]]
+    deny: tuple[str, ...] = ()  # canonical-name globs no agent may call
+    ask: tuple[str, ...] = ()  # canonical-name globs that need the caller's approval each call
 
 
 def _expand(value: str, env: Mapping[str, str]) -> str:
@@ -97,8 +99,8 @@ def load_registry(path: Path, env: Mapping[str, str], *, allow_unknown: bool = F
         data = json.loads(Path(path).read_text())
     except (OSError, json.JSONDecodeError) as e:
         raise RegistryError(f"cannot read registry {path}: {e}") from e
-    if not isinstance(data, dict) or set(data) - {"servers", "agents"}:
-        raise RegistryError("registry must be an object with only 'servers' and 'agents'")
+    if not isinstance(data, dict) or set(data) - {"servers", "agents", "rules"}:
+        raise RegistryError("registry must be an object with only 'servers', 'agents' and 'rules'")
     servers = tuple(_spec(raw, env) for raw in data.get("servers", []))
     for attr in ("name", "namespace"):
         seen: set[str] = set()
@@ -107,13 +109,27 @@ def load_registry(path: Path, env: Mapping[str, str], *, allow_unknown: bool = F
                 raise RegistryError(f"duplicate server {attr} {getattr(s, attr)!r}")
             seen.add(getattr(s, attr))
     agents = {a: tuple(pats) for a, pats in (data.get("agents") or {}).items()}
+    rules = _rules(data.get("rules", {}))
     if not allow_unknown:
         namespaces = {s.namespace for s in servers}
-        for agent, pats in agents.items():
+        owners = [(f"agent {a!r}", pats) for a, pats in agents.items()]
+        for owner, pats in [*owners, *((f"rules.{k}", v) for k, v in rules.items())]:
             for pat in pats:
                 if not any(fnmatchcase(ns, pat.split(".", 1)[0]) for ns in namespaces):
-                    raise RegistryError(f"agent {agent!r}: pattern {pat!r} matches no server namespace")
-    return Registry(servers=servers, agents=agents)
+                    raise RegistryError(f"{owner}: pattern {pat!r} matches no server namespace")
+    return Registry(servers=servers, agents=agents, **rules)
+
+
+def _rules(raw: object) -> dict[str, tuple[str, ...]]:
+    """`{"deny": [globs], "ask": [globs]}`, both optional."""
+    if not isinstance(raw, dict) or set(raw) - {"deny", "ask"}:
+        raise RegistryError("'rules' must be an object with only 'deny' and 'ask'")
+    out = {}
+    for key, pats in raw.items():
+        if not isinstance(pats, list) or not all(isinstance(p, str) and p for p in pats):
+            raise RegistryError(f"rules.{key} must be a list of tool-name patterns")
+        out[key] = tuple(pats)
+    return out
 
 
 def missing_env(spec: ServerSpec, env: Mapping[str, str]) -> list[str]:

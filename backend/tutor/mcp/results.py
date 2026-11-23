@@ -68,9 +68,10 @@ _PASSAGE_KEYS = ("chunk_id", "url", "text", "title")
 
 
 def _passages(found: list, cap: int, canonical: str) -> dict:
-    """Valid passages only, trailing ones dropped until the JSON fits; the first is kept (its text cut)."""
+    """Valid passages only, trailing ones dropped until the JSON fits; the first is kept (its text cut). No
+    passages is a result (no hits); only a non-empty list with no valid entry is an error."""
     ok = [p for p in found if isinstance(p, dict) and all(isinstance(p.get(k), str) for k in _PASSAGE_KEYS)]
-    if not ok:
+    if found and not ok:
         return {"error": f"{canonical} returned no valid passages"}
     out = {"passages": ok}
     while len(ok) > 1 and _size(out) > cap:

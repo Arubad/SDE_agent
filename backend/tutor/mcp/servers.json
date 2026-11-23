@@ -15,5 +15,6 @@
     "researcher": ["kb.search", "web.search", "web.fetch", "browser.navigate", "browser.snapshot", "docs.*",
                    "repo.*", "papers.*", "ref.*"],
     "crawler": ["browser.navigate", "browser.evaluate", "browser.close"]
-  }
+  },
+  "rules": {"deny": [], "ask": ["ingest.create_roadmap", "ingest.approve_roadmap", "learner.forget"]}
 }
