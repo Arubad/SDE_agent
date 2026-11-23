@@ -75,6 +75,16 @@ def _chunks(doc: Document) -> int:
     return int((doc.meta or {}).get("chunks") or 0)
 
 
+def _rendered(doc: Document) -> bool:
+    """A page the crawler's HTTP fetch could not read (`needs_browser`) and the gateway's browser rendered."""
+    return (doc.meta or {}).get("rendered") == "browser"
+
+
+def rendered_summary(n: int) -> str:
+    """e.g. `3 pages rendered by the browser`."""
+    return f"{n} page{'' if n == 1 else 's'} rendered by the browser"
+
+
 def _dominant(reasons: list[str]) -> str | None:
     return Counter(reasons).most_common(1)[0][0] if reasons else None
 
@@ -101,7 +111,8 @@ def resource_outcomes(resources, docs_by_res, failures) -> dict:
             status, reason = "skipped", _dominant(gaps) or "no_content"
         out[r.id] = (status, reason, {**(r.stats or {}), "pages": sum(1 for d in ok if d.kind != "video"),
                                       "videos": sum(1 for d in ok if d.kind == "video"),
-                                      "chunks": sum(_chunks(d) for d in ok)})
+                                      "chunks": sum(_chunks(d) for d in ok),
+                                      "rendered_by_browser": sum(1 for d in ok if _rendered(d))})
     return out
 
 
@@ -188,6 +199,10 @@ def build_report(session: Session, roadmap: Roadmap) -> dict:
     out_res = [{"id": r.key, "title": r.title, "kind": r.kind, "url": r.url, "status": r.status, "reason": r.reason,
                 "pages": int((r.stats or {}).get("pages") or 0), "videos": int((r.stats or {}).get("videos") or 0),
                 "chunks": int((r.stats or {}).get("chunks") or 0)} for r in resources]
+    for entry, r in zip(out_res, resources):  # only when some were: older reports keep their exact shape
+        if n := int((r.stats or {}).get("rendered_by_browser") or 0):
+            entry["rendered_by_browser"] = n
+    rendered = sum(1 for docs in docs_by_res.values() for d in docs if d.status == "ok" and _rendered(d))
     videos = [d for docs in docs_by_res.values() for d in docs if d.kind == "video" and d.status == "ok"]
     segments = {k: 0 for k, _ in SEGMENTS}
     by_route: dict[str, int] = {}
@@ -203,6 +218,8 @@ def build_report(session: Session, roadmap: Roadmap) -> dict:
                      key=lambda x: (x["url"] or "", x["reason"] or ""))
     agent, cost = _agent_section(session, roadmap.id)
     summary = video_summary(len(videos), segments, ok, by_route)
+    if rendered:
+        summary += "\n" + rendered_summary(rendered)
     if agent["runs"] or agent["actions"]:
         rounds = len({r["round"] for r in agent["runs"] if r["mode"] == "recover"})  # the plan run is not a round
         summary += f"\nAgent: {len(agent['actions'])} actions over {rounds} rounds, ${cost:.3f}"
@@ -211,6 +228,7 @@ def build_report(session: Session, roadmap: Roadmap) -> dict:
         "resources": out_res,
         "videos": {"total": len(videos), "segments": segments, "transcripts": {"ok": ok, "by_route": by_route}},
         "skipped": skipped,
+        "rendered_by_browser": rendered,
         "summary": summary,
         "agent": agent,
         "proposals": [{"id": r.key, "skill_id": (r.skill_ids or [None])[0], "title": r.title, "url": r.url,

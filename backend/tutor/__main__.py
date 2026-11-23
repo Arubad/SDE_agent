@@ -18,16 +18,27 @@ import sys
 
 
 def _context(settings):
+    """The API's job dependencies, the MCP gateway included (started; stop it and dispose the engine when done),
+    so a CLI ingest renders `needs_browser` pages too."""
     from backend.tutor.db import make_engine, migrate
     from backend.tutor.ingest.embed import make_embedder
+    from backend.tutor.ingest.handlers import settled_hook
     from backend.tutor.ingest.index import make_index
     from backend.tutor.ingest.net import make_net
     from backend.tutor.jobs.worker import JobContext
+    from backend.tutor.mcp.build import build_gateway
 
     migrate(settings.database_url)
     engine = make_engine(settings.database_url)
-    return JobContext(engine=engine, net=make_net(settings, engine), settings=settings,
-                      index=make_index(settings, make_embedder(settings)))
+    try:
+        net, embedder = make_net(settings, engine), make_embedder(settings)
+        index = make_index(settings, embedder)
+        gateway = build_gateway(engine, net, index, embedder, settings, settled_hook(engine, settings))
+    except BaseException:
+        engine.dispose()
+        raise
+    gateway.start()  # a loop thread only: no server is contacted before its first use
+    return JobContext(engine=engine, net=net, settings=settings, index=index, gateway=gateway)
 
 
 def _roadmap_id(engine, slug: str):
@@ -64,6 +75,7 @@ def _command(args, settings) -> None:
             with Session(ctx.engine) as s:
                 print(json.dumps(build_report(s, s.get(Roadmap, rid)), indent=2))
     finally:
+        ctx.gateway.stop()
         ctx.engine.dispose()
 
 

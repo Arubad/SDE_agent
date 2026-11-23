@@ -45,6 +45,7 @@ from backend.tutor.ingest.segment import choose_segments
 from backend.tutor.ingest.video import TranscriptRouter, video_document
 from backend.tutor.jobs import queue, worker
 from backend.tutor.jobs.queue import PermanentError, RetryableError
+from backend.tutor.mcp.browser import RenderResult, render_page
 from backend.tutor.models import Document, Job, Resource, Roadmap
 
 log = logging.getLogger(__name__)
@@ -218,22 +219,53 @@ def fetch_page(ctx, job: Job) -> dict:
     if not owner and _owned_elsewhere(ctx.engine, res, url):
         return {"duplicate": True}
     fr = ctx.net.fetcher.get(url)
+    if fr.outcome == "needs_browser":
+        rendered = _render(ctx, res, url)
+        if isinstance(rendered, RenderResult):
+            page = extract_page(rendered.html, rendered.final_url)
+            if _has_text(page):
+                return _store_page(ctx, job, res, url, rendered.html, page, rendered.final_url, owner, depth,
+                                   {"rendered": "browser"})
+            rendered = "no text after rendering"
+        return _non_ok(ctx, job, res, url, "page", dataclasses.replace(fr, reason=rendered), owner)
     if fr.outcome != "ok":
         return _non_ok(ctx, job, res, url, "page", fr, owner)
     if fr.content_type == "application/pdf" or fr.body[:5] == b"%PDF-":
         return _store_pdf(ctx, job, res, url, fr, owner)
     html = fr.body.decode("utf-8", "replace")
-    page = extract_page(html, fr.url)
-    has_text = bool(page.markdown.strip()) and page.word_count > 0
+    # every hop was address-checked by the fetcher
+    return _store_page(ctx, job, res, url, html, extract_page(html, fr.url), fr.url, owner, depth, {})
+
+
+def _has_text(page) -> bool:
+    return bool(page.markdown.strip()) and page.word_count > 0
+
+
+def _render(ctx, res: Resource, url: str) -> RenderResult | str:
+    """A `needs_browser` page rendered in the gateway's browser, or why not (kept as the skipped page's detail)."""
+    if not ctx.settings.browser_render:
+        return "browser rendering is off"
+    if ctx.gateway is None:
+        return "browser unavailable: no gateway"
+    return render_page(ctx.gateway, url, scope_host=(urlsplit(_scope_url(res)).hostname or "").lower(),
+                       resolver=ctx.net.fetcher.resolver)
+
+
+def _store_page(ctx, job: Job, res: Resource, url: str, html: str, page, final_url: str, owner: bool, depth: int,
+                meta: dict) -> dict:
+    """Store a fetched (or browser-rendered) HTML page, enqueue what it links to and, if it has text, index it.
+    `final_url` (where the page ended up) has passed the address checks: the fetcher's, or the gateway's policy."""
+    has_text = _has_text(page)
     doc_id = _store(ctx.engine, res, url=url, kind="page", owner=owner, title=page.title or url,
                     markdown=page.markdown, status="ok" if has_text else "skipped",
                     reason=None if has_text else "no_text",
                     content_hash=hashlib.sha256(page.markdown.encode()).hexdigest(),  # == content_hash(fr)
-                    meta={"depth": depth, "final_url": fr.url, "words": page.word_count, "lang": page.lang})
+                    meta={"depth": depth, "final_url": final_url, "words": page.word_count, "lang": page.lang,
+                          **meta})
     if owner and depth == 0:
-        _record_final_url(ctx.engine, res, fr.url)  # every hop was address-checked by the fetcher
+        _record_final_url(ctx.engine, res, final_url)
     scope = _scope_url(res)
-    found = discover(html, fr.url, focus=list(res.focus or []), root=_root_path(scope))
+    found = discover(html, final_url, focus=list(res.focus or []), root=_root_path(scope))
     queued = _enqueue_discoveries(ctx, job, res, found, depth, scope)
     if has_text:
         _chunk(ctx, job, res, doc_id)

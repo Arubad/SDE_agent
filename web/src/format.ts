@@ -7,7 +7,7 @@ const REASONS: Record<string, string> = {
   login_wall: "Behind a login",
   paywall: "Behind a paywall",
   bot_protection: "Blocked by the site's bot protection",
-  needs_browser: "Needs a browser to render; browser support arrives with Phase 3",
+  needs_browser: "Needs a browser to render, and the browser could not render it",
   too_large: "Too large to ingest",
   unsupported_type: "Unsupported file type",
   private_address: "Points at a private network address",
@@ -28,6 +28,11 @@ const REASONS: Record<string, string> = {
 export function reasonText(code: string | null | undefined): string {
   if (!code) return "";
   return REASONS[code] ?? code;
+}
+
+/** A resource's page count, with how many of those pages the browser rendered when any were. */
+export function pagesText(pages: number, rendered: number | null | undefined): string {
+  return rendered && rendered > 0 ? `${pages} (${rendered} rendered)` : String(pages);
 }
 
 /** The URL of a skipped item, or a placeholder when the report has none (a dead job whose document is gone). */

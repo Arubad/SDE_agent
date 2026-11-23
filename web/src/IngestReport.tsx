@@ -1,6 +1,6 @@
 import type { AgentAction, AgentRun, Proposal, Report } from "./api";
 import { ExternalLink } from "./ExternalLink";
-import { hostOf, reasonText, skippedUrlText, statusText } from "./format";
+import { hostOf, pagesText, reasonText, skippedUrlText, statusText } from "./format";
 
 const OUTCOME_LABELS: Record<string, string> = { ok: "done", refused: "refused", error: "failed" };
 
@@ -155,7 +155,7 @@ export function IngestReport({
                     <span className="reason">{resourceNote(r.status, r.reason)}</span>
                   )}
                 </td>
-                <td className="num">{r.pages}</td>
+                <td className="num">{pagesText(r.pages, r.rendered_by_browser)}</td>
                 <td className="num">{r.videos}</td>
                 <td className="num">{r.chunks}</td>
               </tr>

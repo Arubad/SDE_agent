@@ -50,6 +50,7 @@ class Settings:
     ingest_agent_max_steps: int = 12
     ingest_agent_recovery_rounds: int = 2
     min_chunks_per_skill: int = 5  # a skill with fewer indexed chunks is a gap the recoverer looks at
+    browser_render: bool = True  # BROWSER_RENDER: render `needs_browser` pages in the gateway's browser
 
     def validate(self) -> None:
         if self.public_mode and not config.PREMIUM_PASSCODE:
@@ -135,4 +136,6 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
         github_token=(env.get("GITHUB_TOKEN") or "").strip() or None,
         ingest_agent=(_parse_bool("INGEST_AGENT", env.get("INGEST_AGENT"))
                       if (env.get("INGEST_AGENT") or "").strip() else d.ingest_agent),
+        browser_render=(_parse_bool("BROWSER_RENDER", env.get("BROWSER_RENDER"))
+                        if (env.get("BROWSER_RENDER") or "").strip() else d.browser_render),
     )

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
@@ -27,10 +26,8 @@ from backend.tutor.ingest.embed import make_embedder
 from backend.tutor.ingest.index import make_index
 from backend.tutor.ingest.net import make_net
 from backend.tutor.jobs.worker import JobContext, WorkerPool, maybe_settle
-from backend.tutor.mcp.build import OWN_SERVERS, build_own_servers
-from backend.tutor.mcp.gateway import Gateway
+from backend.tutor.mcp.build import OWN_SERVERS, build_gateway, build_own_servers
 from backend.tutor.mcp.http import mount_mcp
-from backend.tutor.mcp.registry import load_registry
 from backend.tutor.repo import DuplicateRoadmap, create_roadmap, get_roadmap_by_slug, list_roadmaps
 from backend.tutor.roadmap.parse import normalize_spec
 from backend.tutor.settings import Settings
@@ -134,10 +131,7 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
             # Two sets from the same (thread-safe) dependencies: a FastMCP instance is never shared between event
             # loops. One is served over HTTP on this (uvicorn's) loop, the other runs inproc on the gateway's loop.
             deps = (app.state.engine, app.state.net, index, embedder, settings, on_settled)
-            http_servers, inproc_servers = build_own_servers(*deps), build_own_servers(*deps)
-            registry = load_registry(settings.mcp_registry, os.environ)
-            app.state.gateway = Gateway(registry, engine=app.state.engine, inproc=inproc_servers,
-                                        env=os.environ)
+            http_servers, app.state.gateway = build_own_servers(*deps), build_gateway(*deps)
             app.state.gateway.start()  # a loop thread only: no server is contacted before its first use
             stack.callback(app.state.gateway.stop)
             app.state.worker_pool = None

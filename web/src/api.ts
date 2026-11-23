@@ -189,6 +189,8 @@ export interface ReportResource {
   pages: number;
   videos: number;
   chunks: number;
+  /** Pages rendered by the gateway's browser; present only when some were. */
+  rendered_by_browser?: number;
 }
 
 export interface AgentRun {
@@ -221,6 +223,8 @@ export interface Report {
   videos: { total: number; segments: Record<string, number>; transcripts: Record<string, unknown> };
   /** `url` is null when the report could not tie a failure to a URL (e.g. a dead job whose document is gone). */
   skipped: { url: string | null; reason: string }[];
+  /** Pages rendered by the gateway's browser, over the whole roadmap (absent from older servers). */
+  rendered_by_browser?: number;
   summary: string;
   agent?: { runs: AgentRun[]; actions: AgentAction[] };
   proposals?: Proposal[];

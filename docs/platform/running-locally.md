@@ -78,6 +78,7 @@ Set these in `backend/.env` (they are listed there, commented, with their defaul
 | `EMBEDDER` | `bge` | `bge` (local model) or `hash` (for tests). |
 | `GITHUB_TOKEN` | none | Raises GitHub API rate limits when repo READMEs are read. |
 | `INGEST_AGENT` | `true` | The Claude Haiku ingestion agent. Its budget is fixed at $0.05 per roadmap. |
+| `BROWSER_RENDER` | `true` | Pages whose HTML has no text (`needs_browser`) are rendered in the MCP gateway's browser (the `playwright` server) and then crawled like any page. With it off, or the browser down, they are skipped as before. |
 
 **Transcript routes and YouTube's terms.** Sanctioned by YouTube: the Data API (with `YOUTUBE_API_KEY`), oEmbed, and
 the opt-in `gemini` route (Google's official API with the video URL, using `GEMINI_API_KEY`). Not sanctioned by
