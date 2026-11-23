@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session
 
 from backend.tutor.jobs import queue
 from backend.tutor.jobs.queue import PermanentError, RetryableError, job_key
-from backend.tutor.jobs.worker import JobContext, WorkerPool, reap_and_settle, run_one, run_until_idle
+from backend.tutor.jobs.worker import (STUCK_AFTER_S, JobContext, WorkerPool, reap_and_settle, run_one,
+                                       run_until_idle, sweep_stuck)
 from backend.tutor.models import Job, Roadmap
 
 
@@ -275,3 +276,95 @@ def test_empty_handlers_claims_nothing(engine, rid, ctx):
     (jid,) = _add(engine, rid)
     assert run_one(ctx, {}, "w", roadmap_id=rid) is False
     assert _get(engine, jid).status == "queued"
+
+
+# -- the sweep for roadmaps left ingesting/finalizing by a crash ---------------------------------------
+@pytest.fixture
+def roadmaps(engine):
+    made = []
+
+    def make(status, job_status="done", age_s=None):
+        """A roadmap in `status` with one job in `job_status`, last updated `age_s` seconds before queue.clock()."""
+        r = uuid.uuid4()
+        with Session(engine) as s:
+            s.add(Roadmap(id=r, slug=f"sw-{r.hex[:10]}", title="t", source_text="x", status=status))
+            s.flush()
+            j = queue.enqueue(s, type="t", roadmap_id=r, payload={}, key=f"sw:{r}")
+            j.status = job_status
+            j.updated_at = queue.clock() - timedelta(seconds=age_s if age_s is not None else STUCK_AFTER_S + 5)
+            s.commit()
+        made.append(r)
+        return r
+    yield make
+    with Session(engine) as s:
+        s.execute(text("delete from roadmaps where id = any(:ids)"), {"ids": made})
+        s.commit()
+
+
+def test_sweep_settles_stuck_roadmaps_and_leaves_active_ones(engine, roadmaps, fake_clock):
+    stuck_ingesting = roadmaps("ingesting")  # died between complete() and the settle check
+    stuck_finalizing = roadmaps("finalizing")  # died inside the hook, after the CAS
+    dead_last = roadmaps("ingesting", job_status="dead")
+    busy = roadmaps("ingesting", job_status="queued")  # work remains (e.g. backing off)
+    running = roadmaps("finalizing", job_status="running")
+    recent = roadmaps("finalizing", age_s=STUCK_AFTER_S - 5)  # a hook may still be running: not yet
+    done = roadmaps("ready")
+    calls = []
+    sweep_stuck(engine, calls.append)
+    assert {stuck_ingesting, stuck_finalizing, dead_last} <= set(calls)
+    assert not {busy, running, recent, done} & set(calls)
+    assert calls.count(stuck_ingesting) == calls.count(stuck_finalizing) == 1
+    assert _status(engine, stuck_ingesting) == "finalizing"  # through the normal CAS
+    assert [_status(engine, r) for r in (busy, running, recent, done)] == ["ingesting", "finalizing",
+                                                                           "finalizing", "ready"]
+
+
+def test_sweep_without_a_hook_does_nothing(engine, roadmaps, fake_clock):
+    stuck = roadmaps("ingesting")
+    sweep_stuck(engine, None)
+    assert _status(engine, stuck) == "ingesting"  # no hook to finish it: do not strand it in finalizing
+
+
+def test_sweep_races_safely_with_itself(engine, roadmaps, fake_clock):
+    stuck = roadmaps("ingesting")
+    calls, barrier = [], threading.Barrier(3)
+
+    def go():
+        barrier.wait()
+        sweep_stuck(engine, calls.append)
+    ts = [threading.Thread(target=go) for _ in range(3)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert 1 <= calls.count(stuck)  # the CAS lets one sweep win; a later one may see `finalizing` and re-run
+    assert _status(engine, stuck) == "finalizing"  # the hook, which is idempotent (finalize_roadmap is)
+
+
+def test_pool_start_sweeps_stuck_roadmaps(engine, roadmaps, ctx):
+    stuck = roadmaps("finalizing")
+    seen = threading.Event()
+    pool = WorkerPool(ctx, {"t": lambda c, j: None}, 1, on_settled=lambda r: seen.set() if r == stuck else None)
+    pool.start()
+    try:
+        assert seen.wait(10)
+    finally:
+        pool.stop(5)
+
+
+# -- worker ids ----------------------------------------------------------------------------------------
+def test_worker_ids_are_unique_across_pools_and_processes(engine, rid, ctx):
+    import os
+    import socket
+
+    a = WorkerPool(ctx, {"t": lambda c, j: None}, 2)
+    b = WorkerPool(ctx, {"t": lambda c, j: None}, 2)  # e.g. the API's pool and a CLI `ingest` pool
+    ids = a.worker_ids + b.worker_ids
+    assert len(set(ids)) == 4
+    assert all(socket.gethostname() in w and str(os.getpid()) in w for w in ids)
+    (jid,) = _add(engine, rid)
+    run_until_idle(ctx, {"t": lambda c, j: None}, roadmap_id=rid)  # the inline runner too
+    with Session(engine) as s:
+        assert s.get(Job, jid).status == "done"
+    claimed = []
+    _add(engine, rid, prefix="again")
+    run_until_idle(ctx, {"t": lambda c, j: claimed.append(j.locked_by)}, roadmap_id=rid)
+    assert claimed and claimed[0] != "inline" and str(os.getpid()) in claimed[0]

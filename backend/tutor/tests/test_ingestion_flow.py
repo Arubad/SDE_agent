@@ -444,6 +444,32 @@ def test_ingest_roadmap_with_worker_pool(engine, tmp_path):
     assert H.ingest_roadmap(ctx, rid, until_idle=False, workers=2, timeout_s=60) == "ready"
 
 
+@pytest.mark.parametrize("left_in", ["ingesting", "finalizing"])
+def test_sweep_finishes_a_roadmap_left_by_a_crash(engine, tmp_path, clock, left_in):
+    """The process died after the last job (`ingesting`, no settle check ran) or inside the hook (`finalizing`).
+    The reaper's sweep settles it through the normal path, and running the hook again is harmless."""
+    from backend.tutor.jobs.worker import STUCK_AFTER_S, sweep_stuck
+
+    ctx = _ctx(engine, _e2e_site(tmp_path))
+    rid = _roadmap(engine, "crash", [("docs", "doc", "https://flow.test/docs/"),
+                                     ("gone", "article", "https://flow.test/gone")])
+    run_until_idle(ctx, HANDLERS, roadmap_id=rid, on_settled=None)  # every job done; nobody finalized
+    with session_scope(engine) as s:
+        s.execute(text("UPDATE roadmaps SET status = :st WHERE id = :id"), {"st": left_in, "id": rid})
+    hook = H.settled_hook(engine, ctx.settings)
+    sweep_stuck(engine, hook)
+    assert _status(engine, rid) == left_in  # its last job finished moments ago: a hook may still be running
+    clock[0] += timedelta(seconds=STUCK_AFTER_S + 1)
+    sweep_stuck(engine, hook)
+    first = (_status(engine, rid), {k: (r.status, r.reason, r.stats) for k, r in _resources(engine, rid).items()})
+    assert first[0] == "ready_with_gaps" and first[1]["gone"][:2] == ("skipped", "not_found")
+    with session_scope(engine) as s:  # died inside the hook after finalizing had committed: run it again
+        s.execute(text("UPDATE roadmaps SET status = 'finalizing' WHERE id = :id"), {"id": rid})
+    sweep_stuck(engine, hook)
+    assert (_status(engine, rid), {k: (r.status, r.reason, r.stats)
+                                   for k, r in _resources(engine, rid).items()}) == first
+
+
 def test_finalize_failure_marks_roadmap_failed(engine, tmp_path, clock, monkeypatch):
     ctx = _ctx(engine, _site(tmp_path / "net", {"https://flow.test/one": _page("One", _prose("Finalize"))}))
     rid = _roadmap(engine, "fin", [("one", "doc", "https://flow.test/one")])

@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import logging
+import os
+import socket
 import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import Engine, text
@@ -22,6 +25,16 @@ Handler = Callable[["JobContext", Job], "dict | None"]
 SettledHook = Callable[[uuid.UUID], None]
 POLL_S = 1.0
 REQUEUE_EVERY_S = 60.0
+# A roadmap still `ingesting`/`finalizing` with no queued or running job, whose last job changed longer ago than
+# this, was left behind by a crash (or a failed settle check); the reaper settles it. Long enough that a settle
+# hook that is still running (it only reads the KB and finalizes, in seconds) is not run a second time alongside.
+STUCK_AFTER_S = 60.0
+
+
+def process_tag() -> str:
+    """`<hostname>-<pid>-<random>`: unique to this process (and call), so the lease fence (`locked_by`) can tell
+    apart workers of the API and of a CLI `ingest` running at the same time, on one host or several."""
+    return f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
 
 
 @dataclass
@@ -60,6 +73,44 @@ def _maybe_settle(engine: Engine, roadmap_id: uuid.UUID, on_settled: SettledHook
 
 
 maybe_settle = _maybe_settle  # public name for callers outside the worker loop (CLI, approve)
+
+
+def sweep_stuck(engine: Engine, on_settled: SettledHook | None, older_than_s: float = STUCK_AFTER_S) -> list:
+    """Settle roadmaps a crash left `ingesting` (died between the last `complete` and the settle check, or the
+    check failed) or `finalizing` (died inside the hook): no queued/running job, and nothing touched their jobs
+    for `older_than_s` (a roadmap with no jobs at all counts from its creation). `ingesting` goes through the
+    usual CAS, so only one caller fires the hook; `finalizing` fires the hook again, which is idempotent
+    (`finalize_roadmap` recomputes everything in one transaction; starting a recovery round is a CAS plus a
+    unique job key). Without a hook nothing is done (the CAS alone would strand the roadmap in `finalizing`).
+    Never raises; returns the roadmap ids it settled."""
+    if on_settled is None:
+        return []
+    try:
+        cutoff = queue.clock() - timedelta(seconds=older_than_s)
+        with Session(engine) as s:
+            rows = s.execute(text(
+                "SELECT r.id, r.status FROM roadmaps r WHERE r.status IN ('ingesting', 'finalizing') "
+                "AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.roadmap_id = r.id "
+                "AND j.status IN ('queued', 'running')) "
+                "AND COALESCE((SELECT max(j.updated_at) FROM jobs j WHERE j.roadmap_id = r.id), r.created_at) "
+                "< :cutoff ORDER BY r.id"), {"cutoff": cutoff}).all()
+    except Exception:
+        log.exception("could not look for stuck roadmaps")
+        return []
+    for rid, status in rows:
+        log.warning("roadmap %s was left %s with no work; settling it", rid, status)
+        if status == "ingesting":
+            _maybe_settle(engine, rid, on_settled)
+            continue
+        try:
+            with Session(engine) as s:  # re-check: another sweep or worker may have moved it meanwhile
+                still = s.execute(text("SELECT status FROM roadmaps WHERE id = :id"), {"id": rid}).scalar()
+                idle = queue.is_roadmap_settled(s, rid)
+            if still == "finalizing" and idle:
+                on_settled(rid)
+        except Exception:
+            log.exception("settled hook failed for stuck roadmap %s", rid)
+    return [rid for rid, _ in rows]
 
 
 def reap_and_settle(engine: Engine, on_settled: SettledHook | None = None, lease_s: int = 600) -> int:
@@ -115,9 +166,10 @@ def run_until_idle(
     roadmap_id: uuid.UUID | None = None,
     max_jobs: int = 10_000,
     on_settled: SettledHook | None = None,
-    worker_id: str = "inline",
+    worker_id: str | None = None,
 ) -> int:
     """Run claimable jobs until none are due (jobs backing off in the future are not waited for)."""
+    worker_id = worker_id or f"inline-{process_tag()}"
     n = 0
     while n < max_jobs and run_one(ctx, handlers, worker_id, on_settled=on_settled, roadmap_id=roadmap_id):
         n += 1
@@ -131,11 +183,13 @@ class WorkerPool:
         self.on_settled, self.tracer_provider = on_settled, tracer_provider
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
+        tag = process_tag()
+        self.worker_ids = [f"{tag}-{i}" for i in range(n)]  # the lease owner (`locked_by`) of each thread
 
     def start(self) -> None:
         self._stop.clear()
-        for i in range(self.n):
-            t = threading.Thread(target=self._loop, args=(f"worker-{i}", i == 0), name=f"job-worker-{i}", daemon=True)
+        for i, worker_id in enumerate(self.worker_ids):
+            t = threading.Thread(target=self._loop, args=(worker_id, i == 0), name=f"job-worker-{i}", daemon=True)
             t.start()
             self._threads.append(t)
 
@@ -148,12 +202,13 @@ class WorkerPool:
     def _loop(self, worker_id: str, reaper: bool) -> None:
         import time
 
-        last_requeue = 0.0
+        last_requeue = None  # the first tick runs at once: a restart picks up what a crash left behind
         while not self._stop.is_set():
             try:
-                if reaper and time.monotonic() - last_requeue >= REQUEUE_EVERY_S:
+                if reaper and (last_requeue is None or time.monotonic() - last_requeue >= REQUEUE_EVERY_S):
                     last_requeue = time.monotonic()
                     reap_and_settle(self.ctx.engine, self.on_settled)
+                    sweep_stuck(self.ctx.engine, self.on_settled)
                 if run_one(self.ctx, self.handlers, worker_id, on_settled=self.on_settled,
                            tracer_provider=self.tracer_provider):
                     continue
