@@ -72,18 +72,29 @@ def test_list_servers_hides_secrets(client):
     assert c.status_code == 200 and TOKEN not in c.text and c.json()["name"] == "github"
 
 
-def test_toggle_persists_and_updates_health(engine, tmp_path, registry):
-    with local_client(_app(engine, tmp_path, registry)) as first:
-        assert first.get("/api/mcp/servers").json()[0]["state"] == "ok"
-        r = first.put("/api/mcp/servers/web", json={"enabled": False})
-        assert r.status_code == 200
-        assert r.json()["state"] == "disabled" and r.json()["enabled"] is False
-        by = {h["name"]: h for h in first.get("/api/mcp/servers").json()}
-        assert by["web"]["state"] == "disabled"
-    with local_client(_app(engine, tmp_path, registry)) as second:  # an app restart on the same database
-        assert {h["name"]: h for h in second.get("/api/mcp/servers").json()}["web"]["state"] == "disabled"
-        r = second.put("/api/mcp/servers/web", json={"enabled": True})
-        assert r.json()["state"] == "ok" and r.json()["enabled"] is True
+TOGGLED = "toggle-test-web"  # not a real server's name: its stored on/off row can never switch off the real `web`
+
+
+def test_toggle_persists_and_updates_health(engine, tmp_path):
+    reg = tmp_path / "toggle-servers.json"
+    reg.write_text(json.dumps({"servers": [
+        {"name": TOGGLED, "namespace": "web", "transport": "inproc", "target": "web", "enabled": True}],
+        "agents": {}}))
+    try:
+        with local_client(_app(engine, tmp_path, reg)) as first:
+            assert first.get("/api/mcp/servers").json()[0]["state"] == "ok"
+            r = first.put(f"/api/mcp/servers/{TOGGLED}", json={"enabled": False})
+            assert r.status_code == 200
+            assert r.json()["state"] == "disabled" and r.json()["enabled"] is False
+            by = {h["name"]: h for h in first.get("/api/mcp/servers").json()}
+            assert by[TOGGLED]["state"] == "disabled"
+        with local_client(_app(engine, tmp_path, reg)) as second:  # an app restart on the same database
+            assert {h["name"]: h for h in second.get("/api/mcp/servers").json()}[TOGGLED]["state"] == "disabled"
+            r = second.put(f"/api/mcp/servers/{TOGGLED}", json={"enabled": True})
+            assert r.json()["state"] == "ok" and r.json()["enabled"] is True
+    finally:  # whatever failed above, leave no stored override behind
+        with session_scope(engine) as s:
+            s.execute(text("DELETE FROM mcp_servers WHERE name = :n"), {"n": TOGGLED})
 
 
 def test_put_requires_a_boolean(client):
