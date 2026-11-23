@@ -459,6 +459,56 @@ def test_pdf_and_github_repo(engine, tmp_path, clock, monkeypatch):
     assert all("github" in u or auth is None for u, auth in seen)
 
 
+def _repo_files(site: dict, repo: str, with_docs: bool = True) -> None:
+    raw = f"https://raw.githubusercontent.com/{repo}/HEAD"
+    site[f"{raw}/README.md"] = {"content_type": "text/plain", "body": f"# {repo}\n\n" + _prose(f"Readme of {repo}")}
+    if with_docs:
+        site[f"https://api.github.com/repos/{repo}/contents/docs"] = {
+            "content_type": "application/json", "body": json.dumps([
+                {"type": "file", "name": "a.md", "path": "docs/a.md", "download_url": f"{raw}/docs/a.md"}])}
+        site[f"{raw}/docs/a.md"] = {"content_type": "text/plain", "body": "# A\n\n" + _prose(f"Docs of {repo}")}
+
+
+def _repo_crawl_site(tmp_path, n: int):
+    pages = {"https://flow.test/docs/": _page("Docs", _prose("Repo hub"), "".join(
+        f'<a href="https://github.com/acme/r{i}">R{i}</a>' for i in range(n)))}
+    for i in range(n):
+        _repo_files(pages, f"acme/r{i}")
+    return _site(tmp_path / "net", pages)
+
+
+def test_discovered_repos_take_page_slots(engine, tmp_path, clock):
+    ctx = _ctx(engine, _repo_crawl_site(tmp_path, 5), crawl_max_pages=3)
+    rid = _roadmap(engine, "repos", [("docs", "doc", "https://flow.test/docs/")])
+    _drain(ctx, rid, clock)
+    docs = _docs(engine, rid)
+    repos = {d.meta["repo"] for d in docs if d.kind == "repo_file"}
+    assert len(repos) == 2  # the root page holds one of the 3 slots
+    assert _resources(engine, rid)["docs"].stats["pages"] == 3
+
+
+def test_discovered_repo_stores_readme_only(engine, tmp_path, clock):
+    ctx = _ctx(engine, _repo_crawl_site(tmp_path, 1))
+    seen = []
+    real_get = ctx.net.fetcher.get
+    ctx.net.fetcher.get = lambda url, **kw: (seen.append(url), real_get(url, **kw))[1]
+    rid = _roadmap(engine, "readme", [("docs", "doc", "https://flow.test/docs/")])
+    _drain(ctx, rid, clock)
+    assert [d.url for d in _docs(engine, rid) if d.kind == "repo_file"] == [
+        "https://github.com/acme/r0/blob/HEAD/README.md"]
+    assert not any("api.github.com" in u for u in seen)
+
+
+def test_owner_repo_stores_readme_and_docs(engine, tmp_path, clock):
+    pages: dict = {}
+    _repo_files(pages, "acme/kit")
+    ctx = _ctx(engine, _site(tmp_path / "net", pages))
+    rid = _roadmap(engine, "owner", [("repo", "repo", "https://github.com/acme/kit")])
+    _drain(ctx, rid, clock)
+    assert sorted(d.url for d in _docs(engine, rid) if d.kind == "repo_file") == [
+        "https://github.com/acme/kit/blob/HEAD/README.md", "https://github.com/acme/kit/blob/HEAD/docs/a.md"]
+
+
 def test_video_summary_format():
     assert video_summary(0, {}, 0, {}) == "0 videos"
     segs = {"creator": 18, "comments": 9, "transcript_split": 6, "whole": 9}

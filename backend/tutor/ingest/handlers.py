@@ -213,14 +213,23 @@ def fetch_page(ctx, job: Job) -> dict:
 
 
 def _enqueue_discoveries(ctx, job: Job, res: Resource, found, depth: int) -> dict:
+    """Enqueue what a crawled page links to. Videos and playlists are free; PDFs, GitHub repos and same-site
+    pages each reserve one of the resource's `crawl_max_pages` slots, and once none is left nothing more is
+    enqueued (`full`) and the crawl stops following links."""
     rid, rs = str(res.id), job.roadmap_id
     for vid in found.videos:
         _enqueue(ctx, job, "video", {"resource_id": rid, "video_id": vid}, (vid,))
     for lst in found.playlists:
         _enqueue(ctx, job, "expand_playlist", {"resource_id": rid, "list_id": lst}, (lst,))
-    for repo in found.repos:
-        _enqueue(ctx, job, "github_repo", {"resource_id": rid, "repo": repo}, (repo,))
     cap, full, links = ctx.settings.crawl_max_pages, False, 0
+    # a repo found on a crawled page costs one page slot, like a discovered PDF, and ingests its README only
+    for repo in found.repos:
+        if _key_exists(ctx.engine, "github_repo", rs, repo):
+            continue
+        if not reserve_page(ctx.engine, res.id, cap):
+            full = True
+            break
+        _enqueue(ctx, job, "github_repo", {"resource_id": rid, "repo": repo}, (repo,))
     for pdf in found.pdfs:
         if _key_exists(ctx.engine, "pdf", rs, pdf):
             continue
@@ -381,10 +390,13 @@ def _github_docs(ctx, repo: str) -> list[str]:
 
 
 def github_repo(ctx, job: Job) -> dict:
+    """A resource whose own URL is a repo ingests README.md plus up to GITHUB_DOCS_MAX `docs/**/*.md` files and
+    takes no page slot. A repo discovered on a crawled page (non-owner) ingests README.md only; its page slot
+    was reserved when it was enqueued."""
     p = job.payload
     res, repo, owner = _resource(ctx.engine, p["resource_id"]), p["repo"], p.get("owner", False)
     stored = 0
-    for path in ["README.md", *_github_docs(ctx, repo)]:
+    for path in ["README.md", *(_github_docs(ctx, repo) if owner else [])]:
         url = f"https://github.com/{repo}/blob/HEAD/{path}"
         if not owner and _owned_elsewhere(ctx.engine, res, url):
             continue
