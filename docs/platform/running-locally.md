@@ -30,6 +30,93 @@ those always point at the containers whatever `.env` says.
 Stop with `docker compose down`. Data lives in the `pgdata` and `qdrant_data` volumes. `docker compose down -v`
 deletes them too.
 
+## Search (SearXNG) and `SEARXNG_SECRET`
+
+The stack includes a SearXNG service that the resource resolver and the ingestion agent use to find pages and
+videos. Compose refuses to start without a secret, so set one first:
+
+```bash
+export SEARXNG_SECRET=$(openssl rand -hex 32)   # or put SEARXNG_SECRET=... in a .env next to compose.yaml
+docker compose up -d --wait
+```
+
+The secret is read from the environment, never from the settings file. SearXNG listens on
+http://127.0.0.1:8888 and the API reaches it at `http://searxng:8080`. Its settings are in
+`docker/searxng/settings.yml`, which keeps three engines: duckduckgo, brave and youtube. DuckDuckGo often answers a
+self-hosted instance with a CAPTCHA and returns 0 results, which is why Brave is enabled too. Even so, repeated
+queries can return 0 results for a while. When a resource shows no candidates, paste its URL in the spec review.
+
+## Adding a roadmap
+
+The web app is the normal way:
+
+1. Paste the roadmap text. It is parsed into stages, skills and resources.
+2. In the spec review, edit the spec and pick a search candidate or paste a URL for each resource.
+3. Approve. The workers start ingesting, and the progress view follows the events.
+4. Read the ingestion report: a state for every resource and video, plus the agent's actions.
+5. Approve or dismiss the ingestion agent's proposed resources. Nothing it proposes is ingested before you approve it.
+
+The same steps are the API routes `POST /api/roadmaps`, `POST /api/roadmaps/{slug}/parse`,
+`PUT /api/roadmaps/{slug}/spec`, `POST /api/roadmaps/{slug}/approve`, `GET /api/roadmaps/{slug}/events` (server-sent
+events), `GET /api/roadmaps/{slug}/report` and `POST /api/roadmaps/{slug}/resources/{key}/approve` or `/dismiss`.
+
+## Ingestion settings
+
+Set these in `backend/.env` (they are listed there, commented, with their defaults). Nothing here is required.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SEARXNG_URL` | `http://127.0.0.1:8888` | Search service. Compose sets it to the `searxng` container. An empty value turns search off. |
+| `YOUTUBE_API_KEY` | none | Free YouTube Data API key. Gives better metadata, playlist expansion and chapter timestamps from top comments. Without it, only title and channel (oEmbed) are available. |
+| `TRANSCRIPT_ROUTES` | `captions` | Comma list from `captions`, `ytdlp_cookies`, `gemini`, tried in order. |
+| `YTDLP_COOKIES_BROWSER` | none | Browser whose cookies yt-dlp uses (for example `chrome`). Required when `ytdlp_cookies` is on. |
+| `INGEST_WORKERS` | `2` | Worker threads in the API. `0` starts none. |
+| `CRAWL_MAX_DEPTH` / `CRAWL_MAX_PAGES` | `2` / `50` | Crawl limits for one documentation resource. |
+| `DOMAIN_INTERVAL_S` | `1.0` | Minimum seconds between requests to one host. |
+| `PLAYLIST_MAX_VIDEOS` | `50` | Videos taken from one playlist. |
+| `EMBEDDER` | `bge` | `bge` (local model) or `hash` (for tests). |
+| `GITHUB_TOKEN` | none | Raises GitHub API rate limits when repo READMEs are read. |
+| `INGEST_AGENT` | `true` | The Claude Haiku ingestion agent. Its budget is fixed at $0.05 per roadmap. |
+
+**Transcript routes and YouTube's terms.** Captions is the default. The `ytdlp_cookies` route (yt-dlp with your
+browser's cookies) and the `gemini` route (Gemini with the video URL) are opt-in. Some routes are against YouTube's
+terms of service. You are responsible for following them, so turn one on only if you accept that.
+
+## Command line
+
+The same module that serves the API also works on one roadmap from the terminal. It needs the same environment as
+the API: Postgres and Qdrant, and SearXNG for anything that searches.
+
+```bash
+python -m backend.tutor [--create-db]                  # serve the API
+python -m backend.tutor ingest <slug> [--until-idle]   # run the ingestion workers in the foreground
+python -m backend.tutor recheck <slug>                 # re-check every resource URL (ok / changed / dead)
+python -m backend.tutor report <slug>                  # print the ingestion report as JSON
+python -m backend.tutor import-sde [--limit N]         # import the demo SDE knowledge base as roadmap sde-mastery
+```
+
+`ingest` refuses a roadmap that is still `draft` or `parsed`; approve it first. `--until-idle` runs inline and
+stops once no job is due, instead of waiting for a final status. `import-sde` loads the demo's knowledge base into
+the platform without crawling. It skips cross-document near-duplicate removal, because the demo corpus is already
+cleaned.
+
+### Running from a virtualenv
+
+To run the platform outside Docker, start only the services (`docker compose up -d postgres qdrant searxng`; the
+Postgres service publishes no host port, so add one with an override file or run your own Postgres), then run
+`python -m backend.tutor --create-db` from the repo root with the defaults pointing at `127.0.0.1`: Postgres on
+5432, Qdrant on 6333 and SearXNG on 8888.
+
+## Evals and results
+
+- Ingestion eval, no network and no LLM: `python -m backend.tutor.eval.ingestion_eval` (add `--ci` for the
+  committed fixtures only). Latest: `backend/tutor/eval/results/ingestion_latest.md`.
+- Ingestion agent eval: `python -m backend.tutor.eval.ingest_agent_eval` replays recorded Haiku runs for free.
+  `--record` calls Haiku live and costs money. Latest: `backend/tutor/eval/results/ingest_agent_latest.md`.
+- A live Kubernetes ingestion, written up in [ingestion-report-kubernetes.md](ingestion-report-kubernetes.md).
+- SDE retrieval: `backend/tutor/eval/results/sde_retrieval_test_latest.md`. The platform's parent-child chunking
+  scores below the demo's `v2_hybrid` on the demo's own questions, so this is a negative result.
+
 ## Tracing with Phoenix
 
 ```bash

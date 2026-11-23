@@ -1,14 +1,38 @@
 {
   "https://kubernetes.io/docs/concepts/": {
     "status": 200,
-    "content_type": "text/html",
-    "file": "k8s-docs-concepts.html",
+    "content_type": "text/html; charset=UTF-8",
+    "file": "kubernetes-io-docs-concepts-dfb5fe00.html",
     "headers": {}
   },
-  "https://kubernetes.io/docs/tutorials/": {
+  "https://kubernetes.io/docs/concepts/architecture/": {
     "status": 200,
-    "content_type": "text/html",
-    "file": "k8s-docs-tutorials.html",
+    "content_type": "text/html; charset=UTF-8",
+    "file": "kubernetes-io-docs-concepts-architecture-1d01955f.html",
+    "headers": {}
+  },
+  "https://kubernetes.io/docs/concepts/overview/components/": {
+    "status": 200,
+    "content_type": "text/html; charset=UTF-8",
+    "file": "kubernetes-io-docs-concepts-overview-components-ba2697cf.html",
+    "headers": {}
+  },
+  "https://kubernetes.io/docs/concepts/workloads/pods/": {
+    "status": 200,
+    "content_type": "text/html; charset=UTF-8",
+    "file": "kubernetes-io-docs-concepts-workloads-pods-412084c5.html",
+    "headers": {}
+  },
+  "https://kubernetes.io/docs/tutorials/stateless-application/": {
+    "status": 200,
+    "content_type": "text/html; charset=UTF-8",
+    "file": "kubernetes-io-docs-tutorials-stateless-application-e02845d1.html",
+    "headers": {}
+  },
+  "https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/": {
+    "status": 200,
+    "content_type": "text/html; charset=UTF-8",
+    "file": "kubernetes-io-docs-concepts-workloads-controllers-statefulse-30975e2e.html",
     "headers": {}
   }
 }

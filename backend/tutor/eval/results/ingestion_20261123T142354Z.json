@@ -1,0 +1,163 @@
+{
+  "tolerance_s": 30.0,
+  "metrics": {
+    "discovery": {
+      "video_precision": 1.0,
+      "video_recall": 1.0,
+      "playlist_precision": 1.0,
+      "playlist_recall": 1.0,
+      "pages": 6
+    },
+    "extraction": {
+      "must_contain_found": 0.9444,
+      "must_not_contain_leakage": 0.0
+    },
+    "route_accuracy": {
+      "accuracy": 1.0,
+      "videos": 9
+    },
+    "boundary_f1": {
+      "transcript_split": {
+        "f1": 0.2358,
+        "precision": 0.2855,
+        "recall": 0.2569,
+        "videos": 6
+      }
+    },
+    "other_routes": {},
+    "skipped": []
+  },
+  "pages": [
+    {
+      "url": "https://kubernetes.io/docs/concepts/",
+      "video_precision": 1.0,
+      "video_recall": 1.0,
+      "playlist_precision": 1.0,
+      "playlist_recall": 1.0,
+      "missing": [
+        "The Concepts section helps you learn about the parts of the Kubernetes system"
+      ],
+      "leaked": []
+    },
+    {
+      "url": "https://kubernetes.io/docs/concepts/architecture/",
+      "video_precision": 1.0,
+      "video_recall": 1.0,
+      "playlist_precision": 1.0,
+      "playlist_recall": 1.0,
+      "missing": [],
+      "leaked": []
+    },
+    {
+      "url": "https://kubernetes.io/docs/concepts/overview/components/",
+      "video_precision": 1.0,
+      "video_recall": 1.0,
+      "playlist_precision": 1.0,
+      "playlist_recall": 1.0,
+      "missing": [],
+      "leaked": []
+    },
+    {
+      "url": "https://kubernetes.io/docs/concepts/workloads/pods/",
+      "video_precision": 1.0,
+      "video_recall": 1.0,
+      "playlist_precision": 1.0,
+      "playlist_recall": 1.0,
+      "missing": [],
+      "leaked": []
+    },
+    {
+      "url": "https://kubernetes.io/docs/tutorials/stateless-application/",
+      "video_precision": 1.0,
+      "video_recall": 1.0,
+      "playlist_precision": 1.0,
+      "playlist_recall": 1.0,
+      "missing": [],
+      "leaked": []
+    },
+    {
+      "url": "https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/",
+      "video_precision": 1.0,
+      "video_recall": 1.0,
+      "playlist_precision": 1.0,
+      "playlist_recall": 1.0,
+      "missing": [],
+      "leaked": []
+    }
+  ],
+  "videos": [
+    {
+      "video_id": "S8eX0MxfnB4",
+      "route": "creator",
+      "expected_route": "creator",
+      "hidden_route": "transcript_split",
+      "boundary_precision": 0.3333,
+      "boundary_recall": 0.1429,
+      "boundary_f1": 0.2
+    },
+    {
+      "video_id": "X48VuDVv0do",
+      "route": "creator",
+      "expected_route": "creator",
+      "hidden_route": "transcript_split",
+      "boundary_precision": 0.1111,
+      "boundary_recall": 0.2308,
+      "boundary_f1": 0.15
+    },
+    {
+      "video_id": "IluVqhoCChw",
+      "route": "creator",
+      "expected_route": "creator",
+      "hidden_route": "transcript_split",
+      "boundary_precision": 0.4,
+      "boundary_recall": 0.2222,
+      "boundary_f1": 0.2857
+    },
+    {
+      "video_id": "l57xKN6OBhY",
+      "route": "creator",
+      "expected_route": "creator",
+      "hidden_route": "transcript_split",
+      "boundary_precision": 0.2353,
+      "boundary_recall": 0.5714,
+      "boundary_f1": 0.3333
+    },
+    {
+      "video_id": "EV47Oxwet6Y",
+      "route": "creator",
+      "expected_route": "creator",
+      "hidden_route": "transcript_split",
+      "boundary_precision": 0.1333,
+      "boundary_recall": 0.16,
+      "boundary_f1": 0.1455
+    },
+    {
+      "video_id": "wqsUfvRyYpw",
+      "route": "transcript_split",
+      "expected_route": "transcript_split"
+    },
+    {
+      "video_id": "EzSkU3Oecuw",
+      "route": "transcript_split",
+      "expected_route": "transcript_split"
+    },
+    {
+      "video_id": "tgVlRCYLRRM",
+      "route": "whole",
+      "expected_route": "whole"
+    },
+    {
+      "video_id": "1nAsxJSsfkw",
+      "route": "creator",
+      "expected_route": "creator",
+      "hidden_route": "transcript_split",
+      "boundary_precision": 0.5,
+      "boundary_recall": 0.2143,
+      "boundary_f1": 0.3
+    }
+  ],
+  "timestamp": "20261123T142354Z",
+  "mode": "full",
+  "embedder": "bge",
+  "labels": "backend/tutor/eval/data/ingestion_labels.json"
+}

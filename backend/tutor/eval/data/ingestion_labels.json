@@ -1,14 +1,467 @@
 {
-  "_note": "PLACEHOLDER so `--ci` runs: it points only at the committed kubernetes.io stand-in fixtures. The live run (Task 15 step 5) replaces this file with labels for the owner's Kubernetes roadmap (>= 6 pages, ~10 videos). Videos here are cached-only, so they are reported as `skipped: not cached` until captured.",
+  "_note": "Ground truth for the kubernetes roadmap, live run 2026-11-23. Labelled by hand from the raw kubernetes.io HTML in http_cache and the raw YouTube descriptions/comments/duration, not from pipeline output (extracted markdown, segment_route, stored chapters). The Docsy print view /docs/concepts/_print/ (4.2 MB) was dropped: the crawler no longer follows print views, and it is too large to commit. It was the only crawled page embedding YouTube videos (wqsUfvRyYpw, EzSkU3Oecuw), so no labelled page has expected videos.",
   "pages": [
-    {"url": "https://kubernetes.io/docs/concepts/", "expected_videos": [], "expected_playlists": [],
-     "must_contain": ["smallest deployable unit", "control plane"], "must_not_contain": ["cookie"]},
-    {"url": "https://kubernetes.io/docs/tutorials/", "expected_videos": [], "expected_playlists": [],
-     "must_contain": ["rolling update"], "must_not_contain": ["Sign in"]}
+    {
+      "url": "https://kubernetes.io/docs/concepts/",
+      "expected_videos": [],
+      "expected_playlists": [],
+      "must_contain": [
+        "The Concepts section helps you learn about the parts of the Kubernetes system",
+        "Technology for packaging an application along with its runtime dependencies",
+        "Concepts for keeping your cloud-native workload secure"
+      ],
+      "must_not_contain": [
+        "Edit this page",
+        "Create an issue",
+        "Print entire section"
+      ]
+    },
+    {
+      "url": "https://kubernetes.io/docs/concepts/architecture/",
+      "expected_videos": [],
+      "expected_playlists": [],
+      "must_contain": [
+        "A Kubernetes cluster consists of a control plane plus a set of worker machines"
+      ],
+      "must_not_contain": [
+        "Edit this page",
+        "Create an issue",
+        "Print entire section"
+      ]
+    },
+    {
+      "url": "https://kubernetes.io/docs/concepts/overview/components/",
+      "expected_videos": [],
+      "expected_playlists": [],
+      "must_contain": [
+        "An overview of the key components that make up a Kubernetes cluster",
+        "A Kubernetes cluster consists of a control plane and one or more worker nodes"
+      ],
+      "must_not_contain": [
+        "Edit this page",
+        "Create an issue",
+        "Print entire section"
+      ]
+    },
+    {
+      "url": "https://kubernetes.io/docs/concepts/workloads/pods/",
+      "expected_videos": [],
+      "expected_playlists": [],
+      "must_contain": [
+        "are the smallest deployable units of computing that you can create and manage in Kubernetes",
+        "as in a pod of whales or pea pod"
+      ],
+      "must_not_contain": [
+        "Edit this page",
+        "Create an issue",
+        "Print entire section"
+      ]
+    },
+    {
+      "url": "https://kubernetes.io/docs/tutorials/stateless-application/",
+      "expected_videos": [],
+      "expected_playlists": [],
+      "must_contain": [
+        "Deploy a Release Using a Canary Deployment",
+        "Exposing an External IP Address to Access an Application in a Cluster",
+        "Example: Deploying PHP Guestbook application with Redis"
+      ],
+      "must_not_contain": [
+        "Edit this page",
+        "Create an issue",
+        "Print entire section"
+      ]
+    },
+    {
+      "url": "https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/",
+      "expected_videos": [],
+      "expected_playlists": [],
+      "must_contain": [
+        "maintains a sticky identity for each of those Pods",
+        "StatefulSet is the workload API object used to manage stateful applications"
+      ],
+      "must_not_contain": [
+        "Edit this page",
+        "Create an issue",
+        "Print entire section"
+      ]
+    }
   ],
   "videos": [
-    {"video_id": "kube000001a", "expected_route": "creator",
-     "creator_chapters": [{"start_s": 0, "title": "Intro"}, {"start_s": 30, "title": "Pods"},
-                          {"start_s": 60, "title": "Services"}]}
+    {
+      "video_id": "S8eX0MxfnB4",
+      "expected_route": "creator",
+      "creator_chapters": [
+        {
+          "start_s": 0,
+          "title": "Intro"
+        },
+        {
+          "start_s": 59,
+          "title": "Kubernetes User vs. Admin"
+        },
+        {
+          "start_s": 239,
+          "title": "Fundamental Concepts"
+        },
+        {
+          "start_s": 432,
+          "title": "Work with Kubernetes"
+        },
+        {
+          "start_s": 725,
+          "title": "Branch out to K8s Administrator or User Side"
+        },
+        {
+          "start_s": 739,
+          "title": "Kubernetes Administrator Learning Path"
+        },
+        {
+          "start_s": 1172,
+          "title": "Kubernetes User or Developer Learning Path"
+        },
+        {
+          "start_s": 1388,
+          "title": "Learning Resources"
+        }
+      ]
+    },
+    {
+      "video_id": "X48VuDVv0do",
+      "expected_route": "creator",
+      "creator_chapters": [
+        {
+          "start_s": 0,
+          "title": "Course Overview"
+        },
+        {
+          "start_s": 138,
+          "title": "What is K8s"
+        },
+        {
+          "start_s": 320,
+          "title": "Main K8s Components"
+        },
+        {
+          "start_s": 1349,
+          "title": "K8s Architecture"
+        },
+        {
+          "start_s": 2087,
+          "title": "Minikube and kubectl - Local Setup"
+        },
+        {
+          "start_s": 2692,
+          "title": "Main Kubectl Commands - K8s CLI"
+        },
+        {
+          "start_s": 3723,
+          "title": "K8s YAML Configuration File"
+        },
+        {
+          "start_s": 4576,
+          "title": "Demo Project: MongoDB and MongoExpress"
+        },
+        {
+          "start_s": 6376,
+          "title": "Organizing your components with K8s Namespaces"
+        },
+        {
+          "start_s": 7312,
+          "title": "K8s Ingress explained"
+        },
+        {
+          "start_s": 8657,
+          "title": "Helm - Package Manager"
+        },
+        {
+          "start_s": 9487,
+          "title": "Persisting Data in K8s with Volumes"
+        },
+        {
+          "start_s": 10718,
+          "title": "Deploying Stateful Apps with StatefulSet"
+        },
+        {
+          "start_s": 11623,
+          "title": "K8s Services explained"
+        }
+      ]
+    },
+    {
+      "video_id": "IluVqhoCChw",
+      "expected_route": "creator",
+      "creator_chapters": [
+        {
+          "start_s": 0,
+          "title": "Why learn Kubernetes in 2026?"
+        },
+        {
+          "start_s": 125,
+          "title": "Kubernetes explained (no jargon)"
+        },
+        {
+          "start_s": 260,
+          "title": "Core concepts: Pods, Nodes, Clusters"
+        },
+        {
+          "start_s": 430,
+          "title": "Setting up FREE environment"
+        },
+        {
+          "start_s": 745,
+          "title": "Your first deployment (hands-on)"
+        },
+        {
+          "start_s": 1036,
+          "title": "Scaling & self-healing demo"
+        },
+        {
+          "start_s": 1500,
+          "title": "GitHub Source Code"
+        },
+        {
+          "start_s": 1610,
+          "title": "Deploy with Kustomize"
+        },
+        {
+          "start_s": 1860,
+          "title": "GitHub Actions Deployment"
+        },
+        {
+          "start_s": 2040,
+          "title": "Next steps & resources"
+        }
+      ]
+    },
+    {
+      "video_id": "l57xKN6OBhY",
+      "expected_route": "creator",
+      "creator_chapters": [
+        {
+          "start_s": 0,
+          "title": "Introduction"
+        },
+        {
+          "start_s": 383,
+          "title": "Kubernetes Fundamentals and Lab"
+        },
+        {
+          "start_s": 1329,
+          "title": "Cluster Architecture, Installation & Configuration"
+        },
+        {
+          "start_s": 3323,
+          "title": "Workloads & Scheduling"
+        },
+        {
+          "start_s": 5164,
+          "title": "Services & Networking"
+        },
+        {
+          "start_s": 6225,
+          "title": "Storage"
+        },
+        {
+          "start_s": 6931,
+          "title": "Troubleshooting"
+        },
+        {
+          "start_s": 7496,
+          "title": "Conclusion"
+        }
+      ]
+    },
+    {
+      "video_id": "EV47Oxwet6Y",
+      "expected_route": "creator",
+      "creator_chapters": [
+        {
+          "start_s": 0,
+          "title": "Introduction"
+        },
+        {
+          "start_s": 100,
+          "title": "History of computing"
+        },
+        {
+          "start_s": 1938,
+          "title": "The Application"
+        },
+        {
+          "start_s": 2690,
+          "title": "Self managed Kubernetes Cluster"
+        },
+        {
+          "start_s": 3289,
+          "title": "Exoscale Managed Kubernetes SKS"
+        },
+        {
+          "start_s": 3758,
+          "title": "YAML and Kubeconfig"
+        },
+        {
+          "start_s": 5087,
+          "title": "Kubernetes Architecture"
+        },
+        {
+          "start_s": 5828,
+          "title": "CRI(Container Runtime Interface)"
+        },
+        {
+          "start_s": 6177,
+          "title": "CNI(Container network interface)"
+        },
+        {
+          "start_s": 7132,
+          "title": "CSI(Container Storage Interface)"
+        },
+        {
+          "start_s": 7431,
+          "title": "Kube-Proxy"
+        },
+        {
+          "start_s": 7998,
+          "title": "CoreDNS"
+        },
+        {
+          "start_s": 8265,
+          "title": "RBAC"
+        },
+        {
+          "start_s": 9170,
+          "title": "Pods"
+        },
+        {
+          "start_s": 10966,
+          "title": "Scheduler"
+        },
+        {
+          "start_s": 12963,
+          "title": "Deployments"
+        },
+        {
+          "start_s": 14589,
+          "title": "ConfigMap and Secrets"
+        },
+        {
+          "start_s": 15994,
+          "title": "DaemonSet"
+        },
+        {
+          "start_s": 16155,
+          "title": "Services"
+        },
+        {
+          "start_s": 16522,
+          "title": "StatefulSet"
+        },
+        {
+          "start_s": 17417,
+          "title": "Services Continued"
+        },
+        {
+          "start_s": 18955,
+          "title": "CNPG and Kubernetes Volumes"
+        },
+        {
+          "start_s": 20115,
+          "title": "GatewayAPI"
+        },
+        {
+          "start_s": 20510,
+          "title": "Final Demo pieces together"
+        },
+        {
+          "start_s": 20887,
+          "title": "Basic monitoring demo"
+        },
+        {
+          "start_s": 21110,
+          "title": "Conclusion and road ahead"
+        }
+      ]
+    },
+    {
+      "video_id": "wqsUfvRyYpw",
+      "expected_route": "transcript_split",
+      "creator_chapters": []
+    },
+    {
+      "video_id": "EzSkU3Oecuw",
+      "expected_route": "transcript_split",
+      "creator_chapters": []
+    },
+    {
+      "video_id": "tgVlRCYLRRM",
+      "expected_route": "whole",
+      "creator_chapters": []
+    },
+    {
+      "video_id": "1nAsxJSsfkw",
+      "expected_route": "creator",
+      "creator_chapters": [
+        {
+          "start_s": 0,
+          "title": "How Much CPU & Memory Should a Pod Use?"
+        },
+        {
+          "start_s": 22,
+          "title": "Requests & Limits Explained (Petrol Pump Analogy)"
+        },
+        {
+          "start_s": 149,
+          "title": "CPU Units: Cores & Millicores"
+        },
+        {
+          "start_s": 212,
+          "title": "Memory Units: Ki, Mi, Gi vs KB, MB, GB"
+        },
+        {
+          "start_s": 313,
+          "title": "Hands-On: Writing a Pod with Requests & Limits"
+        },
+        {
+          "start_s": 689,
+          "title": "Requests vs Limits Explained"
+        },
+        {
+          "start_s": 774,
+          "title": "CPU Throttling vs Memory OOMKilled"
+        },
+        {
+          "start_s": 856,
+          "title": "Applying & Verifying Requests and Limits"
+        },
+        {
+          "start_s": 938,
+          "title": "How the Scheduler Uses Requests"
+        },
+        {
+          "start_s": 1001,
+          "title": "What Happens Without Requests & Limits"
+        },
+        {
+          "start_s": 1083,
+          "title": "QoS Classes: Guaranteed, Burstable, BestEffort"
+        },
+        {
+          "start_s": 1206,
+          "title": "Checking a Pod's QoS Class"
+        },
+        {
+          "start_s": 1307,
+          "title": "Demo: Triggering an OOMKilled Error"
+        },
+        {
+          "start_s": 1692,
+          "title": "CrashLoopBackOff & OOMKilled Explained"
+        },
+        {
+          "start_s": 1775,
+          "title": "Recap"
+        }
+      ]
+    }
   ]
 }
