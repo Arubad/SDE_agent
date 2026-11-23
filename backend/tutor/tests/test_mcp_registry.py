@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -27,18 +28,58 @@ def _inproc(name, ns=None, **kw):
 
 
 def test_committed_registry_loads():
-    reg = load_registry(COMMITTED, {}, allow_unknown=True)
+    reg = load_registry(COMMITTED, {})  # strict: every agent / rules pattern names a namespace
     assert isinstance(reg, Registry)
     assert {s.namespace for s in reg.servers} >= {"kb", "learner", "ingest", "web"}
     assert all(sp.untrusted for sp in reg.servers)
     assert reg.agents["crawler"] == ("browser.navigate", "browser.evaluate", "browser.close")
 
 
+def test_committed_external_servers():
+    reg = load_registry(COMMITTED, {})
+    by = {s.name: s for s in reg.servers}
+    assert {n: (by[n].namespace, by[n].transport) for n in
+            ("playwright", "deepwiki", "mslearn", "arxiv", "wikipedia", "context7", "github", "fetch")} == {
+        "playwright": ("browser", "http"), "deepwiki": ("repo.deepwiki", "http"),
+        "mslearn": ("docs.mslearn", "http"), "arxiv": ("papers.arxiv", "stdio"),
+        "wikipedia": ("ref.wikipedia", "stdio"), "context7": ("docs.context7", "http"),
+        "github": ("repo.github", "http"), "fetch": ("fetch", "stdio"),
+    }
+    pw = by["playwright"]
+    assert (pw.url, pw.strip_prefix, pw.timeout_s) == ("http://127.0.0.1:8931/mcp", "browser_", 45.0)
+    assert load_registry(COMMITTED, {"PLAYWRIGHT_MCP_URL": "http://playwright-mcp:8931/mcp"}).servers[
+        [s.name for s in reg.servers].index("playwright")].url == "http://playwright-mcp:8931/mcp"
+    assert by["deepwiki"].url == "https://mcp.deepwiki.com/mcp"
+    assert by["mslearn"].url == "https://learn.microsoft.com/api/mcp"
+    assert by["context7"].url == "https://mcp.context7.com/mcp"
+    assert by["context7"].requires_env == ("CONTEXT7_API_KEY",)
+    assert by["github"].url == "https://api.githubcopilot.com/mcp/"
+    assert by["github"].requires_env == ("GITHUB_TOKEN",)
+    env = {"GITHUB_TOKEN": "ghp_x", "CONTEXT7_API_KEY": "c7_y"}
+    by_env = {s.name: s for s in load_registry(COMMITTED, env).servers}
+    assert by_env["github"].headers == {"Authorization": "Bearer ghp_x", "X-MCP-Readonly": "true"}
+    assert by_env["context7"].headers == {"CONTEXT7_API_KEY": "c7_y"}
+    stdio = [s for s in reg.servers if s.transport == "stdio"]
+    assert {s.name for s in stdio} == {"arxiv", "wikipedia", "fetch"}
+    for s in stdio:
+        assert s.command == "uvx"
+        pkg = next(a for a in s.args if not a.startswith("-"))
+        assert re.fullmatch(r"[a-z0-9-]+==\d+(\.\d+)+", pkg), pkg
+    assert by["arxiv"].args[-2:] == ("--storage-path", "/tmp/roadmap-tutor/arxiv")
+    with_path = {s.name: s for s in load_registry(COMMITTED, {"ARXIV_STORAGE_PATH": "/data/arxiv"}).servers}
+    assert with_path["arxiv"].args[-1] == "/data/arxiv"
+    assert [s.name for s in reg.servers if not s.enabled_default] == ["fetch"]
+    assert "private-address" in by["fetch"].note
+    for s in reg.servers:  # every external server is untrusted (its results are fenced)
+        if s.transport != "inproc":
+            assert s.untrusted
+
+
 def test_env_expansion_and_default(tmp_path):
     p = _write(tmp_path, [{
         "name": "browser", "namespace": "browser", "transport": "http",
         "url": "${PLAYWRIGHT_MCP_URL:-http://127.0.0.1:8931/mcp}",
-        "headers": {"Authorization": "Bearer ${TOK}"},
+        "headers": {"Authorization": "Bearer ${TOK}"}, "requires_env": ["TOK"],
     }])
     default = load_registry(p, {}).servers[0]
     assert default.url == "http://127.0.0.1:8931/mcp"
@@ -120,3 +161,44 @@ def test_enabled_override_roundtrip(engine):
     assert effective_enabled(engine, spec) is False
     set_enabled(engine, "rt_srv", True)
     assert effective_enabled(engine, spec) is True
+
+
+def test_secret_vars_must_be_required(tmp_path):
+    def entry(**kw):
+        return {"name": "s", "namespace": "s", "transport": "http", "url": "https://x.invalid/mcp", **kw}
+    for bad in (entry(headers={"Authorization": "Bearer ${TOK}"}),
+                entry(url="https://x.invalid/mcp?key=${TOK}"),
+                {"name": "s", "namespace": "s", "transport": "stdio", "command": "uvx",
+                 "args": ["pkg==1.0", "--token", "${TOK}"]},
+                entry(headers={"A": "${OTHER}"}, requires_env=["TOK"])):
+        with pytest.raises(RegistryError, match="requires_env"):
+            load_registry(_write(tmp_path, [bad]), {"TOK": "t", "OTHER": "o"})
+    ok = [entry(headers={"Authorization": "Bearer ${TOK}"}, requires_env=["TOK"]),
+          entry(url="${URL:-https://x.invalid/mcp}"),  # a default means it is configuration, not a secret
+          {"name": "s", "namespace": "s", "transport": "stdio", "command": "uvx",
+           "args": ["pkg==1.0", "--dir", "${DIR:-/tmp/x}"]}]
+    for good in ok:
+        assert load_registry(_write(tmp_path, [good]), {}).servers[0].name == "s"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("enabled", "false"), ("enabled", 0), ("enabled", None),
+    ("untrusted", "no"), ("untrusted", 1),
+    ("timeout_s", "5"), ("timeout_s", 0), ("timeout_s", -1), ("timeout_s", True), ("timeout_s", None),
+    ("args", "pkg==1"), ("args", [1]), ("args", {"a": "b"}),
+    ("requires_env", "TOK"), ("requires_env", [3]),
+    ("headers", ["A: b"]), ("headers", {"A": 1}), ("headers", "A: b"),
+])
+def test_field_types_strict(tmp_path, field, value):
+    raw = _inproc("a", **{field: value})
+    with pytest.raises(RegistryError, match=field):
+        load_registry(_write(tmp_path, [raw]), {})
+
+
+def test_field_types_accepted(tmp_path):
+    raw = _inproc("a", enabled=False, untrusted=True, timeout_s=2, args=["x"], requires_env=["E"],
+                  headers={"H": "v"})
+    spec = load_registry(_write(tmp_path, [raw]), {}).servers[0]
+    assert (spec.enabled_default, spec.untrusted, spec.timeout_s, spec.args) == (False, True, 2.0, ("x",))
+    assert spec.headers == {"H": "v"} and spec.requires_env == ("E",)
+    assert load_registry(_write(tmp_path, [_inproc("a", timeout_s=0.5)]), {}).servers[0].timeout_s == 0.5

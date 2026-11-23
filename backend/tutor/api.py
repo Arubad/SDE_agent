@@ -135,8 +135,7 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
             # loops. One is served over HTTP on this (uvicorn's) loop, the other runs inproc on the gateway's loop.
             deps = (app.state.engine, app.state.net, index, embedder, settings, on_settled)
             http_servers, inproc_servers = build_own_servers(*deps), build_own_servers(*deps)
-            # Task 10 makes the registry strict (its agent patterns name namespaces that Task 10 adds).
-            registry = load_registry(settings.mcp_registry, os.environ, allow_unknown=True)
+            registry = load_registry(settings.mcp_registry, os.environ)
             app.state.gateway = Gateway(registry, engine=app.state.engine, inproc=inproc_servers,
                                         env=os.environ)
             app.state.gateway.start()  # a loop thread only: no server is contacted before its first use

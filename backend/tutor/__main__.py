@@ -7,6 +7,7 @@
     python -m backend.tutor import-sde [--limit N]        import the demo SDE knowledge base as roadmap sde-mastery
     python -m backend.tutor mcp <server> [--no-workers]   serve one own MCP server (knowledge, learner, ingestion,
                                                           web) on stdio, for Claude Desktop / Claude Code
+    python -m backend.tutor mcp-check [--json]            connect to every registry server and report its health
 """
 from __future__ import annotations
 
@@ -135,6 +136,68 @@ def _mcp(args, settings, protocol) -> None:
         engine.dispose()
 
 
+def _overrides_engine(settings, registry):
+    """An engine for the on/off overrides (read only: no migration), or None (registry defaults) when they cannot
+    be read."""
+    from backend.tutor.db import make_engine
+    from backend.tutor.mcp.registry import effective_enabled
+
+    engine = make_engine(settings.database_url)
+    try:
+        for spec in registry.servers[:1]:
+            effective_enabled(engine, spec)
+        return engine
+    except Exception as e:  # unreachable, or not migrated yet
+        print(f"mcp-check: database unavailable ({type(e).__name__}); using the registry defaults",
+              file=sys.stderr)
+        engine.dispose()
+        return None
+
+
+def _mcp_check(args, settings) -> None:
+    """Build the API's registry and gateway (own servers in-process; no workers, no HTTP), refresh every server's
+    health and print it. A report, not a gate: it always returns (exit 0). Health errors are already scrubbed."""
+    import asyncio
+    from dataclasses import asdict
+
+    from backend.core.redact import redact
+    from backend.tutor.ingest.embed import make_embedder
+    from backend.tutor.ingest.index import make_index
+    from backend.tutor.ingest.net import make_net
+    from backend.tutor.mcp.build import build_own_servers
+    from backend.tutor.mcp.gateway import Gateway
+    from backend.tutor.mcp.registry import RegistryError, load_registry
+
+    try:
+        registry = load_registry(settings.mcp_registry, os.environ)
+    except RegistryError as e:
+        print(f"mcp-check: {redact(str(e))}", file=sys.stderr)
+        return
+    engine = _overrides_engine(settings, registry)
+    try:
+        embedder = make_embedder(settings)
+        inproc = build_own_servers(engine, make_net(settings, engine), make_index(settings, embedder), embedder,
+                                   settings, None)
+        gateway = Gateway(registry, engine=engine, inproc=inproc, env=os.environ)
+        gateway.start()
+        try:
+            health = asyncio.run(gateway.health(refresh=True))
+        finally:
+            gateway.stop()
+    finally:
+        if engine is not None:
+            engine.dispose()
+    if args.json:
+        print(json.dumps([asdict(h) for h in health], indent=2))
+        return
+    rows = [("name", "state", "tools", "latency_ms", "error")]
+    rows += [(h.name, h.state, str(h.tools), "-" if h.latency_ms is None else str(h.latency_ms),
+              " ".join((h.error or "-").split())) for h in health]
+    widths = [max(len(r[i]) for r in rows) for i in range(4)]
+    for r in rows:
+        print("  ".join(c.ljust(w) for c, w in zip(r, widths)) + "  " + r[4])
+
+
 def main(argv: list[str] | None = None) -> None:
     from backend.tutor.mcp import OWN_SERVERS
     from backend.tutor.settings import load_settings
@@ -158,6 +221,8 @@ def main(argv: list[str] | None = None) -> None:
     mcp.add_argument("server", choices=OWN_SERVERS)
     mcp.add_argument("--no-workers", action="store_true",
                      help="ingestion only: do not run the job workers in this process")
+    check = sub.add_parser("mcp-check", help="connect to every registry server and print its health (always exit 0)")
+    check.add_argument("--json", action="store_true", help="print a JSON list instead of one line per server")
     args = parser.parse_args(argv)
     protocol = _protect_stdout() if args.command == "mcp" else None
     settings = load_settings()
@@ -171,6 +236,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.command == "mcp":
         _mcp(args, settings, protocol)
+        return
+    if args.command == "mcp-check":
+        _mcp_check(args, settings)
         return
     if args.command:
         _command(args, settings)

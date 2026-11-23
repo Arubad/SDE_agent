@@ -62,6 +62,39 @@ def _expand(value: str, env: Mapping[str, str]) -> str:
     return _ENV.sub(sub, value)
 
 
+def _check_types(raw: dict) -> None:
+    """JSON types, strictly: a string "false" is not a boolean, a string "5" is not a timeout."""
+    name = raw.get("name")
+    for key in ("enabled", "untrusted"):
+        if key in raw and not isinstance(raw[key], bool):
+            raise RegistryError(f"server {name!r}: {key} must be true or false (got {raw[key]!r})")
+    if "timeout_s" in raw:
+        t = raw["timeout_s"]
+        if isinstance(t, bool) or not isinstance(t, int | float) or not t > 0:
+            raise RegistryError(f"server {name!r}: timeout_s must be a number > 0 (got {t!r})")
+    for key in ("args", "requires_env"):
+        if key in raw and not (isinstance(raw[key], list) and all(isinstance(a, str) for a in raw[key])):
+            raise RegistryError(f"server {name!r}: {key} must be a list of strings")  # no value: args may hold one
+    if "headers" in raw:
+        h = raw["headers"]
+        if not (isinstance(h, dict) and all(isinstance(v, str) for v in h.values())):
+            raise RegistryError(f"server {name!r}: headers must be an object of strings")
+    for key in ("name", "namespace", "transport", "target", "command", "url", "strip_prefix", "note"):
+        if raw.get(key) is not None and not isinstance(raw[key], str):
+            raise RegistryError(f"server {name!r}: {key} must be a string (got {raw[key]!r})")
+
+
+def _check_secret_vars(raw: dict) -> None:
+    """Every `${VAR}` without a default in `url`, `headers` or `args` is a secret, so it must be in `requires_env`:
+    health and errors redact exactly the `requires_env` values (and the header values)."""
+    places = [raw.get("url") or "", *(raw.get("headers") or {}).values(), *raw.get("args", ())]
+    needed = {m.group(1) for v in places for m in _ENV.finditer(v) if m.group(2) is None}
+    missing = sorted(needed - set(raw.get("requires_env", ())))
+    if missing:
+        raise RegistryError(f"server {raw['name']!r}: {', '.join('${' + v + '}' for v in missing)} has no default, "
+                            "so it must be listed in requires_env")
+
+
 def _spec(raw: object, env: Mapping[str, str]) -> ServerSpec:
     if not isinstance(raw, dict):
         raise RegistryError(f"server entry must be an object (got {raw!r})")
@@ -71,9 +104,11 @@ def _spec(raw: object, env: Mapping[str, str]) -> ServerSpec:
     for key in ("name", "namespace", "transport"):
         if not raw.get(key):
             raise RegistryError(f"server entry is missing {key!r}: {raw!r}")
+    _check_types(raw)
     if raw["transport"] not in TRANSPORTS:
         raise RegistryError(f"server {raw['name']!r}: unknown transport {raw['transport']!r}")
-    args = tuple(_expand(str(a), env) for a in raw.get("args", ()))
+    _check_secret_vars(raw)
+    args = tuple(_expand(a, env) for a in raw.get("args", ()))
     command = _expand(raw["command"], env) if raw.get("command") else None
     if raw["transport"] == "stdio" and command == "uvx":
         pkg = next((a for a in args if not a.startswith("-")), None)
@@ -86,10 +121,10 @@ def _spec(raw: object, env: Mapping[str, str]) -> ServerSpec:
         name=raw["name"], namespace=raw["namespace"], transport=raw["transport"],
         target=raw.get("target"), command=command, args=args,
         url=_expand(raw["url"], env) if raw.get("url") else None,
-        headers={k: _expand(str(v), env) for k, v in (raw.get("headers") or {}).items()},
+        headers={k: _expand(v, env) for k, v in (raw.get("headers") or {}).items()},
         requires_env=tuple(raw.get("requires_env", ())),
-        enabled_default=bool(raw.get("enabled", True)),
-        untrusted=bool(raw.get("untrusted", True)),
+        enabled_default=raw.get("enabled", True),
+        untrusted=raw.get("untrusted", True),
         strip_prefix=raw.get("strip_prefix"), note=raw.get("note", ""), **extra,
     )
 

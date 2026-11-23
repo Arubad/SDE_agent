@@ -486,6 +486,6 @@ def test_rules_patterns_validated(tmp_path):
 def test_registry_without_rules_and_committed_rules():
     reg = Registry(servers=(), agents={})
     assert (reg.deny, reg.ask) == ((), ())
-    committed = load_registry(COMMITTED, {}, allow_unknown=True)
-    assert committed.deny == ()
+    committed = load_registry(COMMITTED, {})
+    assert committed.deny == ("ref.wikipedia.wikipedia_*",)  # wikipedia-mcp registers every tool twice
     assert committed.ask == ("ingest.create_roadmap", "ingest.approve_roadmap", "learner.forget")
