@@ -324,3 +324,34 @@ def test_replay_unsafe_is_counted_and_markdown_labels_recorded_cost(engine, tmp_
     assert result["configs"]["nothing_to_fix"]["summary"]["replay_unsafe"] == 1
     md = E.format_markdown(result)
     assert "replay_unsafe" in md and "recorded cost (not spent)" in md and "recorded_cost_usd" in md
+
+
+def test_main_strict_fails_on_a_replay_miss_and_passes_on_a_clean_replay(engine, monkeypatch, tmp_path, no_foundry,
+                                                                         capsys):
+    """CI replays the committed recordings with --strict: a request with no recording (or a replay-unsafe one)
+    must fail the job, not just print a warning."""
+    import contextlib
+
+    monkeypatch.setattr(E, "scratch_engine", lambda url: contextlib.nullcontext(engine))
+    args = ["--scenarios", "nothing_to_fix", "--repeats", "1", "--database-url", "postgresql://unused/x",
+            "--out-dir", str(tmp_path / "out")]
+    empty = ["--recordings-dir", str(tmp_path / "empty")]
+    assert E.main(args + empty) == 0  # without --strict a miss is only a warning, as before
+    assert E.main(args + empty + ["--strict"]) == 1
+    assert "STRICT: 1 agent run(s) ended in `error`" in capsys.readouterr().out
+
+    recordings = tmp_path / "rec"
+    script = [FakeReply(tool_uses=[("kb_status", {})]), FakeReply(text="The roadmap is healthy; nothing to do.")]
+    with fake_llm.script(script):
+        E.run_eval(engine, E.load_scenarios(["nothing_to_fix"]), repeats=1, provider="record",
+                   recordings_root=recordings, log=lambda m: None)
+    fake_llm.reset()
+    assert E.main(args + ["--recordings-dir", str(recordings), "--strict"]) == 0
+    assert fake_llm.requests == []
+
+    unsafe = tmp_path / "unsafe"
+    script = [FakeReply(tool_uses=[("kb_status", {})]), FakeReply(text="Ask ops@corp.example if unsure.")]
+    with fake_llm.script(script):
+        E.run_eval(engine, E.load_scenarios(["nothing_to_fix"]), repeats=1, provider="record",
+                   recordings_root=unsafe, log=lambda m: None)
+    assert E.main(args + ["--recordings-dir", str(unsafe), "--strict"]) == 1

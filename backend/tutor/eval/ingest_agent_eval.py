@@ -27,6 +27,7 @@ whole run would exceed `--max-projected-usd` (default 0.50).
 
     python -m backend.tutor.eval.ingest_agent_eval                       # replay, free
     python -m backend.tutor.eval.ingest_agent_eval --record              # live, costs money
+    python -m backend.tutor.eval.ingest_agent_eval --strict              # replay; exit 1 on a miss (CI)
 
 Replay-unsafe recordings: recordings are redacted on write, and a model reply containing an email, key or phone-shaped
 text is stored redacted, so the next turn's request (which carries that reply) no longer matches its recording.
@@ -439,6 +440,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out-dir", type=Path, default=RESULTS_DIR)
     p.add_argument("--max-projected-usd", type=float, default=MAX_PROJECTED_USD)
     p.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
+    p.add_argument("--strict", action="store_true",
+                   help="exit 1 if any agent run ended in error (in replay mode: a request with no recording) or "
+                        "any recording is replay-unsafe (CI replays the committed recordings this way)")
     args = p.parse_args(argv)
     if not args.database_url:
         p.error("DATABASE_URL (or --database-url) is required: the eval needs a Postgres server")
@@ -456,7 +460,24 @@ def main(argv: list[str] | None = None) -> int:
     js, md = write_results(result, args.out_dir)
     print(format_markdown(result))
     print(f"wrote {js} and {md}")
+    problems = strict_problems(result)
+    if args.strict and problems:
+        print("STRICT: " + "; ".join(problems))
+        return 1
     return 0
+
+
+def strict_problems(result: dict) -> list[str]:
+    """What `--strict` fails on: agent runs that ended in `error` and replay-unsafe recordings."""
+    summaries = [c["summary"] for c in result["configs"].values()]
+    errors = sum(s["agent_errors"] for s in summaries)
+    unsafe = sum(s["replay_unsafe"] for s in summaries)
+    out = []
+    if errors:
+        out.append(f"{errors} agent run(s) ended in `error` (in replay mode: a request with no recording)")
+    if unsafe:
+        out.append(f"{unsafe} replay-unsafe recording(s)")
+    return out
 
 
 if __name__ == "__main__":

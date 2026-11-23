@@ -116,7 +116,9 @@ Postgres service publishes no host port, so add one with an override file or run
 - Ingestion eval, no network and no LLM: `python -m backend.tutor.eval.ingestion_eval` (add `--ci` for the
   committed fixtures only). Latest: `backend/tutor/eval/results/ingestion_latest.md`.
 - Ingestion agent eval: `python -m backend.tutor.eval.ingest_agent_eval` replays recorded Haiku runs for free.
-  `--record` calls Haiku live and costs money. Latest: `backend/tutor/eval/results/ingest_agent_latest.md`.
+  `--record` calls Haiku live and costs money. CI replays the recordings with `--strict`, which exits 1 when a
+  request has no recording (re-record after changing the agent's prompts or tools). Latest:
+  `backend/tutor/eval/results/ingest_agent_latest.md`.
 - A live Kubernetes ingestion, written up in [ingestion-report-kubernetes.md](ingestion-report-kubernetes.md).
 - SDE retrieval: `backend/tutor/eval/results/sde_retrieval_test_latest.md`. The platform's parent-child chunking
   scores below the demo's `v2_hybrid` on the demo's own questions, so this is a negative result.
