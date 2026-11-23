@@ -6,6 +6,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     Float,
     ForeignKey,
@@ -181,5 +182,17 @@ class AgentAction(Base):
     summary: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
     cost_usd: Mapped[float] = mapped_column(Numeric(12, 6), nullable=False, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class McpServerState(Base):
+    """A per-server on/off override; no row means the registry's `enabled_default` applies."""
+
+    __tablename__ = "mcp_servers"
+
+    name: Mapped[str] = mapped_column(Text, primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
