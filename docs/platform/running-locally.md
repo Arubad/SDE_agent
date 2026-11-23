@@ -67,8 +67,8 @@ Set these in `backend/.env` (they are listed there, commented, with their defaul
 | Variable | Default | Meaning |
 |---|---|---|
 | `SEARXNG_URL` | `http://127.0.0.1:8888` | Search service. Compose sets it to the `searxng` container. An empty value turns search off. |
-| `YOUTUBE_API_KEY` | none | Free YouTube Data API key. Gives better metadata, playlist expansion and chapter timestamps from top comments. Without it, only title and channel (oEmbed) are available. |
-| `TRANSCRIPT_ROUTES` | `captions` | Comma list from `captions`, `ytdlp_cookies`, `gemini`, tried in order. |
+| `YOUTUBE_API_KEY` | none | Free YouTube Data API key. Official Data API for metadata, playlists and top comments (the source of comment timestamps). Without it, metadata comes from yt-dlp (title, channel, description, duration, chapters; no cookies, no download), then oEmbed (title and channel only), and no comments are read. |
+| `TRANSCRIPT_ROUTES` | `captions` | Comma list from `captions`, `ytdlp_cookies`, `gemini`, tried in order. `gemini` uses `GEMINI_API_KEY`. |
 | `YTDLP_COOKIES_BROWSER` | none | Browser whose cookies yt-dlp uses (for example `chrome`). Required when `ytdlp_cookies` is on. |
 | `INGEST_WORKERS` | `2` | Worker threads in the API. `0` starts none. |
 | `CRAWL_MAX_DEPTH` / `CRAWL_MAX_PAGES` | `2` / `50` | Crawl limits for one documentation resource. |
@@ -78,9 +78,12 @@ Set these in `backend/.env` (they are listed there, commented, with their defaul
 | `GITHUB_TOKEN` | none | Raises GitHub API rate limits when repo READMEs are read. |
 | `INGEST_AGENT` | `true` | The Claude Haiku ingestion agent. Its budget is fixed at $0.05 per roadmap. |
 
-**Transcript routes and YouTube's terms.** Captions is the default. The `ytdlp_cookies` route (yt-dlp with your
-browser's cookies) and the `gemini` route (Gemini with the video URL) are opt-in. Some routes are against YouTube's
-terms of service. You are responsible for following them, so turn one on only if you accept that.
+**Transcript routes and YouTube's terms.** Sanctioned by YouTube: the Data API (with `YOUTUBE_API_KEY`), oEmbed, and
+the opt-in `gemini` route (Google's official API with the video URL, using `GEMINI_API_KEY`). Not sanctioned by
+YouTube's terms: the default `captions` route (youtube-transcript-api reads an undocumented endpoint, not the
+official API), the yt-dlp metadata fallback used when no key is set, and the opt-in `ytdlp_cookies` route (yt-dlp
+with your browser's cookies). You are responsible for following YouTube's terms. To stay on official paths, set
+`YOUTUBE_API_KEY` and `TRANSCRIPT_ROUTES=gemini`.
 
 ## Command line
 

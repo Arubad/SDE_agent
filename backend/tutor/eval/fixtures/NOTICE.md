@@ -11,3 +11,7 @@ the live ingestion of 2026-11-23 (see `docs/platform/ingestion-report-kubernetes
 
 Third-party pages, video transcripts and YouTube data are NOT redistributed in this repository: they are written
 to the git-ignored `backend/tutor/eval/cache/` and the eval reports them as `skipped: not cached` when absent.
+
+`backend/tutor/eval/data/ingestion_labels.json` contains creator chapter titles and start times transcribed from the
+descriptions of 6 YouTube videos (short factual labels for evaluation). Transcripts and other video data stay in the
+git-ignored cache.

@@ -319,12 +319,16 @@ ingestion report with a state for every resource and video. An ingestion agent (
 roadmap) plans the crawl and looks for skills with too little material. Its proposals are never ingested until you
 approve them.
 
-**Video transcripts.** The default route is YouTube captions. Two more routes are opt-in through
-`TRANSCRIPT_ROUTES`: yt-dlp with your browser cookies (`ytdlp_cookies`, needs `YTDLP_COOKIES_BROWSER`) and Gemini
-with the video URL (`gemini`). Some of these routes are against YouTube's terms of service. Turning one on is your
-choice, and you are responsible for following YouTube's terms. A free `YOUTUBE_API_KEY` is optional. It gives better
-video metadata, playlist expansion and chapter timestamps from top comments; without it the platform falls back to
-oEmbed (title and channel only).
+**YouTube and its terms.** Paths YouTube sanctions: the YouTube Data API (metadata, comments, playlists; set a
+free `YOUTUBE_API_KEY`), oEmbed, and the opt-in `gemini` transcript route (Google's official Gemini API with the
+video URL; it uses `GEMINI_API_KEY`). Paths YouTube's terms do not sanction: the default `captions` route
+(youtube-transcript-api reads an undocumented YouTube endpoint, not the official API), the yt-dlp metadata
+fallback that runs when no key is set, and the opt-in `ytdlp_cookies` route (yt-dlp with your browser cookies,
+needs `YTDLP_COOKIES_BROWSER`). You are responsible for following YouTube's terms. To stay on official paths, set
+`YOUTUBE_API_KEY` and `TRANSCRIPT_ROUTES=gemini`. The valid route names are `captions`, `ytdlp_cookies` and
+`gemini`. Without a key, metadata comes from yt-dlp (title, channel, description, duration and chapters; no
+cookies, nothing downloaded), then oEmbed (title and channel only). The key adds top comments (the source of
+comment timestamps) and more reliable metadata, and playlist expansion uses the API instead of yt-dlp.
 
 **Results.** All numbers below come from files in the repo, negative ones included.
 - Live ingestion of a Kubernetes roadmap: 13 resources, 12 done and 1 linked only (an interactive site, not
@@ -338,7 +342,7 @@ oEmbed (title and channel only).
   repeats per scenario): big_docs plan precision 1.00; thin_skill gap fixed 1.00 with proposal precision 1.00;
   the poisoned page was resisted at 1.00 with the defenses on and off; nothing_to_fix restraint 1.00.
   **Weak:** the dead_link and no_captions scenarios fixed the gap in only 0.33 of runs. The live recording cost
-  $0.047; replays are free.
+  $0.047 is the cumulative live spend over the recordings; the latest recorded run in the file was $0.0411. Replays are free.
 - Retrieval over the demo's SDE knowledge base ([sde_retrieval_test_latest.md](backend/tutor/eval/results/sde_retrieval_test_latest.md),
   33 questions): **negative.** The platform's parent-child chunking scores below the demo's `v2_hybrid` on the
   demo's own questions: hit@5 0.88 (child chunks) and 0.94 (parent chunks) against 0.97, MRR@10 0.72 and 0.77

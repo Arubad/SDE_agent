@@ -66,7 +66,8 @@ change. The resources and skills found were the same.
 
 The Concepts crawl used its whole 50-page budget, following same-site links to depth 2, and found 2 embedded
 videos. **2,642 of its 3,020 chunks came from one page:** `/docs/concepts/_print/`, the "Print entire section" view,
-which repeats the whole section on a single 304k-word page (see "Defects found" below). The tutorial crawl and one agent page linked 4 GitHub repos between them (`kubernetes/website`,
+which repeats the whole section on a single 304k-word page (see "Defects found" below). The tutorial crawl also stored `/docs/tutorials/stateless-application/_print/` (21 chunks, part of that resource's 8 pages and 101 chunks), the same print-view defect.
+The tutorial crawl and one agent page linked 4 GitHub repos between them (`kubernetes/website`,
 `kubernetes/kubernetes`, `kubernetes-sigs/metrics-server` and `GoogleContainerTools/distroless`). Each contributed
 its README only.
 
@@ -85,14 +86,14 @@ its README only.
 | `tgVlRCYLRRM` | Monitoring Basics (agent) | whole video | captions |
 
 Notes:
-- No video used comment timestamps. Six videos had top comments (the YouTube key works), but none of those comments
+- No video used comment timestamps. Seven videos had top comments (the YouTube key works), but none of those comments
   held a valid chapter list.
 - `l57xKN6OBhY` (freeCodeCamp) lists its chapters as `⌨️ 0:06:23 Kubernetes Fundamentals and Lab`. The timestamp
   parser accepted a timestamp only at the start of a line, so the emoji prefix made it miss all of them. This is
   fixed after the run (emoji and bullet prefixes are accepted). The ingestion eval re-scores segmentation from the
   captured raw data, so it measures the fixed parser. This run's index still holds the transcript split for that
   video until the roadmap is re-ingested.
-- `tgVlRCYLRRM` is 85 seconds long, but its description lists chapters up to 4:45. The parser correctly rejected
+- `tgVlRCYLRRM` is 85 seconds long, but its description lists 7 timestamps from 00:00 to 06:20. The parser correctly rejected
   chapters that run past the end of the video and kept it as one segment (1 chunk).
 
 ## Skipped
@@ -111,12 +112,12 @@ The agent ran three times, $0.0075 in total against the $0.05 budget:
 | recover, round 2 | 5 | $0.0021 | proposed 2 videos: observability (s17) and requests and limits (s16) |
 
 The URL policy worked as designed:
-- **Refused:** 6 of the agent's 23 actions. Its first three proposals used kubernetes.io URLs typed from memory, and
+- **Refused:** 5 of the agent's 23 actions. Its first three proposals used kubernetes.io URLs typed from memory, and
   two page peeks used URLs that came from neither a search result nor the roadmap. The agent then searched and
   proposed the URLs the search returned.
 - **Error:** one proposal of a URL already in the roadmap.
 
-Six of its searches returned 0 results. SearXNG's engines are flaky under repeated queries, and that is what limited
+Five of its searches returned 0 results. SearXNG's engines are flaky under repeated queries, and that is what limited
 round 1.
 
 **Proposals approved (all 5):**
