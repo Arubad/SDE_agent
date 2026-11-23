@@ -1,9 +1,9 @@
 # Running the roadmap tutor platform locally
 
 The platform runs as a Docker Compose stack on your own machine: the API (which also serves the built web
-app), Postgres with pgvector, and Qdrant. Phoenix (tracing) and a Cloudflare tunnel are optional add-ons.
-Every published port binds to `127.0.0.1`, so nothing is reachable from your network unless you start the
-tunnel.
+app), Postgres with pgvector, Qdrant, and SearXNG (search). Phoenix (tracing) and a Cloudflare tunnel are
+optional add-ons. Every published port binds to `127.0.0.1`, so nothing is reachable from your network unless
+you start the tunnel.
 
 ## Prerequisites
 
@@ -11,21 +11,28 @@ tunnel.
   `linux/arm64`, so Intel and Apple Silicon machines both work.
 - About 2 GB of free RAM (the idle stack uses ~300 MB, plus ~800 MB with Phoenix) and 6 GB of disk for
   the images.
-- Free host ports `8000` and `6333` (and `6006` for Phoenix). Postgres publishes no host port.
+- Free host ports `8000` (API), `6333` (Qdrant) and `8888` (SearXNG), and `6006` for Phoenix. Postgres
+  publishes no host port.
 
 ## Start the stack
 
+Compose refuses to start without a SearXNG secret (see [below](#search-searxng-and-searxng_secret)), so set
+one before the first `docker compose up`:
+
 ```bash
-cp backend/.env.example backend/.env   # fill in the keys you have; every one is optional for a first run
-docker compose up -d --wait            # builds the API image on the first run
+cp backend/.env.example backend/.env           # fill in the keys you have; every one is optional for a first run
+export SEARXNG_SECRET=$(openssl rand -hex 32)   # or put SEARXNG_SECRET=... in a .env next to compose.yaml
+docker compose up -d --wait                    # builds the API image on the first run
 ```
+
+With `export`, the secret lasts for that shell only; put it in the `.env` next to `compose.yaml` to keep it.
 
 Open http://127.0.0.1:8000. `curl http://127.0.0.1:8000/api/health` should report `"status": "ok"` and
 `"db": "ok"`.
 
 `backend/.env` reaches the API container only as environment variables (`env_file`). It is never copied into
-the image. Compose sets `DATABASE_URL`, `PLATFORM_QDRANT_URL`, `HOST`, `PORT` and `WEB_DIST` itself, so
-those always point at the containers whatever `.env` says.
+the image. Compose sets `DATABASE_URL`, `PLATFORM_QDRANT_URL`, `SEARXNG_URL`, `HOST`, `PORT` and `WEB_DIST`
+itself, so those always point at the containers whatever `.env` says.
 
 Stop with `docker compose down`. Data lives in the `pgdata` and `qdrant_data` volumes. `docker compose down -v`
 deletes them too.
@@ -33,18 +40,12 @@ deletes them too.
 ## Search (SearXNG) and `SEARXNG_SECRET`
 
 The stack includes a SearXNG service that the resource resolver and the ingestion agent use to find pages and
-videos. Compose refuses to start without a secret, so set one first:
-
-```bash
-export SEARXNG_SECRET=$(openssl rand -hex 32)   # or put SEARXNG_SECRET=... in a .env next to compose.yaml
-docker compose up -d --wait
-```
-
-The secret is read from the environment, never from the settings file. SearXNG listens on
-http://127.0.0.1:8888 and the API reaches it at `http://searxng:8080`. Its settings are in
-`docker/searxng/settings.yml`, which keeps three engines: duckduckgo, brave and youtube. DuckDuckGo often answers a
-self-hosted instance with a CAPTCHA and returns 0 results, which is why Brave is enabled too. Even so, repeated
-queries can return 0 results for a while. When a resource shows no candidates, paste its URL in the spec review.
+videos. Its secret (`SEARXNG_SECRET`, set in [Start the stack](#start-the-stack)) is read from the environment,
+never from the settings file. SearXNG listens on http://127.0.0.1:8888 and the API reaches it at
+`http://searxng:8080`. Its settings are in `docker/searxng/settings.yml`, which keeps three engines: duckduckgo,
+brave and youtube. DuckDuckGo often answers a self-hosted instance with a CAPTCHA and returns 0 results, which is
+why Brave is enabled too. Even so, repeated queries can return 0 results for a while. When a resource shows no
+candidates, paste its URL in the spec review.
 
 ## Adding a roadmap
 
