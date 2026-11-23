@@ -210,11 +210,11 @@ async def test_failed_call_releases_key(server, engine, monkeypatch):
         with pytest.raises(ToolError):
             await c.call_tool("create_roadmap", _args(idempotency_key="abc"))
         monkeypatch.setattr(real, orig)
-        # the draft roadmap from the failed attempt exists; the key itself is free again (not "still running")
-        with pytest.raises(ToolError, match="already exists"):
-            await c.call_tool("create_roadmap", _args(idempotency_key="abc"))
+        assert _row(engine) is None  # nothing left behind
+        data = (await c.call_tool("create_roadmap", _args(idempotency_key="abc"))).data
+        assert data["status"] == "parsed"
     with session_scope(engine) as s:
-        assert s.execute(text("SELECT count(*) FROM mcp_idempotency")).scalar() == 0
+        assert s.execute(text("SELECT count(*) FROM mcp_idempotency")).scalar() == 1  # only the successful retry
 
 
 async def test_running_claim_is_reported(server, engine):

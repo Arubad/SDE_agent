@@ -54,3 +54,11 @@ def test_running_claim_reported(engine):
 
 def test_args_hash_is_canonical():
     assert args_hash({"a": 1, "b": 2}) == args_hash({"b": 2, "a": 1})
+
+
+def test_stale_claim_is_reclaimed(engine):
+    with session_scope(engine) as s:
+        s.execute(text("INSERT INTO mcp_idempotency (tool, key, args_hash, created_at) "
+                       "VALUES ('t', 'k', :h, now() - interval '1 hour')"), {"h": args_hash({})})
+    assert run_idempotent(engine, "t", "k", {}, lambda: {"v": 1}) == {"v": 1}
+    assert run_idempotent(engine, "t", "k", {}, lambda: {"v": 2}) == {"v": 1}

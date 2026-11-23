@@ -103,15 +103,22 @@ def build_ingestion_server(engine: Engine, net, settings, *, on_settled) -> Fast
         try:
             with session_scope(engine) as s:
                 return service.parse_and_resolve(s, net, _find(s, slug, lock=True))
-        except (service.Conflict, LLMUnavailable) as exc:
-            raise ValueError(str(exc)) from exc
+        except BaseException as exc:  # nothing is left behind, so a retry starts clean
+            with session_scope(engine) as s:
+                rm = get_roadmap_by_slug(s, slug)
+                if rm is not None:
+                    s.delete(rm)
+            if isinstance(exc, (service.Conflict, LLMUnavailable)):
+                raise ValueError(str(exc)) from exc
+            raise
 
     @server.tool
     async def create_roadmap(slug: str, title: str, source_text: str, ctx: Context,
                              idempotency_key: str | None = Field(None, max_length=128)) -> dict:
         """Create a roadmap from pasted text and parse it (one model call). The human is then asked to approve
         ingesting the top-scored resource for each item; without approval it stays parsed for the app or
-        approve_roadmap. The human approves this call in their MCP client."""
+        approve_roadmap. The human approves this call in their MCP client. If parsing fails, the roadmap is
+        removed again so a retry starts clean."""
         async def work() -> dict:
             parsed = await anyio.to_thread.run_sync(_create_and_parse, slug, title, source_text)
             choices = top_choices(parsed["resolution"])
@@ -130,7 +137,8 @@ def build_ingestion_server(engine: Engine, net, settings, *, on_settled) -> Fast
     @server.tool
     async def approve_roadmap(slug: str, idempotency_key: str | None = Field(None, max_length=128)) -> dict:
         """Approve a parsed roadmap, ingesting the top-scored resource for each item (for clients without
-        elicitation). The human approves this call in their MCP client."""
+        elicitation). Candidates are looked up again; they can differ from what create_roadmap showed. The human
+        approves this call in their MCP client."""
         return await anyio.to_thread.run_sync(
             run_idempotent, engine, "approve_roadmap", idempotency_key, {"slug": slug},
             lambda: _approve(slug, None))

@@ -1,8 +1,8 @@
 """Idempotent MCP writes: a client retry with the same key gets the stored result instead of a second write.
 
 A key is claimed with INSERT ... ON CONFLICT DO NOTHING (`result` null = running). Success stores the result;
-failure deletes the claim so a retry can run again. A claim whose process died stays "running" until its row is
-removed by hand (the tools are quick, so this is rare)."""
+failure deletes the claim so a retry can run again. A claim still running after STALE_CLAIM_S is abandoned: the
+next call re-claims it atomically and runs."""
 from __future__ import annotations
 
 import hashlib
@@ -15,6 +15,7 @@ from sqlalchemy.engine import Engine
 
 from backend.tutor.db import session_scope
 
+STALE_CLAIM_S = 900  # a claim still running after this long is taken to be abandoned (its process died)
 REUSED = "idempotency key reused with different arguments"
 RUNNING = "a request with this idempotency key is still running"
 
@@ -36,6 +37,13 @@ def _claim(engine: Engine, tool: str, key: str, digest: str) -> dict | None:
     if row.args_hash != digest:
         raise ValueError(REUSED)
     if row.result is None:
+        with session_scope(engine) as s:
+            took = s.execute(
+                text("UPDATE mcp_idempotency SET created_at = now() WHERE tool = :t AND key = :k "
+                     "AND result IS NULL AND created_at < now() - make_interval(secs => :s)"),
+                {"t": tool, "k": key, "s": STALE_CLAIM_S}).rowcount
+        if took:
+            return None
         raise ValueError(RUNNING)
     return row.result
 
