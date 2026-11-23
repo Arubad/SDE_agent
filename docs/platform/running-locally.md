@@ -30,6 +30,11 @@ With `export`, the secret lasts for that shell only; put it in the `.env` next t
 Open http://127.0.0.1:8000. `curl http://127.0.0.1:8000/api/health` should report `"status": "ok"` and
 `"db": "ok"`.
 
+Outside public mode the API answers `/api/*` only for a loopback `Host` (`127.0.0.1`, `localhost` or `[::1]`, any
+port) and refuses a cross-site `Origin` (403), like the `/mcp/*` endpoints. Open the app at one of those names, not
+at a LAN address or a custom hostname. `/api/health` and the web app's static files are exempt. The Vite dev server
+(`npm run dev`) keeps the `localhost:5173` Host when it proxies `/api`, so it works unchanged.
+
 `backend/.env` reaches the API container only as environment variables (`env_file`). It is never copied into
 the image. Compose sets `DATABASE_URL`, `PLATFORM_QDRANT_URL`, `SEARXNG_URL`, `HOST`, `PORT` and `WEB_DIST`
 itself, so those always point at the containers whatever `.env` says.

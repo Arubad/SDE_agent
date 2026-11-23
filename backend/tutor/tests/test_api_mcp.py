@@ -1,7 +1,6 @@
 import json
 
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from backend.agent import access
@@ -9,6 +8,7 @@ from backend.core import config
 from backend.tutor.api import create_app
 from backend.tutor.db import session_scope
 from backend.tutor.settings import Settings
+from backend.tutor.tests.clients import local_client
 
 TOKEN = "ghp_FAKE_TOKEN_for_tests_0123456789"
 
@@ -53,7 +53,7 @@ def _clean_state(engine):
 
 @pytest.fixture
 def client(engine, tmp_path, registry):
-    with TestClient(_app(engine, tmp_path, registry)) as c:
+    with local_client(_app(engine, tmp_path, registry)) as c:
         yield c
 
 
@@ -73,14 +73,14 @@ def test_list_servers_hides_secrets(client):
 
 
 def test_toggle_persists_and_updates_health(engine, tmp_path, registry):
-    with TestClient(_app(engine, tmp_path, registry)) as first:
+    with local_client(_app(engine, tmp_path, registry)) as first:
         assert first.get("/api/mcp/servers").json()[0]["state"] == "ok"
         r = first.put("/api/mcp/servers/web", json={"enabled": False})
         assert r.status_code == 200
         assert r.json()["state"] == "disabled" and r.json()["enabled"] is False
         by = {h["name"]: h for h in first.get("/api/mcp/servers").json()}
         assert by["web"]["state"] == "disabled"
-    with TestClient(_app(engine, tmp_path, registry)) as second:  # an app restart on the same database
+    with local_client(_app(engine, tmp_path, registry)) as second:  # an app restart on the same database
         assert {h["name"]: h for h in second.get("/api/mcp/servers").json()}["web"]["state"] == "disabled"
         r = second.put("/api/mcp/servers/web", json={"enabled": True})
         assert r.json()["state"] == "ok" and r.json()["enabled"] is True
@@ -99,7 +99,7 @@ def test_unknown_server_404(client):
 
 def test_public_mode_guards_mcp_api(engine, tmp_path, registry, monkeypatch):
     monkeypatch.setattr(config, "PREMIUM_PASSCODE", "pw123456")
-    with TestClient(_app(engine, tmp_path, registry, public_mode=True)) as c:
+    with local_client(_app(engine, tmp_path, registry, public_mode=True)) as c:
         for r in (c.get("/api/mcp/servers"), c.post("/api/mcp/servers/web/check"),
                   c.put("/api/mcp/servers/web", json={"enabled": False})):
             assert r.status_code == 401

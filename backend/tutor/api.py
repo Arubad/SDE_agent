@@ -28,7 +28,7 @@ from backend.tutor.ingest.index import make_index
 from backend.tutor.ingest.net import make_net
 from backend.tutor.jobs.worker import JobContext, WorkerPool, maybe_settle
 from backend.tutor.mcp.build import OWN_SERVERS, build_gateway, build_own_servers
-from backend.tutor.mcp.http import mount_mcp
+from backend.tutor.mcp.http import LOOPBACK_HOSTS, host_name, loopback_origin, mount_mcp
 from backend.tutor.mcp.registry import set_enabled
 from backend.tutor.repo import DuplicateRoadmap, create_roadmap, get_roadmap_by_slug, list_roadmaps
 from backend.tutor.roadmap.parse import normalize_spec
@@ -166,6 +166,16 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
             # must never reach an API that has no passcode guard. The edge always adds these headers.
             if any(h in request.headers for h in _TUNNEL_HEADERS):
                 return _error(403, "This server is not in public mode; tunnel traffic is refused.")
+            # No passcode guard here, so /api/* takes McpGuard's rules: a loopback Host (DNS rebinding; a page in
+            # the gateway's browser reaching the API by its browser-network IP) and no cross-site Origin. The SPA's
+            # static files and the health check (container healthcheck) stay open.
+            path = request.url.path
+            if path.startswith("/api/") and path != "/api/health":
+                if host_name(request.headers.get("host")) not in LOOPBACK_HOSTS:
+                    return _error(403, "This API accepts only a loopback Host header.")
+                origin = request.headers.get("origin")
+                if origin is not None and not loopback_origin(origin):
+                    return _error(403, "Cross-site requests to this API are refused.")
             return await call_next(request)
 
     else:

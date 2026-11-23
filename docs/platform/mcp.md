@@ -113,7 +113,10 @@ Residual risk, stated plainly:
 
 - Blocked origins do not cover redirects (Playwright says so). A public page that redirects to an internal address
   is caught only by the gateway's final `Page URL:` check, which runs after the request was made.
-- The API stays reachable by its IP on the `browser` network.
+- The API stays reachable by its IP on the `browser` network. Outside public mode its `/api/*` routes answer only
+  a loopback `Host` and refuse a cross-site `Origin` (403; `/api/health` and the web app's static files are exempt),
+  so a script on a rendered page, or a DNS-rebinding site in the learner's browser, cannot call them (for example to
+  approve an agent's proposal or start a paid roadmap parse). In public mode the passcode guard covers them instead.
 - LAN addresses, `[::1]` and `0.0.0.0` are covered only by the gateway's checks, not by blocked origins.
 - Sub-resource requests a page makes (images, scripts, `fetch` calls) are not seen by the gateway. A live
   `evaluate` that fetched an internal address failed, but that may be mixed-content blocking, not the blocklist.
