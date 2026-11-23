@@ -227,6 +227,36 @@ async def test_search_results_become_allowed():
         assert p.refusal("http://intranet.example/x") is not None
 
 
+async def test_fenced_search_url_passed_back_is_unwrapped_for_check_approval_and_call():
+    """A web.search URL reaches the model fenced; passed back as shown, the fence is stripped once (url / *_url
+    arguments only) and the same unwrapped arguments are policed, shown to the approver and sent."""
+    navs, seen, calls = [], [], []
+    tools, _ = _counted("tools", calls)
+    servers = {"web": _web([]), "playwright": _browser(navs, {}), "tools": tools}
+
+    def approve(payload):
+        seen.append(payload["args"])
+        return True
+
+    specs = [_spec("web"), _browser_spec(), _spec("tools")]
+    with _gateway(specs, servers, ask=["browser.navigate"], cls=_FakeExternal) as gw:
+        ctx = CallContext(agent="all", policy=_policy(), approve=approve)
+        fenced = (await gw.call("web.search", {"query": "q"}, ctx))["data"]["results"][0]["url"]
+        assert fenced == f"<{TAG}>https://example.org/a</{TAG}>"
+        out = await gw.call("browser.navigate", {"url": fenced}, ctx)
+        assert "data" in out, out
+        assert navs == ["https://example.org/a"] and seen == [{"url": "https://example.org/a"}]
+        unlisted = await gw.call("browser.navigate", {"url": f"<{TAG}>https://unlisted.example/</{TAG}>"}, ctx)
+        assert unlisted["error"].startswith("refused by URL policy: ")
+        assert navs == ["https://example.org/a"] and len(seen) == 1  # refused before anyone was asked
+        args = {"url": fenced, "source_url": f" <{TAG}>https://example.org/s</{TAG}>\n", "page_url": [fenced]}
+        assert "data" in await gw.call("tools.fetch", args, ctx)
+        assert calls == [("fetch", "https://example.org/a")]
+        topic = f"<{TAG}>graphs</{TAG}>"  # not a URL argument: passed on as given
+        assert "data" in await gw.call("tools.recall", {"topic": topic}, ctx)
+        assert calls[-1] == ("recall", topic)
+
+
 async def test_url_arguments_checked_before_connecting():
     calls = []
     s, state = _counted("tools", calls)
@@ -242,6 +272,34 @@ async def test_url_arguments_checked_before_connecting():
         assert "data" in await gw.call("tools.fetch", ok, ctx)
         assert await gw.call("tools.recall", {"topic": "http://127.0.0.1/"}, ctx) == {
             "data": {"result": f"<{TAG}>recalled</{TAG}>"}}  # only url / *_url arguments are URLs
+
+
+def _redirecting_web(finals):
+    """web.fetch shaped like the own server's: {"url", "final_url", "title", "markdown"}."""
+    s = FastMCP("web")
+
+    @s.tool
+    def fetch(url: str) -> dict:
+        return {"url": url, "final_url": finals.get(url, url), "title": "t", "markdown": "secret page text"}
+
+    return s
+
+
+async def test_web_fetch_final_url_must_pass_the_policy():
+    finals = {"https://ok.example/away": "https://elsewhere.example/landing",
+              "https://ok.example/inside": "http://10.0.0.5/admin",
+              "https://ok.example/moved": "https://OK.example./new"}
+    with _gateway([_spec("web")], {"web": _redirecting_web(finals)}) as gw:
+        ctx = CallContext(agent="all", policy=_policy("https://ok.example/"))
+        for url in ("https://ok.example/away", "https://ok.example/inside"):
+            out = await gw.call("web.fetch", {"url": url}, ctx)
+            assert set(out) == {"error"} and out["error"].startswith("navigation left the allowed sites: "), url
+            assert "secret page text" not in json.dumps(out)
+        out = await gw.call("web.fetch", {"url": "https://ok.example/moved"}, ctx)  # same site: returned, fenced
+        assert out["data"]["final_url"] == f"<{TAG}>https://OK.example./new</{TAG}>"
+        # no policy (the crawler's jobs carry their own scope): no check
+        out = await gw.call("web.fetch", {"url": "https://ok.example/away"}, CallContext(agent="all"))
+        assert "data" in out
 
 
 async def test_browser_final_url_off_policy_is_discarded():

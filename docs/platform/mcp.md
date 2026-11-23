@@ -81,7 +81,11 @@ roadmap's resources, plus same-site navigation from those pages. Private, loopba
 always refused, resolved through real DNS off the gateway's event loop. How it is checked:
 
 - **Arguments**: every `url` or `*_url` argument is checked before the call. Results of `web.search` add their URLs
-  to the agent's allowed list (read from the raw result, before fencing).
+  to the agent's allowed list (read from the raw result, before fencing). Those URLs reach the model fenced; when one
+  comes back as an argument with the fence around it, the gateway strips that one fence first, and the check, the
+  approver and the server all get the same stripped value.
+- **`web.fetch` redirects**: the fetcher address-checks every redirect hop, and the gateway also checks the result's
+  `final_url` against the policy. A fetch that ended on another site is an error result; its content is discarded.
 - **Browser results**: after every browser call the `Page URL:` line of the result is checked. A browser result
   without one (except `close` and `evaluate`) is refused. A page that is off-policy gets the browser reset to
   `about:blank` and an error result: the content is discarded, never shown.
@@ -296,8 +300,9 @@ Outcomes that were not clean:
 - The first browser run used `https://kubernetes.io/` with the URL added to the policy by hand (the search returned
   nothing); it loaded and snapshotted. The run in the table used a search result, as an agent would.
 - `web.search` results come back fenced (`<untrusted_web_content>` around the URL too). The first attempt to
-  navigate with the fenced string was refused (`only absolute http(s) URLs with a host`); a client has to strip the
-  fence from a URL it takes from a result. The model does this by reading the text; a script must do it itself.
+  navigate with the fenced string was refused (`only absolute http(s) URLs with a host`). That was a gateway bug,
+  since fixed: the gateway now strips one exact fence from every `url` / `*_url` argument before checking and
+  calling, so a URL passed back as it was shown works (`test_mcp_policy.py`).
 - The tool name for DeepWiki's page list is `read_wiki_structure`; a first guess (`ask_question`) was
   `unknown tool`. Use the Settings page or `tools/list` to see names.
 

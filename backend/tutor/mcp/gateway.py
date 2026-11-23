@@ -13,7 +13,10 @@
   whenever the canonical name is known without listing (every canonical name and every unhashed wire name); a
   hashed wire name not listed yet is listed first, but never called before the gate. URL checks (which may
   resolve DNS) run in a worker thread, never on the gateway loop.
-- With a policy, after the call and before fencing: `web.search` result URLs become allowed sources, and a
+- Fenced URLs: every `url` / `*_url` argument has one exact `untrusted.wrap` fence stripped first (the model passes
+  a web.search URL back as it was shown); the gate, the approver and the call all get these same arguments.
+- With a policy, after the call and before fencing: `web.search` result URLs become allowed sources, a `web.fetch`
+  whose `final_url` (where its redirects ended) is refused becomes an error, and a
   `browser.*` result whose `Page URL:` is refused, or that reports none (except `close`, `evaluate` and errors),
   becomes an error, after an internal `browser.navigate` to `about:blank` (not gated, not policed, never shown;
   its failure is ignored).
@@ -56,7 +59,7 @@ from mcp.shared.exceptions import McpError
 from backend.core.redact import redact
 from backend.core.trace import Trace
 from backend.tutor.mcp.registry import Registry, ServerSpec, effective_enabled, missing_env
-from backend.tutor.mcp.policy import arg_urls, page_urls, search_result_urls
+from backend.tutor.mcp.policy import arg_urls, page_urls, search_result_urls, unwrap_url_args
 from backend.tutor.mcp.results import _finish, _leaves, _shape
 from backend.tutor.untrusted import wrap
 
@@ -415,6 +418,7 @@ class Gateway:
     async def _call(self, name: str, args: dict, ctx: CallContext) -> dict:
         if ctx.raw and ctx.agent != RAW_AGENT:
             return {"error": f"raw results are only for the {RAW_AGENT} agent"}
+        args = unwrap_url_args(args)  # once: the policy check, the approver and the call all see these
         tool = self._names.get(name)
         owners = self._owners(name)
         gated = None  # (server, canonical) already gated
@@ -519,11 +523,16 @@ class Gateway:
 
     async def _after(self, conn: _Conn, tool: _Tool, out: dict, ctx: CallContext) -> dict | None:
         """On the raw shaped result (before fencing and capping): web.search results become allowed sources; a
-        browser result whose `Page URL:` is off-policy, or a non-error one with no such line (fail closed; only
+        web.fetch whose `final_url` (after redirects) is off-policy becomes an error; a browser result whose `Page URL:` is off-policy, or a non-error one with no such line (fail closed; only
         `close` and the crawler's `evaluate` carry none), is replaced by an error and the page is reset. The
         policy calls (DNS) run off the loop."""
         if tool.canonical == "web.search" and (found := search_result_urls(out.get("data"))):
             await asyncio.to_thread(ctx.policy.allow_sources, found)
+        data = out.get("data")
+        if tool.canonical == "web.fetch" and isinstance(data, dict) and "final_url" in data:
+            if (reason := await asyncio.to_thread(_first_refusal, ctx.policy, [data["final_url"]])) is not None:
+                return {"error": f"navigation left the allowed sites: {reason}"}  # a redirect off the sites
+            return None
         ns = tool.spec.namespace
         if ns != "browser":
             return None

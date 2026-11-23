@@ -21,6 +21,7 @@ from collections.abc import Iterable, Mapping
 from urllib.parse import urlsplit
 
 from backend.tutor.ingest.fetch import PRIVATE_ADDRESS, Resolver, address_refusal, system_resolver
+from backend.tutor.untrusted import unwrap
 
 MAX_URL = 2048
 NOT_HTTP = "only absolute http(s) URLs with a host"
@@ -32,12 +33,30 @@ _TRAILING = ").,;:!?]}>—'\""
 _PAGE_URL = re.compile(r"^[ \t]*(?:- )?Page URL:[ \t]*(\S+)", re.M)
 
 
+def _is_url_key(key) -> bool:
+    return key == "url" or (isinstance(key, str) and key.endswith("_url"))
+
+
+def unwrap_url_args(args: Mapping) -> dict:
+    """`args` with one exact untrusted fence stripped from every `url` / `*_url` value (a string, or the strings in
+    a list): the model passes a web.search URL back as it was shown, fenced. Other arguments are left as given.
+    The gateway builds this once per call and uses it for the policy check, the approver and the call alike."""
+    out = {}
+    for key, value in args.items():
+        if _is_url_key(key) and isinstance(value, list):
+            value = [unwrap(v) for v in value]
+        elif _is_url_key(key):
+            value = unwrap(value)
+        out[key] = value
+    return out
+
+
 def arg_urls(args: Mapping) -> list[str]:
     """The URLs a tool call carries: every top-level argument named `url` or ending in `_url` whose value is a
     string, or the strings in it when it is a list."""
     out: list[str] = []
     for key, value in args.items():
-        if key != "url" and not (isinstance(key, str) and key.endswith("_url")):
+        if not _is_url_key(key):
             continue
         if isinstance(value, str):
             out.append(value)
