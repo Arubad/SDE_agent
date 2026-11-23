@@ -11,7 +11,8 @@ another resource reached the same URL first); everything discovered is keyed roa
 playlist, PDF or repo is processed once per roadmap.
 
 Crawl limits: links are followed while `depth < crawl_max_depth`, only on the resource's host and under its
-root path (`discover`), and each page or PDF takes a slot from `Resource.stats.pages`, reserved by one atomic
+root path (`discover`; when the resource's own page redirected, e.g. apex -> www, the host and root it landed
+on, kept in `Resource.meta.final_url`), and each page or PDF takes a slot from `Resource.stats.pages`, reserved by one atomic
 `UPDATE ... RETURNING` that fails once `crawl_max_pages` slots are taken (safe with any number of workers;
 `finalize_roadmap` later rewrites `stats.pages` to the number of documents fetched).
 
@@ -161,6 +162,28 @@ def _root_path(url: str) -> str:
     return path if path.endswith("/") else path.rsplit("/", 1)[0] + "/"
 
 
+def _scope_url(res: Resource) -> str:
+    """The URL whose host and root path bound the resource's crawl: where its own page actually lives
+    (`meta.final_url`, recorded when it redirected, e.g. apex -> www), else its URL."""
+    return (res.meta or {}).get("final_url") or res.url
+
+
+def _record_final_url(engine: Engine, res: Resource, final: str) -> None:
+    """Remember (or forget) where the resource's own page redirected to; updates `res.meta` in place."""
+    moved = final if (urlsplit(final).hostname, _root_path(final)) != (
+        urlsplit(res.url).hostname, _root_path(res.url)) else None
+    if moved == (res.meta or {}).get("final_url"):
+        return
+    with session_scope(engine) as s:
+        if moved:
+            s.execute(text("UPDATE resources SET meta = meta || jsonb_build_object('final_url', CAST(:u AS text)) "
+                           "WHERE id = :id"), {"u": moved, "id": res.id})
+        else:
+            s.execute(text("UPDATE resources SET meta = meta - 'final_url' WHERE id = :id"), {"id": res.id})
+    meta = {k: v for k, v in (res.meta or {}).items() if k != "final_url"}
+    res.meta = {**meta, "final_url": moved} if moved else meta
+
+
 # -- handlers -------------------------------------------------------------------------------------
 def ingest_resource(ctx, job: Job) -> dict:
     res = _resource(ctx.engine, job.payload["resource_id"])
@@ -207,17 +230,21 @@ def fetch_page(ctx, job: Job) -> dict:
                     reason=None if has_text else "no_text",
                     content_hash=hashlib.sha256(page.markdown.encode()).hexdigest(),  # == content_hash(fr)
                     meta={"depth": depth, "final_url": fr.url, "words": page.word_count, "lang": page.lang})
-    found = discover(html, fr.url, focus=list(res.focus or []), root=_root_path(res.url))
-    queued = _enqueue_discoveries(ctx, job, res, found, depth)
+    if owner and depth == 0:
+        _record_final_url(ctx.engine, res, fr.url)  # every hop was address-checked by the fetcher
+    scope = _scope_url(res)
+    found = discover(html, fr.url, focus=list(res.focus or []), root=_root_path(scope))
+    queued = _enqueue_discoveries(ctx, job, res, found, depth, scope)
     if has_text:
         _chunk(ctx, job, res, doc_id)
     return {"words": page.word_count, **queued}
 
 
-def _enqueue_discoveries(ctx, job: Job, res: Resource, found, depth: int) -> dict:
+def _enqueue_discoveries(ctx, job: Job, res: Resource, found, depth: int, scope: str) -> dict:
     """Enqueue what a crawled page links to. Videos and playlists are free; PDFs, GitHub repos and same-site
-    pages each reserve one of the resource's `crawl_max_pages` slots, taken in that order (pages, PDFs, repos)
-    so a full budget never starves the docs crawl; once none is left nothing more is enqueued."""
+    pages (on `scope`'s host; see `_scope_url`) each reserve one of the resource's `crawl_max_pages` slots, taken
+    in that order (pages, PDFs, repos) so a full budget never starves the docs crawl; once none is left nothing
+    more is enqueued."""
     rid, rs = str(res.id), job.roadmap_id
     for vid in found.videos:
         _enqueue(ctx, job, "video", {"resource_id": rid, "video_id": vid}, (vid,))
@@ -225,10 +252,10 @@ def _enqueue_discoveries(ctx, job: Job, res: Resource, found, depth: int) -> dic
         _enqueue(ctx, job, "expand_playlist", {"resource_id": rid, "list_id": lst}, (lst,))
     cap, full, links = ctx.settings.crawl_max_pages, False, 0
     if depth < ctx.settings.crawl_max_depth:  # same-site pages first: they are the knowledge base
-        host = (urlsplit(res.url).hostname or "").lower()
-        own = queue.normalize_url(res.url)
+        host = (urlsplit(scope).hostname or "").lower()
+        own = {queue.normalize_url(res.url), queue.normalize_url(scope)}
         for link in found.links:
-            if (urlsplit(link).hostname or "").lower() != host or queue.normalize_url(link) == own:
+            if (urlsplit(link).hostname or "").lower() != host or queue.normalize_url(link) in own:
                 continue
             if _key_exists(ctx.engine, "fetch_page", rs, link):  # also makes a retried job reserve nothing twice
                 continue

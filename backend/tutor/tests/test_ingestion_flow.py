@@ -231,6 +231,45 @@ def test_crawl_limits(engine, tmp_path, clock):
     assert _resources(engine, rid)["hub"].stats["pages"] == 2
 
 
+def test_resource_url_redirecting_to_another_host_crawls_that_host(engine, tmp_path, clock):
+    """apex -> www (and any move of the resource's own page): links are followed on the host and under the
+    root the resource actually lives at, recorded as Resource.meta.final_url."""
+    links = '<a href="/docs/a">A</a><a href="/docs/b">B</a><a href="https://apex.test/docs/c">apex</a>'
+    site = _site(tmp_path / "net", {
+        "https://apex.test/docs/": {"status": 301, "body": "", "headers": {"location": "https://www.apex.test/docs/"}},
+        "https://www.apex.test/docs/": _page("Docs", _prose("Docs root"), links + '<a href="/docs/">self</a>'),
+        "https://www.apex.test/docs/a": _page("A", _prose("Page A"), '<a href="/docs/a/deeper">deeper</a>'),
+        "https://www.apex.test/docs/a/deeper": _page("Deeper", _prose("Deeper page")),
+        "https://www.apex.test/docs/b": _page("B", _prose("Page B")),
+        "https://www.apex.test/other/x": _page("X", _prose("Outside the root")),
+    })
+    ctx = _ctx(engine, site)
+    rid = _roadmap(engine, "redir", [("docs", "doc", "https://apex.test/docs/")])
+    _drain(ctx, rid, clock)
+    assert sorted(d.url for d in _docs(engine, rid)) == [
+        "https://apex.test/docs/", "https://www.apex.test/docs/a", "https://www.apex.test/docs/a/deeper",
+        "https://www.apex.test/docs/b"]
+    r = _resources(engine, rid)["docs"]
+    assert r.meta["final_url"] == "https://www.apex.test/docs/"
+    assert (r.status, r.stats["pages"]) == ("done", 4) and _status(engine, rid) == "ready"
+
+
+def test_redirect_hops_of_a_moved_resource_are_still_address_checked(engine, tmp_path, clock):
+    """The crawl follows the resource to its new host, but every fetch there still passes the private-address
+    guard: a sub-page link that redirects to a metadata address is refused, never requested."""
+    site = _site(tmp_path / "net", {
+        "https://apex.test/docs/": {"status": 301, "body": "", "headers": {"location": "https://www.apex.test/docs/"}},
+        "https://www.apex.test/docs/": _page("Docs", _prose("Docs root"), '<a href="/docs/evil">E</a>'),
+        "https://www.apex.test/docs/evil": {"status": 302, "body": "",
+                                            "headers": {"location": "http://169.254.169.254/latest/"}},
+    })
+    ctx = _ctx(engine, site)
+    rid = _roadmap(engine, "redir2", [("docs", "doc", "https://apex.test/docs/")])
+    _drain(ctx, rid, clock)
+    evil = next(d for d in _docs(engine, rid) if d.url.endswith("/evil"))
+    assert (evil.status, evil.meta["detail"]) == ("failed", "private_address")
+
+
 def test_page_cap_holds_with_concurrent_workers(engine, tmp_path):
     pages = {"https://flow.test/wide/": _page("Wide", _prose("Wide root"), "".join(
         f'<a href="/wide/c{i}">C{i}</a>' for i in range(8)))}
