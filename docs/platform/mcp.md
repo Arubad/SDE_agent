@@ -48,7 +48,11 @@ an on/off switch (`GET /api/mcp/servers`; the switch is stored in the database a
 - Secrets: health output and errors are redacted, every header value and every `requires_env` value is shown as
   `[redacted]`, and the registry refuses a `${VAR}` without a default in `headers`, `url` or `args` unless the
   variable is in `requires_env`. A stdio child gets only the MCP default environment plus its own `requires_env`
-  keys, so API keys in the API's environment do not reach third-party servers.
+  keys, so the API's keys are not passed to third-party servers. That is not isolation, and it leaves a
+  supply-chain risk: the stdio children (`arxiv`, `wikipedia`) run as the API's user inside the API container, so
+  a compromised release of one could read the API's environment (`/proc/<ppid>/environ`) and reach Postgres and the
+  other services on the API's networks. The packages are pinned to exact versions in `servers.json`; review an
+  upgrade before raising a pin.
 
 ## Agent allow-lists and rules
 
@@ -156,9 +160,9 @@ Edit `backend/tutor/mcp/servers.json` (or point `MCP_REGISTRY` at another file) 
 
 ## Capability check
 
-The gateway (Phase 3) relies on four MCP features. `backend/tutor/tests/test_mcp_capabilities.py` pins them
-against the versions in `requirements.txt`: `mcp` 1.30.0 and `fastmcp` 3.4.11. All four pass, so nothing is
-dropped and no pin was raised.
+The gateway (Phase 3) relies on four MCP features. `backend/tutor/tests/test_mcp_capabilities.py` checks them;
+they were tested with `mcp` 1.30.0 and `fastmcp` 3.4.11. All four pass, so nothing is dropped and no pin was
+raised.
 
 | Feature | Result |
 | --- | --- |
