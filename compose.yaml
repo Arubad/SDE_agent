@@ -75,16 +75,21 @@ services:
     restart: unless-stopped
 
   playwright-mcp:
-    # Playwright MCP (headless Chromium) over streamable HTTP at /mcp. It sits alone on the `browser` network, so
-    # it cannot resolve postgres, qdrant, searxng or phoenix; the API joins `browser` to reach it.
+    # Playwright MCP (headless Chromium) over streamable HTTP at /mcp. It sits alone on the `browser` network, which
+    # removes name resolution of postgres, qdrant, searxng and phoenix; the API joins `browser` to reach it.
+    # --blocked-origins (port wildcards) covers the ports the stack publishes on the host, reached through
+    # host.docker.internal / gateway.docker.internal and the loopback names, and the API by its `api` name. The API
+    # stays reachable by its browser-network IP, and LAN addresses are not listed: only the gateway's URL policy
+    # (the address check before navigating, and the final `Page URL:` check) covers those.
     # Flags checked against `docker run --rm mcr.microsoft.com/playwright/mcp:v0.0.86 --help`:
     #   --allowed-hosts <hosts...>   comma-separated Host header values the server accepts. It replaces the default
     #                                (localhost/loopback) and compares host:port exactly, so the API's
     #                                `playwright-mcp:8931` and the host-side `127.0.0.1:8931` / `localhost:8931`
     #                                are all listed.
-    #   --blocked-origins <origins>  semicolon-separated origins the browser may not request. Playwright says this
-    #                                is not a security boundary (redirects are not covered): the gateway's URL
-    #                                policy on every reported `Page URL:` is the real check.
+    #   --blocked-origins <origins>  semicolon-separated origins the browser may not request. Each entry becomes
+    #                                `<origin>/**`, so `http://localhost` alone would block port 80 only; the
+    #                                image accepts a port wildcard (`http://host:*`), used for every entry here.
+    #                                Playwright says this is not a security boundary (redirects are not covered).
     # The image's entrypoint already passes --headless --browser chromium --no-sandbox; they are repeated here
     # so the whole command line is visible.
     image: mcr.microsoft.com/playwright/mcp:v0.0.86
@@ -101,7 +106,9 @@ services:
       - --allowed-hosts
       - playwright-mcp:8931,127.0.0.1:8931,localhost:8931
       - --blocked-origins
-      - http://api:8000;http://host.docker.internal;http://localhost;http://127.0.0.1
+      - "http://api:*;https://api:*;http://host.docker.internal:*;https://host.docker.internal:*;\
+        http://gateway.docker.internal:*;https://gateway.docker.internal:*;http://localhost:*;https://localhost:*;\
+        http://127.0.0.1:*;https://127.0.0.1:*"
     networks:
       - browser
     ports:
