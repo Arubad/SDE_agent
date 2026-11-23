@@ -322,6 +322,16 @@ def test_searxng_parses_results_and_sends_category():
     assert (out[0].title, out[0].url, out[0].snippet, out[0].engine) == ("T", "https://x.test/", "snip", "duckduckgo")
 
 
+def test_searxng_unescapes_html_entities_in_titles():
+    def handler(req):
+        return httpx.Response(200, json={"results": [
+            {"title": "Pods &amp; Services &#8211; Kubernetes &quot;docs&quot;", "url": "https://x.test/",
+             "content": "snip", "engine": "brave"}]})
+
+    s = SearxngSearch(httpx.Client(transport=httpx.MockTransport(handler)), "http://s.test/")
+    assert s.search("k8s")[0].title == 'Pods & Services \u2013 Kubernetes "docs"'
+
+
 def test_searxng_drops_hostless_and_duplicate_urls():
     def handler(req):
         return httpx.Response(200, json={"results": [

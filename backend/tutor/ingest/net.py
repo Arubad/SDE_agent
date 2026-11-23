@@ -5,6 +5,7 @@ tests, E2E and the CI eval run with no internet. The real YouTube adapter is del
 routing between transcript routes, throttling and circuit breaking live above it."""
 from __future__ import annotations
 
+import html
 import json
 import re
 from dataclasses import dataclass, field
@@ -105,7 +106,9 @@ class SearxngSearch:
             if not ok or url in seen:  # brave sometimes returns host-less redirects like http:///go/v1/...
                 continue
             seen.add(url)
-            out.append(SearchResult(r.get("title", ""), url, r.get("content", ""), r.get("engine", "")))
+            # engines hand SearXNG titles still HTML-escaped ("Pods &amp; Services"); shown and proposed as text
+            title = html.unescape(str(r.get("title") or ""))
+            out.append(SearchResult(title, url, r.get("content", ""), r.get("engine", "")))
         return out
 
 
