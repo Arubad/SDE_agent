@@ -14,7 +14,11 @@
   Then the whole result is capped at `CAP` characters of its JSON: the largest string leaves are cut and get
   ` [truncated N chars]` appended (after the fence, which is never cut). `CallContext.raw` (crawler only) skips
   the wrap and uses `RAW_CAP`.
-- Every timeout or transport error comes back as `{"error": ...}`; nothing here raises into the agent loop.
+- External (non-inproc) servers' tool descriptions reach the model fenced and capped (DESC_CHARS), and every
+  `description` inside their input schemas is cut to SCHEMA_DESC_CHARS; own (inproc) descriptions are our code.
+- Timeouts: connecting has its own budget (`max(timeout_s, stdio_connect_s)` for stdio, which may download a
+  package on first run; `timeout_s` otherwise), then the call gets `timeout_s`. Every timeout or transport error
+  comes back as `{"error": ...}`; nothing here raises into the agent loop.
 """
 from __future__ import annotations
 
@@ -51,6 +55,7 @@ RAW_CAP = 5 * 1024 * 1024
 RAW_AGENT = "crawler"
 ERROR_CHARS = 300
 RETRY_DOWN_S = 30.0  # tool_defs skips a server that failed this recently; call() always retries
+DESC_CHARS, SCHEMA_DESC_CHARS = 1024, 300  # external tool descriptions (then fenced) and schema descriptions
 _BAD = re.compile(r"[^a-zA-Z0-9_-]")
 
 
@@ -120,8 +125,10 @@ class _Conn:
 
 class Gateway:
     def __init__(self, registry: Registry, *, engine: Engine | None = None,
-                 inproc: Mapping[str, FastMCP] | None = None, env: Mapping[str, str] | None = None):
+                 inproc: Mapping[str, FastMCP] | None = None, env: Mapping[str, str] | None = None,
+                 stdio_connect_s: float = 60.0):
         self.registry = registry
+        self.stdio_connect_s = stdio_connect_s
         self.engine = engine
         self.inproc = dict(inproc or {})
         self.env = os.environ if env is None else env
@@ -238,18 +245,33 @@ class Gateway:
                 else:
                     await conn.client.ping()
                 conn.tools = await conn.client.list_tools()
-            except BaseException as e:
-                self._fail(conn, e)
+            except BaseException as e:  # CancelledError here is the connect budget running out (or stop())
+                self._fail(conn, self._reason(conn.spec, e, "connect "))
                 raise
             conn.state, conn.error, conn.failed_at = "ok", None, 0.0
             conn.latency_ms, conn.checked_at = round((time.perf_counter() - t0) * 1000), _now()
             self._rebuild_names()
             return conn.client
 
-    def _fail(self, conn: _Conn, e: BaseException) -> None:
+    def _connect_s(self, spec: ServerSpec) -> float:
+        return max(spec.timeout_s, self.stdio_connect_s) if spec.transport == "stdio" else spec.timeout_s
+
+    def _reason(self, spec: ServerSpec, e: BaseException, phase: str) -> str:
+        if isinstance(e, TimeoutError | asyncio.CancelledError):
+            return f"{phase}timed out after {self._connect_s(spec) if phase else spec.timeout_s}s"
+        return str(e) or type(e).__name__
+
+    async def _open(self, conn: _Conn, canonical: str) -> Client | dict:
+        """The connected client, or the error result for `canonical` (within the connect budget)."""
+        try:
+            return await asyncio.wait_for(self._connect(conn), self._connect_s(conn.spec))
+        except Exception as e:  # _connect already marked the server down (unless it never got the lock)
+            if isinstance(e, TimeoutError):
+                return {"error": f"{canonical} {self._reason(conn.spec, e, 'connect ')}"}
+            return {"error": f"{canonical} unavailable: {conn.error or self._scrub(conn.spec, str(e))[:ERROR_CHARS]}"}
+
+    def _fail(self, conn: _Conn, reason: str) -> None:
         spec = conn.spec
-        reason = f"timed out after {spec.timeout_s}s" if isinstance(e, TimeoutError | asyncio.CancelledError) \
-            else (str(e) or type(e).__name__)
         conn.state, conn.error = "down", self._scrub(spec, reason)[:ERROR_CHARS]
         conn.checked_at, conn.failed_at, conn.latency_ms = _now(), time.monotonic(), None
         self._drop(conn)
@@ -299,28 +321,41 @@ class Gateway:
                 if spec.strip_prefix and short.startswith(spec.strip_prefix) and len(short) > len(spec.strip_prefix):
                     short = short[len(spec.strip_prefix):]
                 canonical = f"{spec.namespace}.{short}"
+                desc, schema = t.description or "", t.inputSchema or {"type": "object", "properties": {}}
+                if spec.transport != "inproc":  # an external server wrote these: fence, and cap
+                    desc, schema = wrap(desc[:DESC_CHARS]), _cap_descriptions(schema)
                 tools.append(_Tool(spec, t.name, canonical, wire_name(canonical, namespace=spec.namespace),
-                                   t.description or "", t.inputSchema or {"type": "object", "properties": {}}))
+                                   desc, schema))
         for tool in sorted(tools, key=lambda x: x.canonical):
             if tool.wire in names:  # two namespaces that meet after "." -> "_": hash the later one
                 tool.wire = _hashed(tool.wire, tool.canonical)
             names[tool.wire] = names[tool.canonical] = tool
         self._names = names
 
-    def _guess(self, name: str) -> tuple[ServerSpec, str] | None:
-        """(server, canonical) from the name alone, without connecting: the longest namespace whose canonical
-        (`ns.`) or wire (`ns__`) prefix it starts with. Exact for every name that `wire_name` did not hash."""
-        best = None
+    def _owners(self, name: str) -> list[tuple[ServerSpec, str]]:
+        """(server, guessed canonical) for every namespace whose canonical (`ns.`) or wire (`ns__`) prefix the
+        name starts with, longest first. The guess is exact for every name `wire_name` did not hash."""
+        found = []
         for spec in self.registry.servers:
             ns = spec.namespace
             for prefix in (ns + ".", _BAD.sub("_", ns.replace(".", "_")) + "__"):
-                if name.startswith(prefix) and len(name) > len(prefix) and (
-                        best is None or len(ns) > len(best[0].namespace)):
-                    best = (spec, f"{ns}.{name[len(prefix):]}")
-        return best
+                if name.startswith(prefix) and len(name) > len(prefix):
+                    found.append((spec, f"{ns}.{name[len(prefix):]}"))
+                    break
+        return sorted(found, key=lambda f: -len(f[0].namespace))
 
     def _allowed(self, agent: str, canonical: str) -> bool:
         return any(fnmatchcase(canonical, p) for p in self.registry.agents.get(agent, ()))
+
+    def _could_allow(self, agent: str, namespace: str) -> bool:
+        """Whether any of the agent's patterns could match some `<namespace>.<tool>` (conservative: a pattern's
+        literal head and `namespace.` must agree as far as both go). False means refuse without connecting."""
+        head = namespace + "."
+        for p in self.registry.agents.get(agent, ()):
+            lit = re.split(r"[*?\[]", p, maxsplit=1)[0]
+            if lit.startswith(head) or head.startswith(lit):
+                return True
+        return False
 
     # ---- tool_defs / call --------------------------------------------------------------------------------------
     async def _tool_defs(self, agent: str) -> list[dict]:
@@ -337,7 +372,7 @@ class Gateway:
         failed in the last RETRY_DOWN_S; return the enabled, configured ones."""
         live = [s for s in self.registry.servers if self._blocked(s) is None]
         due = [s for s in live if not self._recently_failed(self._conn(s))]
-        await asyncio.gather(*(asyncio.wait_for(self._connect(self._conn(s)), s.timeout_s) for s in due), return_exceptions=True)
+        await asyncio.gather(*(self._open(self._conn(s), s.namespace) for s in due))
         return live
 
     def _recently_failed(self, conn: _Conn) -> bool:
@@ -347,10 +382,18 @@ class Gateway:
         if ctx.raw and ctx.agent != RAW_AGENT:
             return {"error": f"raw results are only for the {RAW_AGENT} agent"}
         tool = self._names.get(name)
-        if tool is None and self._guess(name) is None:  # e.g. a hashed name before any listing
-            await self._load_live()
+        owners = self._owners(name)
+        if tool is None:  # not listed yet (first use, after reset): list whichever servers could own it first
+            candidates = [s for s, _ in owners] or list(self.registry.servers)
+            candidates = [s for s in candidates if self._could_allow(ctx.agent, s.namespace) and not self._blocked(s)]
+            guessed = {s.name: c for s, c in owners}
+            opened = await asyncio.gather(*(self._open(self._conn(s), guessed.get(s.name, name)) for s in candidates))
             tool = self._names.get(name)
-        guess = (tool.spec, tool.canonical) if tool else self._guess(name)
+            if tool is None and owners and owners[0][0] in candidates:
+                failed = opened[candidates.index(owners[0][0])]
+                if isinstance(failed, dict):  # the likely owner is unreachable: report it, do not try again
+                    return failed
+        guess = (tool.spec, tool.canonical) if tool else (owners[0] if owners else None)
         if guess is None:
             return {"error": f"unknown tool {name}"}
         spec, canonical = guess
@@ -373,27 +416,25 @@ class Gateway:
     async def _invoke(self, spec: ServerSpec, canonical: str, name: str, args: dict, ctx: CallContext) -> dict:
         conn = self._conn(spec)
 
-        async def run() -> dict:
-            client = await self._connect(conn)  # (re)lists tools on a new connection
-            tool = self._names.get(name) or self._names.get(canonical)
-            if tool is None or tool.spec.name != spec.name:
-                return {"error": f"unknown tool {name}"}
-            if not self._allowed(ctx.agent, tool.canonical):  # the pre-connect check used a guessed name
-                return {"error": f"tool {tool.canonical} is not allowed for {ctx.agent}"}
-            return _finish(_shape(await client.call_tool(tool.name, args, raise_on_error=False)), spec, ctx)
-
+        client = await self._open(conn, canonical)  # (re)lists tools on a new connection
+        if isinstance(client, dict):
+            return client
+        tool = self._names.get(name) or self._names.get(canonical)
+        if tool is None or tool.spec.name != spec.name:
+            return {"error": f"unknown tool {name}"}
+        if not self._allowed(ctx.agent, tool.canonical):  # the pre-connect check used a guessed name
+            return {"error": f"tool {tool.canonical} is not allowed for {ctx.agent}"}
         try:
-            return await asyncio.wait_for(run(), spec.timeout_s)
-        except TimeoutError as e:
-            if conn.client is not None:  # timed out mid-call (a timeout mid-connect already failed the conn)
-                self._fail(conn, e)
-            return {"error": f"{canonical} timed out after {spec.timeout_s}s"}
+            result = await asyncio.wait_for(client.call_tool(tool.name, args, raise_on_error=False), spec.timeout_s)
         except McpError as e:  # the server answered with a protocol error: the connection is fine
             return _finish({"error": str(e)}, spec, ctx)
         except Exception as e:
-            if conn.client is not None:
-                self._fail(conn, e)
-            return {"error": f"{canonical} unavailable: {conn.error or self._scrub(spec, str(e))[:ERROR_CHARS]}"}
+            if conn.client is client:
+                self._fail(conn, self._reason(spec, e, ""))
+            if isinstance(e, TimeoutError):
+                return {"error": f"{canonical} timed out after {spec.timeout_s}s"}
+            return {"error": f"{canonical} unavailable: {self._scrub(spec, str(e) or type(e).__name__)[:ERROR_CHARS]}"}
+        return _finish(_shape(result), spec, ctx)
 
     # ---- health ------------------------------------------------------------------------------------------------
     async def _health(self, refresh: bool) -> list[ServerHealth]:
@@ -414,10 +455,10 @@ class Gateway:
             return h
         conn = self._conn(spec)
         try:
-            await asyncio.wait_for(self._connect(conn, relist=True), spec.timeout_s)
+            await asyncio.wait_for(self._connect(conn, relist=True), self._connect_s(spec))
         except Exception as e:
             if conn.state != "down":  # timed out before _connect could record it (e.g. waiting on the lock)
-                self._fail(conn, e)
+                self._fail(conn, self._reason(spec, e, "connect "))
         return self._report(spec, conn)
 
     def _report(self, spec: ServerSpec, conn: _Conn | None, state: str | None = None) -> ServerHealth:
@@ -454,6 +495,14 @@ def _shape(result) -> dict:
     if sc is not None:
         return {"data": json.loads(json.dumps(sc, default=str))}
     return {"data": {"text": _text(result)}}
+
+
+def _cap_descriptions(schema):
+    """A copy of a JSON schema with every string `description` cut to SCHEMA_DESC_CHARS."""
+    if isinstance(schema, dict):
+        return {k: v[:SCHEMA_DESC_CHARS] if k == "description" and isinstance(v, str) else _cap_descriptions(v)
+                for k, v in schema.items()}
+    return [_cap_descriptions(v) for v in schema] if isinstance(schema, list) else schema
 
 
 def _leaves(obj, out: list) -> list:
