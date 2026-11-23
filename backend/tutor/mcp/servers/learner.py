@@ -11,7 +11,7 @@ from typing import Annotated, Any, Literal
 import anyio.to_thread
 from fastmcp import FastMCP
 from pydantic import Field
-from sqlalchemy import delete, select
+from sqlalchemy import case, delete, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -29,6 +29,12 @@ CONSENT_OFF = "Personal memory is off. Turn it on in Memory & privacy."
 def embedder_name(embedder: Embedder) -> str:
     """The stable name stored with each embedding; searches only compare facts of the same embedder."""
     return f"{type(embedder).__name__}:{embedder.dim}"
+
+
+def _safe_distance(vec: list[float], name: str):
+    """Cosine distance that is only computed for rows of this embedder. SQL gives no evaluation order for
+    AND, so the WHERE filter alone cannot keep `<=>` away from vectors of another dimension."""
+    return case((LearnerFact.embedder == name, LearnerFact.embedding.cosine_distance(vec)), else_=None)
 
 
 def _roadmap(s: Session, slug: str) -> Roadmap:
@@ -80,7 +86,7 @@ def build_learner_server(engine: Engine, embedder: Embedder) -> FastMCP:
             vec = embedder.embed([clean])[0]
             same = (LearnerFact.kind == kind, LearnerFact.embedder == name,
                     LearnerFact.roadmap_id == rid if rid else LearnerFact.roadmap_id.is_(None))
-            dist = LearnerFact.embedding.cosine_distance(vec)
+            dist = _safe_distance(vec, name)
             near = s.execute(
                 select(LearnerFact, dist.label("d")).where(*same).order_by(dist).limit(1)
             ).first()
@@ -104,7 +110,7 @@ def build_learner_server(engine: Engine, embedder: Embedder) -> FastMCP:
                 where.append(LearnerFact.roadmap_id.in_([_roadmap(s, roadmap).id]) | LearnerFact.roadmap_id.is_(None))
             else:
                 where.append(LearnerFact.roadmap_id.is_(None))
-            dist = LearnerFact.embedding.cosine_distance(vec)
+            dist = _safe_distance(vec, name)
             rows = s.execute(
                 select(LearnerFact, dist.label("d")).where(*where).order_by(dist).limit(top_k)
             ).all()

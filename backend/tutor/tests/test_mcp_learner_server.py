@@ -158,3 +158,15 @@ async def test_progress_needs_approved_spec(engine, server):
     _roadmap(engine, slug="nospec", spec=None)
     with pytest.raises(ToolError, match="has no approved spec"):
         await _call(server, "get_progress", roadmap="nospec")
+
+
+async def test_foreign_dimension_facts_never_break_or_leak(engine, server):
+    _consent(engine, True)
+    with session_scope(engine) as s:
+        s.execute(text("INSERT INTO learner_facts (id, kind, text, embedding, embedder) VALUES "
+                       "(gen_random_uuid(), 'fact', 'foreign', '[1,0,0]', 'Other:3')"))
+    t = "the learner prefers short worked examples with plenty of code and diagrams every lesson"
+    assert (await _call(server, "remember", text=t))["action"] == "inserted"
+    assert (await _call(server, "remember", text=t + " please"))["action"] == "updated"
+    hits = await _call(server, "recall", query=t, top_k=20)
+    assert hits and all(h["text"] != "foreign" for h in hits)
