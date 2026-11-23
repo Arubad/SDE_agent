@@ -486,3 +486,35 @@ These are taken only where they fit the planned work; the rest was declined.
   - Langfuse: Phoenix stays;
   - Temporal: the Postgres job queue stays.
 
+
+## Phase 3 follow-ups for Phase 4 (from the Phase 3 reviews, 2026-11-24)
+Phase 3 shipped the gateway with no model-facing caller. Phase 4's plan opens with a **gateway readiness** task that
+does these before any tutor agent calls a tool:
+- **Timeouts:**
+  - give the own servers realistic `timeout_s` values, or per-tool timeouts: `ingest.wait_for_ingestion`,
+    `ingest.create_roadmap` and the first `kb.search` (lazy model load) exceed 20 s;
+  - a plain call timeout should not drop a whole in-process connection.
+- **Search URLs:** treat Microsoft Learn search results as allowed URLs, or exempt its server-side fetch tool.
+- **Caps:** measure the cap with `ensure_ascii=True`, as the loop sends JSON (CJK text inflates up to 6×).
+- **Gateway loop:**
+  - bound DNS lookups with a timeout;
+  - stop running the synchronous `effective_enabled` query on the gateway loop;
+  - stop `tool_defs` from stalling on a slow stdio server;
+  - trace refused calls;
+  - retry the `about:blank` reset once.
+- **Browser isolation:** one Playwright browser and tab is shared by every agent, so give each agent its own browser
+  context, or use a gateway-level lease.
+- **Approvers:** run them sync or loop-agnostic, never bound to the FastAPI loop. Approval UIs show the raw payload.
+- **Untrusted passages:** `kb` passages reach the model as citation blocks without the untrusted fence. The tutor's
+  prompt must treat them as untrusted, and the red-team eval must cover a poisoned ingested page.
+- **Ingestion writes:**
+  - give idempotency claims a token, so a stale re-claim cannot release a live one;
+  - stop `approve_roadmap` searching while it holds the row lock;
+  - return early from `wait_for_ingestion` on a roadmap that is still only parsed.
+- **Learner:** decide whether revoking consent hides or purges stored facts; cap the length of `remember`.
+- **Re-check:** recheck still reports rendered (JS-only) resources as dead.
+- **Known limits (documented in `docs/platform/mcp.md`):**
+  - blocked origins don't cover redirects;
+  - the API is reachable by its browser-network IP, though `/api/*` now needs a loopback Host;
+  - sub-resource requests aren't seen by the gateway;
+  - stdio servers run as the API's user (a supply-chain risk).
