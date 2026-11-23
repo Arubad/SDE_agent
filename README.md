@@ -330,6 +330,22 @@ needs `YTDLP_COOKIES_BROWSER`). You are responsible for following YouTube's term
 cookies, nothing downloaded), then oEmbed (title and channel only). The key adds top comments (the source of
 comment timestamps) and more reliable metadata, and playlist expansion uses the API instead of yt-dlp.
 
+**MCP (Model Context Protocol).** The platform's own tools are four MCP servers: `knowledge` (search the indexed
+roadmaps), `learner` (progress and remembered facts), `ingestion` (create, approve and follow a roadmap) and `web`
+(search and guarded fetch). Run locally, they are at `http://127.0.0.1:8000/mcp/<name>/` and over stdio
+(`python -m backend.tutor mcp <name>`), so Claude Desktop or Claude Code can use them; the setup commands are in
+[docs/platform/mcp.md](docs/platform/mcp.md). (This is separate from the HF demo's MCP server below.) The platform's
+agents call tools through a gateway with per-agent allow-lists, ask-before-writing rules, a URL rule for browsing
+and untrusted-content fencing. A registry also holds external servers, all free: a headless browser (Playwright
+MCP, in its own Docker network), DeepWiki, Microsoft Learn, arXiv and Wikipedia; Context7 and GitHub work with a
+key (`CONTEXT7_API_KEY`, `GITHUB_TOKEN`). The Settings page shows each server's health and an on/off switch, and
+`python -m backend.tutor mcp-check` prints the same. The crawler also renders pages that need JavaScript through the
+browser. Known limits: the Playwright container's origin blocklist is not a security boundary (redirects, LAN
+addresses and sub-resources are covered only partly by the gateway's checks), one browser is shared by all agents,
+the `fetch` server is off because it follows redirects without a private-address check, and the first run of the
+`uvx` servers downloads packages. The threat model, the live check (10 of 12 servers ok; Context7 needs a key,
+Fetch is disabled) and how to add a server are in [docs/platform/mcp.md](docs/platform/mcp.md).
+
 **Results.** All numbers below come from files in the repo, negative ones included.
 - Live ingestion of a Kubernetes roadmap: 13 resources, 12 done and 1 linked only (an interactive site, not
   crawled); transcripts 9 of 9 videos (all captions); agent spend $0.0075. The run found three crawler and parser

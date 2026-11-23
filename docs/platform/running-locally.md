@@ -1,7 +1,7 @@
 # Running the roadmap tutor platform locally
 
 The platform runs as a Docker Compose stack on your own machine: the API (which also serves the built web
-app), Postgres with pgvector, Qdrant, and SearXNG (search). Phoenix (tracing) and a Cloudflare tunnel are
+app), Postgres with pgvector, Qdrant, SearXNG (search) and a Playwright MCP browser. Phoenix (tracing) and a Cloudflare tunnel are
 optional add-ons. Every published port binds to `127.0.0.1`, so nothing is reachable from your network unless
 you start the tunnel.
 
@@ -11,8 +11,8 @@ you start the tunnel.
   `linux/arm64`, so Intel and Apple Silicon machines both work.
 - About 2 GB of free RAM (the idle stack uses ~300 MB, plus ~800 MB with Phoenix) and 6 GB of disk for
   the images.
-- Free host ports `8000` (API), `6333` (Qdrant) and `8888` (SearXNG), and `6006` for Phoenix. Postgres
-  publishes no host port.
+- Free host ports `8000` (API), `6333` (Qdrant), `8888` (SearXNG) and `8931` (Playwright MCP), and `6006` for
+  Phoenix. Postgres publishes no host port.
 
 ## Start the stack
 
@@ -46,6 +46,30 @@ never from the settings file. SearXNG listens on http://127.0.0.1:8888 and the A
 brave and youtube. DuckDuckGo often answers a self-hosted instance with a CAPTCHA and returns 0 results, which is
 why Brave is enabled too. Even so, repeated queries can return 0 results for a while. When a resource shows no
 candidates, paste its URL in the spec review.
+
+## MCP servers
+
+`compose.yaml` also starts `playwright-mcp` (headless Chromium, `mcr.microsoft.com/playwright/mcp` v0.0.86), the
+browser the MCP gateway uses. It sits on its own Docker network `browser`, shared only with the API, and is published
+on `127.0.0.1:8931` only. Inside the stack the API reaches it at `PLAYWRIGHT_MCP_URL=http://playwright-mcp:8931/mcp`
+(set by Compose); outside Compose the default is `http://127.0.0.1:8931/mcp`, so
+`docker compose up -d playwright-mcp` is enough for a virtualenv run. If it is down, the browser tool errors, the
+crawler skips pages that need JavaScript, and everything else works. The threat model is in [mcp.md](mcp.md).
+
+Two external servers (arXiv and Wikipedia) run as child processes through `uvx`, which comes with the `uv` package
+in `requirements-platform.txt`. The Docker image has it; for a virtualenv run it is installed with the platform
+requirements. The first start of each downloads its package, which can take a while, and the gateway allows at least
+60 seconds for that connect. `mcp-check` warms them:
+
+```bash
+python -m backend.tutor mcp-check [--json]
+```
+
+It builds the API's registry and gateway, connects to every server once and prints name, state (`ok`, `down`,
+`missing_env`, `disabled`), tool count, latency and error. It is a report, not a gate: the exit code is always 0,
+and the same data is on the Settings page. Context7 and GitHub show `missing_env` until `CONTEXT7_API_KEY` and
+`GITHUB_TOKEN` are set in `backend/.env`; the other servers need no key. Use the stack's own servers from Claude
+Desktop or Claude Code as described in [mcp.md](mcp.md#use-the-platform-from-claude-desktop-or-claude-code).
 
 ## Adding a roadmap
 
@@ -98,6 +122,8 @@ python -m backend.tutor ingest <slug> [--until-idle]   # run the ingestion worke
 python -m backend.tutor recheck <slug>                 # re-check every resource URL (ok / changed / dead)
 python -m backend.tutor report <slug>                  # print the ingestion report as JSON
 python -m backend.tutor import-sde [--limit N]         # import the demo SDE knowledge base as roadmap sde-mastery
+python -m backend.tutor mcp-check [--json]             # connect to every MCP server and print its health
+python -m backend.tutor mcp <knowledge|learner|ingestion|web>   # serve one own MCP server on stdio
 ```
 
 `ingest` refuses a roadmap that is still `draft` or `parsed`; approve it first. `--until-idle` runs inline and
