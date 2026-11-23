@@ -214,6 +214,57 @@ def test_recover_replaces_dead_resource(engine, tmp_path, clock):
     assert '"guide"' in first["messages"][0]["content"]  # ids and statuses are there; URLs come from kb_status
 
 
+def _dead_by_dns(ctx):
+    real = ctx.net.fetcher._resolver
+
+    def resolver(host):
+        if host == "dead.test":
+            raise OSError("Name or service not known")
+        return real(host)
+    ctx.net.fetcher._resolver = resolver
+
+
+def _dead_by_refused_connection(ctx):
+    import httpx
+
+    real = ctx.net.fetcher._client
+
+    def handler(req):
+        if req.url.host == "dead.test":
+            raise httpx.ConnectError("[Errno 61] Connection refused", request=req)
+        return real.send(req)
+    ctx.net.fetcher._client = httpx.Client(transport=httpx.MockTransport(handler))
+
+
+@pytest.mark.parametrize("break_link", ["http_500", "dns_failure", "connection_refused"])
+def test_replaced_resource_whose_old_link_errored_ends_done(engine, tmp_path, clock, break_link):
+    """A dead link that ERRORS (5xx, DNS failure, refused connection) leaves a dead fetch job, not just a
+    skipped document; after a successful replace_url that old job must not be reported against the resource."""
+    pages = {ALT: _page("Guide", _prose("Kubernetes guide"))}
+    if break_link == "http_500":
+        pages[DEAD] = {"status": 500, "body": "boom", "content_type": "text/plain"}
+    site = _with_search(_site(tmp_path / "net", pages),
+                        {"general:kubernetes guide": [{"title": "Guide", "url": ALT, "snippet": "A guide."}]})
+    ctx = _ctx(engine, site, min_chunks_per_skill=0)
+    {"dns_failure": _dead_by_dns, "connection_refused": _dead_by_refused_connection}.get(
+        break_link, lambda c: None)(ctx)
+    rid = _roadmap(engine, "dead", [("guide", "article", DEAD)])
+    with fake_llm.script([
+        FakeReply(tool_uses=[("web_search", {"query": "kubernetes guide", "category": "general"})]),
+        FakeReply(tool_uses=[("replace_url", {"resource_id": "guide", "url": ALT, "reason": "dead"})]),
+        FakeReply(text="Replaced."),
+    ]):
+        _drain(ctx, rid, clock)
+
+    old = [j for j in _jobs(engine, rid, "fetch_page") if j.payload["url"] == DEAD]
+    assert old and old[0].error  # the old link really did error out (a dead job, retired by replace_url)
+    res = _res(engine, rid, "guide")
+    assert (res.status, res.reason, res.url) == ("done", None, ALT)
+    assert _status(engine, rid) == "ready"
+    assert _report(engine, rid)["skipped"] == []
+    assert len(_jobs(engine, rid, "agent_recover")) == 1  # no second round spent on a gap already fixed
+
+
 def test_url_policy_refuses_unlisted_url(engine, tmp_path, monkeypatch):
     ctx = _ctx(engine, _site(tmp_path / "net", {"https://ok.test/a": _page("A", _prose("Fine"))}))
     rid = _roadmap(engine, "policy", [("a", "doc", "https://ok.test/a")])

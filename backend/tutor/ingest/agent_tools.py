@@ -25,7 +25,7 @@ import unicodedata
 import uuid
 from urllib.parse import unquote, urlsplit
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.orm import Session
 
 from backend.tutor.db import session_scope
@@ -433,9 +433,18 @@ class _Tools:
         with session_scope(self.engine) as s:
             res = s.get(Resource, res.id, with_for_update=True)
             s.execute(delete(Document).where(Document.resource_id == res.id, Document.status != "ok"))
+            # The old URL's failures go with it: its non-ok documents (above) and its dead jobs (a 5xx, DNS failure or
+            # refused connection leaves one, which the report would otherwise still blame on the resource). A dead
+            # chunk_embed is kept: its document is ok, so it stays, still unindexed. `superseded` is terminal and is
+            # never reported.
+            s.execute(update(Job).where(Job.roadmap_id == self.rid, Job.status == "dead",
+                                        Job.type != "chunk_embed",
+                                        Job.payload["resource_id"].astext == str(res.id))
+                      .values(status="superseded", updated_at=queue.clock()))
             ok_pages = s.execute(select(func.count()).select_from(Document).where(
                 Document.resource_id == res.id, Document.kind != "video")).scalar_one()
             meta = dict(res.meta or {})
+            meta.pop("final_url", None)  # where the old URL redirected to; the new URL records its own
             meta["replaced"] = [*meta.get("replaced", []), res.url]
             meta["replace_reason"] = str(reason)[:300]
             res.meta, res.url, res.status, res.reason = meta, url, "pending", None

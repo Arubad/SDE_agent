@@ -78,7 +78,8 @@ class Resource(Base):
 
 
 class Job(Base):
-    """A durable queue job. `status` (free text): queued|running|done|failed|dead. `key` is unique (idempotency)."""
+    """A durable queue job. `status` (free text): queued|running|done|failed|dead|superseded (a dead job whose
+    resource URL the recovery agent replaced; terminal, not reported). `key` is unique (idempotency)."""
 
     __tablename__ = "jobs"
     __table_args__ = (Index("ix_jobs_status_not_before", "status", "not_before"),)
