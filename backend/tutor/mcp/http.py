@@ -4,7 +4,8 @@ The servers depend on the engine, net and index that exist only inside the API's
 registered when the app is created. So `mount_mcp` registers, per name, a thin dispatcher that looks the server's
 HTTP app up in `app.state.mcp_http` at request time (503 until startup has finished), and returns `serve`, the
 context manager the lifespan enters once the servers are built: it creates each server's HTTP app, runs its
-lifespan (the session manager) for as long as the API runs and publishes it in `app.state.mcp_http`.
+lifespan (the session manager) for as long as the API runs and publishes it in `app.state.mcp_http` (and the
+servers in `app.state.mcp_servers`). Serve instances of their own: never the gateway's inproc ones (another loop).
 """
 from __future__ import annotations
 
@@ -128,10 +129,10 @@ def mount_mcp(app: FastAPI, names: Iterable[str], settings, *, lockout_key: Lock
                 http_app = servers[name].http_app(path="/", stateless_http=False)
                 await stack.enter_async_context(http_app.lifespan(http_app))
                 apps[name] = http_app
-            app.state.mcp_http = apps
+            app.state.mcp_http, app.state.mcp_servers = apps, dict(servers)
             try:
                 yield
             finally:
-                app.state.mcp_http = {}
+                app.state.mcp_http, app.state.mcp_servers = {}, {}
 
     return serve

@@ -201,6 +201,16 @@ async def test_app_starts_with_unreachable_external_server(engine, tmp_path):
         assert [s.name for s in c.app.state.gateway.registry.servers] == ["kb", "ext"]
 
 
+def test_http_and_gateway_never_share_a_server_instance(down_engine, tmp_path):
+    # R22: a FastMCP instance belongs to one event loop: uvicorn's for HTTP, the gateway's for inproc
+    app = create_app(_settings(tmp_path), engine=down_engine)
+    with TestClient(app):
+        served, inproc = app.state.mcp_servers, app.state.gateway.inproc
+        assert set(served) == set(inproc) == {"knowledge", "learner", "ingestion", "web"}
+        for name in served:
+            assert served[name] is not inproc[name], name
+
+
 def test_workers_get_the_gateway(engine, tmp_path):
     app = create_app(_settings(tmp_path, ingest_workers=1), engine=engine, handlers={"noop": lambda ctx, job: None})
     with TestClient(app):

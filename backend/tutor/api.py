@@ -131,10 +131,14 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
             # The embedder loads its models lazily, on first use; the index makes no request until then either.
             embedder = make_embedder(settings)
             index = make_index(settings, embedder)
-            servers = build_own_servers(app.state.engine, app.state.net, index, embedder, settings, on_settled)
+            # Two sets from the same (thread-safe) dependencies: a FastMCP instance is never shared between event
+            # loops. One is served over HTTP on this (uvicorn's) loop, the other runs inproc on the gateway's loop.
+            deps = (app.state.engine, app.state.net, index, embedder, settings, on_settled)
+            http_servers, inproc_servers = build_own_servers(*deps), build_own_servers(*deps)
             # Task 10 makes the registry strict (its agent patterns name namespaces that Task 10 adds).
             registry = load_registry(settings.mcp_registry, os.environ, allow_unknown=True)
-            app.state.gateway = Gateway(registry, engine=app.state.engine, inproc=servers, env=os.environ)
+            app.state.gateway = Gateway(registry, engine=app.state.engine, inproc=inproc_servers,
+                                        env=os.environ)
             app.state.gateway.start()  # a loop thread only: no server is contacted before its first use
             stack.callback(app.state.gateway.stop)
             app.state.worker_pool = None
@@ -145,7 +149,7 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
                                                    tracer_provider=app.state.tracer_provider)
                 app.state.worker_pool.start()
                 stack.callback(app.state.worker_pool.stop)
-            await stack.enter_async_context(serve_mcp(servers))
+            await stack.enter_async_context(serve_mcp(http_servers))
             yield
 
     app = FastAPI(title="Roadmap Tutor", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
