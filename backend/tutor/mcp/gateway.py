@@ -268,7 +268,12 @@ class Gateway:
         except Exception as e:  # _connect already marked the server down (unless it never got the lock)
             if isinstance(e, TimeoutError):
                 return {"error": f"{canonical} {self._reason(conn.spec, e, 'connect ')}"}
-            return {"error": f"{canonical} unavailable: {conn.error or self._scrub(conn.spec, str(e))[:ERROR_CHARS]}"}
+            return self._unavailable(conn.spec, canonical, conn.error or self._scrub(conn.spec, str(e))[:ERROR_CHARS])
+
+    def _unavailable(self, spec: ServerSpec, canonical: str, reason: str) -> dict:
+        """The model-facing error; the reason may be server-written text (e.g. an McpError message), so it is
+        fenced for an untrusted server. Health keeps the plain scrubbed reason."""
+        return {"error": f"{canonical} unavailable: {wrap(reason) if spec.untrusted else reason}"}
 
     def _fail(self, conn: _Conn, reason: str) -> None:
         spec = conn.spec
@@ -427,14 +432,14 @@ class Gateway:
         try:
             result = await asyncio.wait_for(client.call_tool(tool.name, args, raise_on_error=False), spec.timeout_s)
         except McpError as e:  # the server answered with a protocol error: the connection is fine
-            return _finish({"error": str(e)}, spec, ctx)
+            return _finish({"error": str(e)}, spec, ctx, canonical)
         except Exception as e:
             if conn.client is client:
                 self._fail(conn, self._reason(spec, e, ""))
             if isinstance(e, TimeoutError):
                 return {"error": f"{canonical} timed out after {spec.timeout_s}s"}
-            return {"error": f"{canonical} unavailable: {self._scrub(spec, str(e) or type(e).__name__)[:ERROR_CHARS]}"}
-        return _finish(_shape(result), spec, ctx)
+            return self._unavailable(spec, canonical, self._scrub(spec, str(e) or type(e).__name__)[:ERROR_CHARS])
+        return _finish(_shape(result, spec), spec, ctx, canonical)
 
     # ---- health ------------------------------------------------------------------------------------------------
     async def _health(self, refresh: bool) -> list[ServerHealth]:
@@ -485,12 +490,13 @@ def _text(result) -> str:
     return "\n".join(b.text for b in result.content if getattr(b, "text", None) is not None)
 
 
-def _shape(result) -> dict:
-    """fastmcp CallToolResult -> the loop's shape, before wrapping and capping."""
+def _shape(result, spec: ServerSpec) -> dict:
+    """fastmcp CallToolResult -> the loop's shape, before wrapping and capping. Only an own (inproc) server's
+    `{"passages": [...]}` becomes passages; from any other server it is ordinary data."""
     if result.is_error:
         return {"error": _text(result)}
     sc = result.structured_content
-    if isinstance(sc, dict) and isinstance(sc.get("passages"), list):
+    if spec.transport == "inproc" and isinstance(sc, dict) and isinstance(sc.get("passages"), list):
         return {"passages": sc["passages"]}
     if sc is not None:
         return {"data": json.loads(json.dumps(sc, default=str))}
@@ -516,23 +522,61 @@ def _leaves(obj, out: list) -> list:
     return out
 
 
-def _finish(out: dict, spec: ServerSpec, ctx: CallContext) -> dict:
-    """Wrap every string leaf (untrusted server, not raw), then cut the largest leaves until the JSON fits."""
-    if "passages" in out:
-        return out
-    fence = spec.untrusted and not ctx.raw
+def _size(obj) -> int:
+    return len(json.dumps(obj, ensure_ascii=False))
+
+
+def _marker(n: int) -> str:
+    return f" [truncated {n} chars]"
+
+
+def _cut(text: str, excess: int) -> tuple[str, int] | None:
+    """(kept text, chars cut) so that text + marker is at least `excess` chars shorter than text, or None when
+    cutting the whole text would save less than the marker costs."""
+    cut = excess + len(_marker(excess))
+    cut = excess + len(_marker(cut))  # the marker's own length depends on the number in it
+    if cut > len(text):
+        if len(text) <= len(_marker(len(text))):
+            return None
+        cut = len(text)
+    return text[:len(text) - cut], cut
+
+
+# Passages feed backend/agent/citations.py, which indexes these keys directly.
+_PASSAGE_KEYS = ("chunk_id", "url", "text", "title")
+
+
+def _passages(found: list, cap: int, canonical: str) -> dict:
+    """Valid passages only, trailing ones dropped until the JSON fits; the first is kept (its text cut)."""
+    ok = [p for p in found if isinstance(p, dict) and all(isinstance(p.get(k), str) for k in _PASSAGE_KEYS)]
+    if not ok:
+        return {"error": f"{canonical} returned no valid passages"}
+    out = {"passages": ok}
+    while len(ok) > 1 and _size(out) > cap:
+        ok.pop()
+    if (excess := _size(out) - cap) > 0 and (cut := _cut(ok[0]["text"], excess)):
+        ok[0] = {**ok[0], "text": cut[0] + _marker(cut[1])}
+    return out
+
+
+def _finish(out: dict, spec: ServerSpec, ctx: CallContext, canonical: str) -> dict:
+    """Wrap every string leaf (untrusted server, not raw), then cut the largest leaves, marker included in the
+    budget, until the JSON fits; a leaf too small to pay for its marker is never touched."""
     cap = RAW_CAP if ctx.raw else CAP
+    if "passages" in out:
+        return _passages(out["passages"], cap, canonical)
+    fence = spec.untrusted and not ctx.raw
     leaves = _leaves(out, [])
     raw = [c[k] for c, k in leaves]
     for i, (c, k) in enumerate(leaves):
         c[k] = wrap(raw[i]) if fence else raw[i]
-    total = len(json.dumps(out, ensure_ascii=False))
+    total = _size(out)
     for i in sorted(range(len(leaves)), key=lambda j: -len(raw[j])):
         if total <= cap:
             break
+        if (cut := _cut(raw[i], total - cap)) is None:
+            continue
         c, k = leaves[i]
-        text = raw[i]
-        keep = text[:max(0, len(text) - (total - cap))]
-        c[k] = (wrap(keep) if fence else keep) + f" [truncated {len(text) - len(keep)} chars]"
-        total = len(json.dumps(out, ensure_ascii=False))
+        c[k] = (wrap(cut[0]) if fence else cut[0]) + _marker(cut[1])
+        total = _size(out)
     return out
