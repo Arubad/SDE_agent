@@ -219,7 +219,8 @@ export interface Report {
   status: string;
   resources: ReportResource[];
   videos: { total: number; segments: Record<string, number>; transcripts: Record<string, unknown> };
-  skipped: { url: string; reason: string }[];
+  /** `url` is null when the report could not tie a failure to a URL (e.g. a dead job whose document is gone). */
+  skipped: { url: string | null; reason: string }[];
   summary: string;
   agent?: { runs: AgentRun[]; actions: AgentAction[] };
   proposals?: Proposal[];

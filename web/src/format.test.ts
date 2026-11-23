@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hostOf, reasonText, safeHref } from "./format";
+import { hostOf, reasonText, safeHref, skippedUrlText } from "./format";
 
 describe("format", () => {
   it("maps reason codes to readable text and falls back to the code", () => {
@@ -22,6 +22,12 @@ describe("format", () => {
     }
     expect(reasonText("some_new_code")).toBe("some_new_code");
     expect(reasonText(null)).toBe("");
+  });
+
+  it("labels a skipped item that has no URL (the report sends null for one)", () => {
+    expect(skippedUrlText("https://flow.test/gone")).toBe("https://flow.test/gone");
+    expect(skippedUrlText(null)).toBe("(no URL recorded)");
+    expect(skippedUrlText(undefined)).toBe("(no URL recorded)");
   });
 
   it("allows only http(s) hrefs", () => {

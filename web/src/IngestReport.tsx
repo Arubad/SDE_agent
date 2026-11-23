@@ -1,6 +1,6 @@
 import type { AgentAction, AgentRun, Proposal, Report } from "./api";
 import { ExternalLink } from "./ExternalLink";
-import { hostOf, reasonText, statusText } from "./format";
+import { hostOf, reasonText, skippedUrlText, statusText } from "./format";
 
 const OUTCOME_LABELS: Record<string, string> = { ok: "done", refused: "refused", error: "failed" };
 
@@ -168,8 +168,8 @@ export function IngestReport({
           <h3 id="skipped-heading">Skipped</h3>
           <ul className="skipped">
             {report.skipped.map((s, i) => (
-              <li key={`${s.url}-${i}`}>
-                <span className="skipped-url">{s.url}</span>
+              <li key={`${s.url ?? ""}-${i}`}>
+                <span className="skipped-url">{skippedUrlText(s.url)}</span>
                 <span className="reason">{reasonText(s.reason)}</span>
               </li>
             ))}

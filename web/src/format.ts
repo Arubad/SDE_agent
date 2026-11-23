@@ -30,6 +30,11 @@ export function reasonText(code: string | null | undefined): string {
   return REASONS[code] ?? code;
 }
 
+/** The URL of a skipped item, or a placeholder when the report has none (a dead job whose document is gone). */
+export function skippedUrlText(url: string | null | undefined): string {
+  return url || "(no URL recorded)";
+}
+
 /** `url` if it is an absolute http(s) URL, else undefined (never a javascript:, data: or relative href). */
 export function safeHref(url: string | null | undefined): string | undefined {
   if (!url) return undefined;
