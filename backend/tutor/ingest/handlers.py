@@ -48,6 +48,7 @@ from backend.tutor.models import Document, Job, Resource, Roadmap
 
 log = logging.getLogger(__name__)
 GITHUB_DOCS_MAX = 30
+GITHUB_DISCOVERED_MAX = 5  # repos kept per resource when found on crawled pages
 GITHUB_DIRS_MAX = 30
 GITHUB_API = "https://api.github.com"
 GITHUB_RAW = "https://raw.githubusercontent.com"
@@ -85,14 +86,15 @@ def _owned_elsewhere(engine: Engine, res: Resource, url: str) -> bool:
     return owner is not None and owner[0] != res.id
 
 
-def reserve_page(engine: Engine, resource_id, cap: int) -> bool:
-    """Atomically take one of the resource's `cap` page slots; False once they are all taken."""
+def reserve_page(engine: Engine, resource_id, cap: int, key: str = "pages") -> bool:
+    """Atomically take one of the resource's `cap` slots of the `stats[key]` counter ("pages" by default);
+    False once they are all taken."""
     with session_scope(engine) as s:
         row = s.execute(text(
-            "UPDATE resources SET stats = jsonb_set(stats, '{pages}', "
-            "to_jsonb(COALESCE((stats->>'pages')::int, 0) + 1)) "
-            "WHERE id = :id AND COALESCE((stats->>'pages')::int, 0) < :cap RETURNING (stats->>'pages')::int"),
-            {"id": resource_id, "cap": cap}).first()
+            "UPDATE resources SET stats = jsonb_set(stats, ARRAY[:key], "
+            "to_jsonb(COALESCE((stats->>:key)::int, 0) + 1)) "
+            "WHERE id = :id AND COALESCE((stats->>:key)::int, 0) < :cap RETURNING 1"),
+            {"id": resource_id, "cap": cap, "key": key}).first()
     return row is not None
 
 
@@ -214,30 +216,15 @@ def fetch_page(ctx, job: Job) -> dict:
 
 def _enqueue_discoveries(ctx, job: Job, res: Resource, found, depth: int) -> dict:
     """Enqueue what a crawled page links to. Videos and playlists are free; PDFs, GitHub repos and same-site
-    pages each reserve one of the resource's `crawl_max_pages` slots, and once none is left nothing more is
-    enqueued (`full`) and the crawl stops following links."""
+    pages each reserve one of the resource's `crawl_max_pages` slots, taken in that order (pages, PDFs, repos)
+    so a full budget never starves the docs crawl; once none is left nothing more is enqueued."""
     rid, rs = str(res.id), job.roadmap_id
     for vid in found.videos:
         _enqueue(ctx, job, "video", {"resource_id": rid, "video_id": vid}, (vid,))
     for lst in found.playlists:
         _enqueue(ctx, job, "expand_playlist", {"resource_id": rid, "list_id": lst}, (lst,))
     cap, full, links = ctx.settings.crawl_max_pages, False, 0
-    # a repo found on a crawled page costs one page slot, like a discovered PDF, and ingests its README only
-    for repo in found.repos:
-        if _key_exists(ctx.engine, "github_repo", rs, repo):
-            continue
-        if not reserve_page(ctx.engine, res.id, cap):
-            full = True
-            break
-        _enqueue(ctx, job, "github_repo", {"resource_id": rid, "repo": repo}, (repo,))
-    for pdf in found.pdfs:
-        if _key_exists(ctx.engine, "pdf", rs, pdf):
-            continue
-        if not reserve_page(ctx.engine, res.id, cap):
-            full = True
-            break
-        _enqueue(ctx, job, "pdf", {"resource_id": rid, "url": pdf}, (pdf,))
-    if depth < ctx.settings.crawl_max_depth and not full:
+    if depth < ctx.settings.crawl_max_depth:  # same-site pages first: they are the knowledge base
         host = (urlsplit(res.url).hostname or "").lower()
         own = queue.normalize_url(res.url)
         for link in found.links:
@@ -246,9 +233,32 @@ def _enqueue_discoveries(ctx, job: Job, res: Resource, found, depth: int) -> dic
             if _key_exists(ctx.engine, "fetch_page", rs, link):  # also makes a retried job reserve nothing twice
                 continue
             if not reserve_page(ctx.engine, res.id, cap):
+                full = True
                 break
             _enqueue(ctx, job, "fetch_page", {"resource_id": rid, "url": link, "depth": depth + 1}, (link,))
             links += 1
+    for pdf in found.pdfs:
+        if full:
+            break
+        if _key_exists(ctx.engine, "pdf", rs, pdf):
+            continue
+        if not reserve_page(ctx.engine, res.id, cap):
+            full = True
+            break
+        _enqueue(ctx, job, "pdf", {"resource_id": rid, "url": pdf}, (pdf,))
+    # a discovered repo costs one page slot and one of GITHUB_DISCOVERED_MAX per resource (extras are dropped
+    # silently); it ingests its README only
+    for repo in found.repos:
+        if full:
+            break
+        if _key_exists(ctx.engine, "github_repo", rs, repo):
+            continue
+        if not reserve_page(ctx.engine, res.id, GITHUB_DISCOVERED_MAX, key="repos"):
+            break
+        if not reserve_page(ctx.engine, res.id, cap):
+            full = True
+            break
+        _enqueue(ctx, job, "github_repo", {"resource_id": rid, "repo": repo}, (repo,))
     return {"videos": len(found.videos), "playlists": len(found.playlists), "links": links}
 
 

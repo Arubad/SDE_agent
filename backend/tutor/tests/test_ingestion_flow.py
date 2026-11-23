@@ -487,6 +487,30 @@ def test_discovered_repos_take_page_slots(engine, tmp_path, clock):
     assert _resources(engine, rid)["docs"].stats["pages"] == 3
 
 
+def test_repo_heavy_page_still_crawls_links(engine, tmp_path, clock):
+    pages = {"https://flow.test/docs/": _page("Docs", _prose("Hub"), '<a href="/docs/x">X</a><a href="/docs/y">Y</a>'
+                                              + "".join(f'<a href="https://github.com/acme/r{i}">R</a>' for i in range(4)))}
+    for u in ("x", "y"):
+        pages[f"https://flow.test/docs/{u}"] = _page(u.upper(), _prose(f"Child {u}"))
+    for i in range(4):
+        _repo_files(pages, f"acme/r{i}")
+    ctx = _ctx(engine, _site(tmp_path / "net", pages), crawl_max_pages=4)
+    rid = _roadmap(engine, "heavy", [("docs", "doc", "https://flow.test/docs/")])
+    _drain(ctx, rid, clock)
+    docs = _docs(engine, rid)
+    assert len([d for d in docs if d.kind == "page"]) == 3
+    assert len([d for d in docs if d.kind == "repo_file"]) == 1
+    assert _resources(engine, rid)["docs"].stats["pages"] == 4
+
+
+def test_discovered_repos_capped_per_resource(engine, tmp_path, clock):
+    ctx = _ctx(engine, _repo_crawl_site(tmp_path, 8))
+    rid = _roadmap(engine, "repocap", [("docs", "doc", "https://flow.test/docs/")])
+    _drain(ctx, rid, clock)
+    assert len({d.meta["repo"] for d in _docs(engine, rid) if d.kind == "repo_file"}) == H.GITHUB_DISCOVERED_MAX == 5
+    assert _resources(engine, rid)["docs"].stats["repos"] == 5
+
+
 def test_discovered_repo_stores_readme_only(engine, tmp_path, clock):
     ctx = _ctx(engine, _repo_crawl_site(tmp_path, 1))
     seen = []
