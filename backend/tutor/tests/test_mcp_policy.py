@@ -124,6 +124,18 @@ def _browser(navigations, pages, fail_blank=False):
     def browser_snapshot() -> str:
         return "secret snapshot text\n- Page URL: http://10.0.0.5/admin"
 
+    @b.tool
+    def browser_evaluate(function: str) -> str:
+        return "42"
+
+    @b.tool
+    def browser_close() -> str:
+        return "closed"
+
+    @b.tool
+    def browser_tabs() -> str:
+        return "secret tab list, no page line"
+
     return b
 
 
@@ -259,6 +271,26 @@ async def test_browser_reset_bypasses_gate_and_its_failure_still_refuses():
         assert navs == ["about:blank"]
 
 
+async def test_browser_result_without_page_url_is_refused():
+    navs = []
+    quiet = "https://allowed.example/quiet"
+    pages = {quiet: "secret page text without the line", "https://allowed.example/blank": "- Page URL: about:blank"}
+    with _gateway([_browser_spec()], {"playwright": _browser(navs, pages)}, cls=_FakeExternal) as gw:
+        ctx = CallContext(agent="all", policy=_policy("https://allowed.example/"))
+        for name, args in (("browser.navigate", {"url": quiet}), ("browser.tabs", {})):
+            navs.clear()
+            out = await gw.call(name, args, ctx)
+            assert out == {"error": "navigation left the allowed sites: no page URL reported"}, name
+            assert "secret" not in json.dumps(out) and navs[-1] == "about:blank"
+        navs.clear()
+        out = await gw.call("browser.navigate", {"url": "https://allowed.example/blank"}, ctx)
+        assert "data" in out and navs == ["https://allowed.example/blank"]  # a reported about:blank is fine
+        assert await gw.call("browser.evaluate", {"function": "() => 42"}, ctx) == {
+            "data": {"result": f"<{TAG}>42</{TAG}>"}}  # the crawler's evaluate and close carry no page line
+        assert await gw.call("browser.close", {}, ctx) == {"data": {"result": f"<{TAG}>closed</{TAG}>"}}
+        assert navs == ["https://allowed.example/blank"]
+
+
 async def test_no_policy_means_no_url_checks():
     fetched, navs = [], []
     pages = {"https://a.example/": "page text\n- Page URL: http://10.0.0.5/admin"}
@@ -377,6 +409,57 @@ async def test_blocking_approver_does_not_stall_other_calls():
         release.set()
         assert "data" in await pending
     assert calls == [("recall", "b"), ("forget", "a")]
+
+
+async def test_ask_tool_of_another_server_than_the_gated_guess_still_asks():
+    """The pre-connect guess for `repo.deepwiki.forget` is the (disabled) `repo.deepwiki` server, but the tool is
+    `deepwiki.forget` on the `repo` server: the call must still be put to the approver."""
+    calls, asked = [], []
+    repo = FastMCP("repo")
+
+    @repo.tool(name="deepwiki.forget")
+    def forget(topic: str) -> str:
+        calls.append(topic)
+        return "done"
+
+    specs = [_spec("repo"), _spec("dw", "repo.deepwiki", enabled_default=False)]
+    with _gateway(specs, {"repo": repo, "dw": FastMCP("dw")}, ask=["repo.deepwiki.*"]) as gw:
+        for _ in range(2):
+            out = await gw.call("repo.deepwiki.forget", {"topic": "x"}, CallContext(agent="all"))
+            assert out in ({"error": "approval required for repo.deepwiki.forget"},
+                           {"error": "repo.deepwiki.forget: server dw is disabled"}), out
+        ctx = CallContext(agent="all", approve=lambda p: asked.append(p) or False)
+        assert (await gw.call("repo.deepwiki.forget", {"topic": "y"}, ctx))["error"]
+        assert calls == []
+    specs = [_spec("repo"), _spec("dw", "repo.deepwiki")]  # the guessed server is up but lacks the tool
+    with _gateway(specs, {"repo": repo, "dw": FastMCP("dw")}, ask=["repo.deepwiki.*"]) as gw:
+        ctx = CallContext(agent="all", approve=lambda p: asked.append(p["server"]) or True)
+        asked.clear()
+        assert "data" in await gw.call("repo.deepwiki.forget", {"topic": "z"}, ctx)
+        assert asked[-1] == "repo" and calls == ["z"]  # approved for the server that actually runs it
+
+
+class _FlipsEnabled(Gateway):
+    """`learner` reads as disabled on the first check and enabled on every later one (toggled mid-call)."""
+
+    checks = 0
+
+    def _blocked(self, spec):
+        if spec.name != "learner":
+            return super()._blocked(spec)
+        self.checks += 1
+        return "disabled" if self.checks == 1 else None
+
+
+async def test_server_enabled_between_checks_still_needs_approval():
+    calls = []
+    s, _ = _counted("learner", calls)
+    with _gateway([_spec("learner")], {"learner": s}, ask=["learner.forget"], cls=_FlipsEnabled) as gw:
+        out = await gw.call("learner.forget", {"topic": "x"}, CallContext(agent="all"))
+        assert out == {"error": "learner.forget: server learner is disabled"}
+        out = await gw.call("learner.forget", {"topic": "x"}, CallContext(agent="all"))
+        assert out == {"error": "approval required for learner.forget"}
+        assert calls == []
 
 
 # ---- registry rules ----------------------------------------------------------------------------------------------

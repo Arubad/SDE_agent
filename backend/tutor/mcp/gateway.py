@@ -14,8 +14,9 @@
   hashed wire name not listed yet is listed first, but never called before the gate. URL checks (which may
   resolve DNS) run in a worker thread, never on the gateway loop.
 - With a policy, after the call and before fencing: `web.search` result URLs become allowed sources, and a
-  `browser.*` result whose `Page URL:` is refused becomes an error, after an internal `browser.navigate` to
-  `about:blank` (not gated, not policed, never shown; its failure is ignored).
+  `browser.*` result whose `Page URL:` is refused, or that reports none (except `close`, `evaluate` and errors),
+  becomes an error, after an internal `browser.navigate` to `about:blank` (not gated, not policed, never shown;
+  its failure is ignored).
 - Results come back in the agent loop's `ToolCaller` shape (`backend/agent/loop.py`):
   - a tool error -> `{"error": <its text>}`;
   - structured content `{"passages": [...]}` -> passed through unchanged (citations need the raw text);
@@ -416,10 +417,10 @@ class Gateway:
             return {"error": f"raw results are only for the {RAW_AGENT} agent"}
         tool = self._names.get(name)
         owners = self._owners(name)
-        gated = None
+        gated = None  # (server, canonical) already gated
         if tool is None and owners and (name.startswith(owners[0][0].namespace + ".") or not _HASHED.search(name)):
-            gated = owners[0][1]  # the canonical is known without listing: gate it before anything connects
-            if (refused := await self._gate(owners[0][0], gated, args, ctx)) is not None:
+            gated = (owners[0][0].name, owners[0][1])  # known without listing: gate before anything connects
+            if (refused := await self._gate(owners[0][0], owners[0][1], args, ctx)) is not None:
                 return refused
         if tool is None:  # not listed yet (first use, after reset): list whichever servers could own it first
             candidates = [s for s, _ in owners] or list(self.registry.servers)
@@ -435,12 +436,10 @@ class Gateway:
         if guess is None:
             return {"error": f"unknown tool {name}"}
         spec, canonical = guess
-        if canonical != gated and (refused := await self._gate(spec, canonical, args, ctx)) is not None:
+        if (spec.name, canonical) != gated and (refused := await self._gate(spec, canonical, args, ctx)) is not None:
             return refused
-        if (blocked := self._blocked(spec)) == "disabled":
-            return {"error": f"{canonical}: server {spec.name} is disabled"}
-        if blocked == "missing_env":
-            return {"error": f"{canonical}: server {spec.name} needs {', '.join(missing_env(spec, self.env))}"}
+        if (refused := self._blocked_error(spec, canonical)) is not None:
+            return refused
         span = ctx.trace.span(f"mcp:{canonical}", kind="tool", tool=canonical,
                               args=redact(json.dumps(args, default=str, ensure_ascii=False))[:200]) \
             if ctx.trace else nullcontext()
@@ -487,11 +486,21 @@ class Gateway:
         if ctx.policy is not None and (urls := arg_urls(args)):
             if (reason := await asyncio.to_thread(_first_refusal, ctx.policy, urls)) is not None:
                 return {"error": f"refused by URL policy: {reason}"}
-        # (a disabled or unconfigured server is reported by _call; nobody is asked about a call that cannot run)
-        if verdict == "ask" and self._blocked(spec) is None and not await self._approved(spec, canonical, args, ctx):
+        if verdict == "ask":  # nobody is asked about a call that cannot run, and a blocked server is refused here
+            if (refused := self._blocked_error(spec, canonical)) is not None:
+                return refused  # (not left to _call: the server may be enabled before _call looks again)
+            if await self._approved(spec, canonical, args, ctx):
+                return None
             if ctx.approve is None:
                 return {"error": f"approval required for {canonical}"}
             return {"error": f"{canonical} was not approved"}
+        return None
+
+    def _blocked_error(self, spec: ServerSpec, canonical: str) -> dict | None:
+        if (blocked := self._blocked(spec)) == "disabled":
+            return {"error": f"{canonical}: server {spec.name} is disabled"}
+        if blocked == "missing_env":
+            return {"error": f"{canonical}: server {spec.name} needs {', '.join(missing_env(spec, self.env))}"}
         return None
 
     async def _approved(self, spec: ServerSpec, canonical: str, args: dict, ctx: CallContext) -> bool:
@@ -510,14 +519,22 @@ class Gateway:
 
     async def _after(self, conn: _Conn, tool: _Tool, out: dict, ctx: CallContext) -> dict | None:
         """On the raw shaped result (before fencing and capping): web.search results become allowed sources; a
-        browser result whose `Page URL:` is off-policy is replaced by an error and the page is reset. The policy
-        calls (DNS) run off the loop."""
+        browser result whose `Page URL:` is off-policy, or a non-error one with no such line (fail closed; only
+        `close` and the crawler's `evaluate` carry none), is replaced by an error and the page is reset. The
+        policy calls (DNS) run off the loop."""
         if tool.canonical == "web.search" and (found := search_result_urls(out.get("data"))):
             await asyncio.to_thread(ctx.policy.allow_sources, found)
-        if tool.spec.namespace != "browser":
+        ns = tool.spec.namespace
+        if ns != "browser":
             return None
-        urls = [u for c, k in _leaves(out, []) for u in page_urls(c[k]) if u != BLANK]
-        if urls and (reason := await asyncio.to_thread(_first_refusal, ctx.policy, urls)) is not None:
+        reported = [u for c, k in _leaves(out, []) for u in page_urls(c[k])]
+        if not reported and "error" not in out and tool.canonical not in (f"{ns}.close", f"{ns}.evaluate"):
+            reason = "no page URL reported"
+        elif urls := [u for u in reported if u != BLANK]:
+            reason = await asyncio.to_thread(_first_refusal, ctx.policy, urls)
+        else:
+            reason = None
+        if reason is not None:
             await self._blank(conn)
             return {"error": f"navigation left the allowed sites: {reason}"}
         return None
