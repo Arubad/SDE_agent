@@ -216,6 +216,9 @@ def discover(
         ext = "." + path.rsplit(".", 1)[-1].lower() if "." in path.rsplit("/", 1)[-1] else ""
         if ext in _ASSET_EXT:
             continue
+        # Docsy "print entire section" views duplicate the whole section; follow only the real pages.
+        if "_print" in (seg.lower() for seg in path.split("/")):
+            continue
         text = " ".join(anchors[key]) + " " + re.sub(r"[/_\-.]+", " ", path)
         matched = _word_match(focus, text)
         depth = len([s for s in path.split("/") if s])

@@ -151,3 +151,28 @@ def test_root_without_trailing_slash_is_a_boundary():
     html = '<a href="/docs-old/x">o</a><a href="/docs/x">n</a>'
     d = discover(html, "https://a.test/docs/", root="/docs")
     assert d.links == ["https://a.test/docs/x"]
+
+
+def test_print_view_links_are_not_followed():
+    html = '<a href="/docs/concepts/_print/">Print entire section</a><a href="/docs/concepts/pods/">Pods</a>'
+    d = discover(html, DOCS_URL)
+    assert d.links == ["https://kubernetes.io/docs/concepts/pods/"]
+
+
+def test_print_match_is_whole_segment_and_case_insensitive():
+    html = (
+        '<a href="/docs/tasks/_print/index.html">p</a>'
+        '<a href="/docs/concepts/x/_PRINT">q</a>'
+        '<a href="/docs/blue_print/">b</a><a href="/docs/_printer/">c</a>'
+    )
+    d = discover(html, "https://a.test/docs/")
+    assert d.links == ["https://a.test/docs/blue_print/", "https://a.test/docs/_printer/"]
+
+
+def test_print_view_page_does_not_hide_embedded_video():
+    html = (
+        '<a href="/docs/concepts/_print/">Print entire section</a>'
+        '<iframe src="https://www.youtube.com/embed/aaaaaaaaaa1"></iframe>'
+    )
+    d = discover(html, DOCS_URL)
+    assert d.videos == ["aaaaaaaaaa1"] and d.links == []
