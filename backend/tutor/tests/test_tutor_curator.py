@@ -295,3 +295,51 @@ def test_lifespan_requeues_uncurated_sessions_without_workers(engine, db_url, tm
                 break
             time.sleep(0.1)
     assert n == 1
+
+
+async def test_sweep_revives_a_dead_curate_job_which_then_curates(engine, db_url, clear_memo):
+    from backend.tutor.jobs import queue
+
+    sid = _ended(engine)
+    await asyncio.to_thread(_seed, db_url, sid)
+    ctx = _ctx(engine, db_url)
+    rid = _row(engine, sid).roadmap_id
+    await retention.reenqueue_uncurated(engine, ctx.enqueue)
+    key = queue.job_key("curate_session", rid, sid)
+    with session_scope(engine) as s:
+        s.execute(text("UPDATE jobs SET status='dead', attempts=5, error='down' WHERE key = :k"), {"k": key})
+    await retention.reenqueue_uncurated(engine, ctx.enqueue)
+    with session_scope(engine) as s:
+        status, attempts, err = s.execute(text("SELECT status, attempts, error FROM jobs WHERE key = :k"),
+                                          {"k": key}).one()
+    assert (status, attempts, err) == ("queued", 0, None)
+    assert queue.revive(engine, key) is False  # only a dead job is revived
+    with fake_llm.script([_reply()]):
+        assert await asyncio.to_thread(curate_session, ctx, _job(sid)) is not None
+    assert _row(engine, sid).summary == "Day 1: pods"
+
+
+async def test_stale_uncurated_thread_dropped_only_without_raw_consent(engine, db_url, clear_memo):
+    old = datetime.now(timezone.utc) - timedelta(seconds=retention.UNCURATED_GRACE_S + 60)
+    stale = _ended(engine, ended_at=old)
+    fresh = _ended(engine)
+    curated = _ended(engine, ended_at=old, curated_at=datetime.now(timezone.utc), raw_kept=True)
+    for sid in (stale, fresh, curated):
+        await asyncio.to_thread(_seed, db_url, sid)
+    async with open_saver(db_url) as saver:
+        _consent(engine, True, True)
+        assert await retention.drop_stale_threads(engine, saver) == 0
+        assert await _has_thread_async(saver, stale)
+        _consent(engine, True, False)
+        assert await retention.drop_stale_threads(engine, saver) >= 1
+        assert not await _has_thread_async(saver, stale) and await _has_thread_async(saver, fresh)
+    assert _row(engine, stale).raw_kept is False
+    # the late job finds no thread and still completes
+    n = len(fake_llm.requests)
+    out = await asyncio.to_thread(curate_session, _ctx(engine, db_url), _job(stale))
+    assert _row(engine, stale).summary == "No conversation in this session." and len(fake_llm.requests) == n
+    assert out["facts"] == 0
+
+
+async def _has_thread_async(saver, sid) -> bool:
+    return await saver.aget_tuple({"configurable": {"thread_id": sid}}) is not None

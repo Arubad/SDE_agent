@@ -86,6 +86,16 @@ def enqueue(
     return job
 
 
+def revive(engine: Engine, key: str) -> bool:
+    """Put a dead job with this key back in the queue with fresh attempts. False when there is no dead job."""
+    with Session(engine) as s:
+        n = s.execute(update(Job).where(Job.key == key, Job.status == "dead").values(
+            status="queued", attempts=0, not_before=clock(), error=None, locked_by=None, locked_at=None,
+            updated_at=clock())).rowcount
+        s.commit()
+        return n > 0
+
+
 def claim(
     engine: Engine,
     worker_id: str,

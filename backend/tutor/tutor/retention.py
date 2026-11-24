@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
 from backend.tutor.db import session_scope
+from backend.tutor.jobs import queue
 from backend.tutor.learner import store
 from backend.tutor.models import TutorSession
 from backend.tutor.tutor import checkpoint
@@ -19,6 +20,7 @@ log = logging.getLogger(__name__)
 
 RETENTION_EVERY_S = 21600
 DEFAULT_RETENTION_DAYS = 90
+UNCURATED_GRACE_S = 86400  # curation had a day to run; after that an uncurated session's raw thread is dropped
 
 
 def _due(engine: Engine) -> list:
@@ -62,7 +64,33 @@ async def reenqueue_uncurated(engine: Engine, enqueue: Callable[..., Any]) -> in
     for sid, roadmap_id in rows:
         await asyncio.to_thread(enqueue, "curate_session", {"session_id": str(sid)}, (str(sid),),
                                 roadmap_id=roadmap_id)
+        # a job that died (a long model outage) stays dead under its key: give it fresh attempts
+        await asyncio.to_thread(queue.revive, engine, queue.job_key("curate_session", roadmap_id, str(sid)))
     return len(rows)
+
+
+def _stale_uncurated(engine: Engine) -> list:
+    settings = store.get_settings(engine)
+    if settings is not None and settings.consent_raw_messages is True:
+        return []
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=UNCURATED_GRACE_S)
+    with session_scope(engine) as s:
+        return list(s.scalars(select(TutorSession.id).where(
+            TutorSession.status == "ended", TutorSession.curated_at.is_(None), TutorSession.ended_at < cutoff)))
+
+
+async def drop_stale_threads(engine: Engine, saver: Any) -> int:
+    """Delete the raw thread of sessions that ended over UNCURATED_GRACE_S ago and were never curated, unless raw
+    messages are consented to (D3: without consent they must not outlive the session). `raw_kept` stays false;
+    a curation job that runs later finds no thread and writes the empty summary."""
+    n = 0
+    for sid in await asyncio.to_thread(_stale_uncurated, engine):
+        try:
+            await checkpoint.delete_thread(saver, str(sid))
+            n += 1
+        except Exception as exc:
+            log.warning("retention: thread of %s not dropped: %s", sid, type(exc).__name__)
+    return n
 
 
 async def run_forever(engine: Engine, saver: Any, enqueue: Callable[..., Any],
@@ -70,6 +98,7 @@ async def run_forever(engine: Engine, saver: Any, enqueue: Callable[..., Any],
     """Re-enqueue, then sweep, now and every `every_s`. Failures are logged; cancel the task to stop it."""
     while True:
         for name, step in (("re-enqueue", lambda: reenqueue_uncurated(engine, enqueue)),
+                           ("drop-stale", lambda: drop_stale_threads(engine, saver)),
                            ("sweep", lambda: sweep(engine, saver))):
             try:
                 await step()
