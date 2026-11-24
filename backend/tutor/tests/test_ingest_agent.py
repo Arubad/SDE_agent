@@ -575,7 +575,8 @@ def test_agent_disabled_is_pure_pipeline(engine, tmp_path, clock):
     ], agent=settings.ingest_agent)
     _drain(ctx, rid, clock)
     assert not [j for j in _jobs(engine, rid) if j.type.startswith("agent_")]
-    assert fake_llm.requests == []
+    # no agent model call: the only requests are the ingestion-time section summaries
+    assert all("study aids" in str(r["system"]) for r in fake_llm.requests)
     rep = _report(engine, rid)
     assert rep["status"] == "ready_with_gaps"
     assert rep["summary"] == ("5 videos: 1 creator chapters, 1 comment timestamps, 1 transcript-split, 2 whole; "
@@ -608,6 +609,7 @@ def test_web_text_never_reaches_the_model_unwrapped(engine, tmp_path, clock):
     ctx = _ctx(engine, site, ingest_agent=False)
     rid = _roadmap(engine, "inj", [("a", "doc", "https://ok.test/a"), ("hop", "doc", "https://ok.test/hop")])
     _drain(ctx, rid, clock)  # the /INJ link 404s and lands in the skipped list
+    fake_llm.reset()  # the section-summary requests of that drain are not the agent's
     with fake_llm.script([
         FakeReply(tool_uses=[("kb_status", {}), ("web_search", {"query": "extra", "category": "general"})]),
         FakeReply(tool_uses=[("peek_page", {"url": f"https://res.test/{INJ}"}),

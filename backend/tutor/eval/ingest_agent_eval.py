@@ -249,6 +249,7 @@ def run_once(engine: Engine, scenario: dict, defenses: bool, *, repeat: int, net
     """One run of one scenario: the whole pipeline with the agent on, then the simulated user's approvals."""
     llm_replay.redacted_recordings.clear()
     settings = Settings(net_fixtures_dir=net_root, qdrant_url=":memory:", embedder="hash", ingest_agent=True,
+                        ingest_summaries=False,  # this eval measures the agent alone
                         ingest_workers=0, **scenario["settings"])
     net = fixture_net(net_root)
     net.search = EvalSearch(json.loads((net_root / "search.json").read_text())) if (net_root / "search.json").is_file() else None

@@ -17,6 +17,9 @@ on, kept in `Resource.meta.final_url`), and each page or PDF takes a slot from `
 `UPDATE ... RETURNING` that fails once `crawl_max_pages` slots are taken (safe with any number of workers;
 `finalize_roadmap` later rewrites `stats.pages` to the number of documents fetched).
 
+`chunk_embed` queues one `summarize_document` job per indexed document (section summaries and starter
+questions, see `summaries.py`); it holds ingestion open until it is done, and never fails the roadmap.
+
 The ingestion agent (`agent_plan`, `agent_recover`; see `agent.py`) only ever adds jobs to this queue or proposes
 resources; with it switched off or its model down the pipeline below runs exactly as without it."""
 from __future__ import annotations
@@ -43,6 +46,7 @@ from backend.tutor.ingest.fetch import PRIVATE_ADDRESS, FetchResult
 from backend.tutor.ingest.index import index_document
 from backend.tutor.ingest.report import finalize_roadmap
 from backend.tutor.ingest.segment import choose_segments
+from backend.tutor.ingest.summaries import summarize_document
 from backend.tutor.ingest.video import TranscriptRouter, video_document
 from backend.tutor.jobs import queue, worker
 from backend.tutor.jobs.queue import PermanentError, RetryableError
@@ -511,6 +515,8 @@ def chunk_embed(ctx, job: Job) -> dict:
             "UPDATE resources SET stats = jsonb_set(stats, '{chunks}', to_jsonb((SELECT COALESCE(SUM("
             "(meta->>'chunks')::int), 0) FROM documents WHERE resource_id = :rid))) WHERE id = :rid"),
             {"rid": doc.resource_id})
+    if n:  # the setting is checked by the job itself, so a skip shows in job results
+        _enqueue(ctx, job, "summarize_document", {"document_id": str(doc.id)}, ("summarize_document", doc.id))
     return {"chunks": n}
 
 
@@ -602,6 +608,7 @@ def agent_recover(ctx, job: Job) -> dict:
 HANDLERS: dict[str, worker.Handler] = {
     "ingest_resource": ingest_resource, "fetch_page": fetch_page, "expand_playlist": expand_playlist,
     "video": video, "pdf": pdf, "github_repo": github_repo, "chunk_embed": chunk_embed, "recheck": recheck,
+    "summarize_document": summarize_document,
     "agent_plan": agent_plan, "agent_recover": agent_recover,
 }
 
