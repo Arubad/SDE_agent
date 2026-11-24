@@ -62,6 +62,9 @@ export default defineConfig({
     // public server (reuseExistingServer, local only) keeps that state between runs; passcode.spec.ts
     // makes two wrong attempts per run, so a reused server stays under the limit for two runs only.
     // Stop it (or wait 15 minutes) before a third.
+    // The tutor chat spec: its own database and port, ingestion summaries off so the quiz comes from Quiz.json,
+    // and the agent off. The consent answer is global and persists in the database between runs.
+    server(8767, "tutor_e2e_tutor", { PUBLIC_MODE: "false", INGEST_AGENT: "false", INGEST_SUMMARIES: "false" }),
     server(8766, "tutor_e2e_public", { PUBLIC_MODE: "true", PREMIUM_PASSCODE: "e2e-pass-123", INGEST_AGENT: "false" }),
   ],
 });

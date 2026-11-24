@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { declineConsent } from "./helpers";
 
 // The E2E database persists between runs, so each run uses its own slug.
 const slug = `my-roadmap-${Date.now()}`;
@@ -10,6 +11,7 @@ async function fillForm(page: import("@playwright/test").Page) {
   await page.getByRole("button", { name: "Create roadmap" }).click();
 }
 
+test.beforeAll(async ({ request }) => declineConsent(request));
 test.describe.configure({ mode: "serial" });
 
 test("creating a roadmap adds it to the list", async ({ page }) => {

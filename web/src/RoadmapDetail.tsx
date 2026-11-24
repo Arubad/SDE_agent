@@ -18,7 +18,9 @@ import {
 import { statusText } from "./format";
 import { IngestProgress } from "./IngestProgress";
 import { IngestReport } from "./IngestReport";
+import { SkillMap } from "./SkillMap";
 import { SpecReview } from "./SpecReview";
+import { StudySettings } from "./StudySettings";
 import { SessionList } from "./tutor/SessionList";
 import { Tutor } from "./tutor/Tutor";
 
@@ -213,7 +215,7 @@ export function RoadmapDetail({
   }
 
   const tutorReady = !!detail && TUTOR_READY.includes(detail.status);
-  const shown: Tab = tab === "tutor" && !tutorReady ? "overview" : tab;
+  const shown: Tab = (tab === "tutor" || tab === "skills") && !tutorReady ? "overview" : tab;
   const tabButton = (id: Tab, label: string, disabled = false, hint?: string) => (
     <button
       type="button"
@@ -247,12 +249,14 @@ export function RoadmapDetail({
       <div className="tabs" role="tablist" aria-label="Roadmap sections">
         {tabButton("overview", "Overview")}
         {tabButton("tutor", "Tutor", !tutorReady, "The tutor is available once the roadmap is ready.")}
-        {tabButton("skills", "Skill map", true, "Coming soon.")}
+        {tabButton("skills", "Skill map", !tutorReady, "The skill map is available once the roadmap is ready.")}
         {tabButton("sessions", "Sessions")}
       </div>
       {!tutorReady && detail && <p className="muted small">The Tutor tab opens once the roadmap is ready.</p>}
       <div id="tabpanel" role="tabpanel" aria-labelledby={`tab-${shown}`} className="stack">
         {shown === "overview" && body}
+        {shown === "skills" && <SkillMap slug={slug} onUnauthorized={onUnauthorized} />}
+        {shown === "tutor" && <StudySettings slug={slug} onUnauthorized={onUnauthorized} />}
         {shown === "tutor" && (
           <Tutor
             slug={slug}

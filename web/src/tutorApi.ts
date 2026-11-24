@@ -45,7 +45,14 @@ export interface SkillMap {
   skills: SkillMapSkill[];
 }
 
-export type StudySettings = Record<string, unknown>;
+export interface StudySettings {
+  weekly_hours: number | null;
+  effective_weekly_hours: number;
+  session_minutes: number;
+  study_days: number[];
+  deadline: string | null;
+}
+export type StudySettingsInput = Partial<Omit<StudySettings, "effective_weekly_hours">>;
 export interface PlanView {
   plan: unknown;
   today: Today | null;
@@ -77,7 +84,7 @@ export function getStudySettings(slug: string): Promise<StudySettings> {
   return request<StudySettings>(roadmapPath(slug, "/study-settings"));
 }
 
-export function putStudySettings(slug: string, settings: StudySettings): Promise<StudySettings> {
+export function putStudySettings(slug: string, settings: StudySettingsInput): Promise<StudySettings> {
   return request<StudySettings>(roadmapPath(slug, "/study-settings"), { method: "PUT", body: JSON.stringify(settings) });
 }
 
