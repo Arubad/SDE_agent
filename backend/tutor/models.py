@@ -21,6 +21,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -281,6 +282,7 @@ class TutorSession(Base):
     __table_args__ = (
         CheckConstraint("mode IN ('tutor', 'qa')", name="ck_tutor_sessions_mode"),
         CheckConstraint("status IN ('active', 'ended')", name="ck_tutor_sessions_status"),
+        Index("uq_tutor_sessions_one_active", "roadmap_id", unique=True, postgresql_where=text("status = 'active'")),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

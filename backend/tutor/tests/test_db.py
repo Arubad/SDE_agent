@@ -211,6 +211,24 @@ def test_migration_0008_schema(engine):
     assert {"summary", "quiz"} <= {c["name"] for c in inspect(engine).get_columns("sections")}
 
 
+def test_migration_0009_one_active_session(fresh_db_url):
+    from sqlalchemy import create_engine
+
+    def index():
+        return {i["name"]: i for i in inspect(eng).get_indexes("tutor_sessions")}.get("uq_tutor_sessions_one_active")
+
+    eng = create_engine(fresh_db_url)
+    try:
+        migrate(fresh_db_url)
+        assert index()["unique"] and index()["column_names"] == ["roadmap_id"]
+        downgrade(fresh_db_url, "0008")
+        assert index() is None
+        migrate(fresh_db_url)
+        assert index() is not None
+    finally:
+        eng.dispose()
+
+
 @pytest.fixture
 def fresh_db_url(db_url):
     import uuid

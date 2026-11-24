@@ -1,7 +1,11 @@
+import asyncio
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from backend.core import fake_llm
 from backend.core.fake_llm import FakeReply
@@ -20,7 +24,9 @@ from backend.tutor.tests.tutor_helpers import (
     replies,
     run,
 )
-from backend.tutor.tutor.runtime import BadResume
+from backend.tutor.tutor import runtime as runtime_mod
+from backend.tutor.tutor.graph import single
+from backend.tutor.tutor.runtime import BadResume, Busy, SessionEnded
 from backend.tutor.tutor.session_start import NO_SESSION_TEXT, NO_SUMMARY_TEXT
 from backend.tutor.tutor.sessions import NotReady, create_session, end_session, last_ended, list_sessions
 
@@ -274,3 +280,99 @@ async def test_qa_mode_start_never_reaches_session_start(engine, rt):
     sid = new_session(engine, mode="qa")
     add_ended_session(engine, sid, summary="s")
     assert nodes(await run(rt, sid, {"action": "start"})) == ["coordinator"]
+
+
+# --- coordination with running turns and the one-active-session rule -----------------------------------------
+
+def _slow_teacher(started, release):
+    def add(builder, deps):
+        async def teacher(state):
+            started.set()
+            await release.wait()
+
+        return single(builder, "teacher", teacher)
+
+    return add
+
+
+async def _running_turn(engine, enq):
+    """A runtime with a turn blocked in the teacher; returns (rt, sid, release event, the turn's task)."""
+    started, release = asyncio.Event(), asyncio.Event()
+    rt = make_runtime(engine, {"teacher": _slow_teacher(started, release)}, enqueue=enq)
+    sid = str((create_session(engine, _roadmap(engine), "tutor", enqueue=enq)).id)
+    task = asyncio.create_task(run(rt, sid, {"action": "continue"}))
+    await started.wait()
+    return rt, sid, release, task
+
+
+async def test_ending_waits_for_the_running_turn(engine, clear_memo):  # noqa: F811
+    enq = Enqueued()
+    rt, sid, release, turn = await _running_turn(engine, enq)
+    ending = asyncio.create_task(rt.end_session(sid))
+    await asyncio.sleep(0.2)
+    assert not ending.done() and enq == [] and _row(engine, sid).status == "active"
+    with pytest.raises(Busy):  # a new turn does not squeeze in
+        await run(rt, sid, {"action": "continue"})
+    release.set()
+    events, ended = await turn, await ending
+    assert events[-1]["type"] == "done" and ended.status == "ended"
+    assert [(t, k) for t, _, k, _ in enq] == [("curate_session", (sid,))]
+    with pytest.raises(SessionEnded):
+        await run(rt, sid, {"action": "continue"})
+
+
+async def test_ending_gives_up_with_busy(engine, clear_memo, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(runtime_mod, "END_WAIT_S", 0.05)
+    enq = Enqueued()
+    rt, sid, release, turn = await _running_turn(engine, enq)
+    with pytest.raises(Busy):
+        await rt.end_session(sid)
+    assert enq == [] and _row(engine, sid).status == "active"
+    release.set()
+    await turn
+    assert (await rt.end_session(sid)).status == "ended" and len(enq) == 1
+
+
+async def test_runtime_create_waits_for_the_old_turn(engine, clear_memo):  # noqa: F811
+    enq = Enqueued()
+    rt, sid, release, turn = await _running_turn(engine, enq)
+    slug = list_sessions_slug(engine, sid)
+    creating = asyncio.create_task(rt.create_session(slug, "tutor"))
+    await asyncio.sleep(0.2)
+    assert not creating.done() and _row(engine, sid).status == "active"
+    release.set()
+    await turn
+    new = await creating
+    assert new.status == "active" and _row(engine, sid).status == "ended" and len(enq) == 1
+
+
+def list_sessions_slug(engine, sid):
+    with engine.connect() as c:
+        return c.execute(text("SELECT r.slug FROM roadmaps r JOIN tutor_sessions s ON s.roadmap_id = r.id "
+                              "WHERE s.id = :i"), {"i": sid}).scalar()
+
+
+async def test_turn_on_a_session_ended_meanwhile_is_refused(engine, clear_memo):  # noqa: F811
+    enq = Enqueued()
+    rt = make_runtime(engine, enqueue=enq)
+    sid = str(create_session(engine, _roadmap(engine), "tutor", enqueue=enq).id)
+    await rt.end_session(sid)
+    with pytest.raises(SessionEnded):
+        await run(rt, sid, {"action": "continue"})
+
+
+def test_concurrent_creates_leave_one_active_session(engine):
+    enq, slug = Enqueued(), _roadmap(engine)
+    create_session(engine, slug, "tutor", enqueue=enq)
+    with ThreadPoolExecutor(6) as pool:
+        made = list(pool.map(lambda _: create_session(engine, slug, "tutor", enqueue=enq), range(6)))
+    statuses = [r["status"] for r in list_sessions(engine, slug)]
+    assert statuses.count("active") == 1 and len(statuses) == 7 and len({m.id for m in made}) == 6
+    assert len(enq) == 6  # every session but the last was ended exactly once
+
+
+def test_unique_index_refuses_a_second_active_row(engine):
+    slug = _roadmap(engine)
+    first = create_session(engine, slug, "tutor", enqueue=Enqueued())
+    with pytest.raises(IntegrityError), session_scope(engine) as s:
+        s.add(TutorSession(roadmap_id=first.roadmap_id, mode="tutor", status="active"))

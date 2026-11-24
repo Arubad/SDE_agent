@@ -1,5 +1,7 @@
 """The turn runtime: one tutor turn in, a stream of `TurnEvent`s out.
 
+- Ending a session (`end_session`, `create_session`) takes the turn lock of the session it ends, so it waits for
+  a running turn (END_WAIT_S, else `Busy`) and no turn runs on an ended session.
 - One turn at a time per session: a per-session `asyncio.Lock` is held for the whole turn; a second turn raises
   `Busy` on its first `__anext__`, before anything else happens.
 - The session row gives the graph its `roadmap` (slug), `session_id` and `mode`. Unknown -> `LookupError`; ended ->
@@ -22,6 +24,7 @@ import asyncio
 import inspect
 import uuid
 import weakref
+from contextlib import AsyncExitStack
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
 from typing import Any, get_args
@@ -37,6 +40,7 @@ from backend.tutor.models import Roadmap, TutorSession
 from backend.tutor.telemetry import export_trace
 from backend.tutor.tutor.budget import OUTAGE_MESSAGE, BudgetExceeded
 from backend.tutor.tutor.graph import TutorDeps
+from backend.tutor.tutor import sessions
 from backend.tutor.tutor.session_start import resume_ok
 from backend.tutor.tutor.state import Action, TurnEvent
 
@@ -52,6 +56,9 @@ def _accepts(valid: Callable[..., bool], value: Any, pending: Any) -> bool:
     except (TypeError, ValueError):
         takes_pending = False
     return valid(value, pending) if takes_pending else valid(value)
+
+
+END_WAIT_S = 120.0  # how long ending a session waits for its running turn before giving up with `Busy`
 
 
 class Busy(Exception):
@@ -101,12 +108,37 @@ class TutorRuntime:
             lock = self._locks[session_id] = asyncio.Lock()
         return lock
 
+    async def _end_locked(self, session_ids: list[uuid.UUID], work: Callable[[], Any]) -> Any:
+        """Run sync `work` in a thread once no turn of any of `session_ids` is running (each turn lock is held
+        meanwhile, so a turn arriving now gets `Busy`, then `SessionEnded`). Waits at most END_WAIT_S per lock."""
+        async with AsyncExitStack() as stack:
+            for sid in sorted(session_ids):
+                lock = self._lock(str(sid))
+                try:
+                    await asyncio.wait_for(lock.acquire(), END_WAIT_S)
+                except TimeoutError:
+                    raise Busy(str(sid)) from None
+                stack.callback(lock.release)
+            return await asyncio.to_thread(work)
+
+    async def end_session(self, session_id: str) -> TutorSession:
+        """End a session after its running turn (if any) finishes, and queue its curation."""
+        sid = sessions.parse_id(session_id)
+        return await self._end_locked(
+            [sid], lambda: sessions.end_session(self.deps.engine, sid, self.deps.enqueue))
+
+    async def create_session(self, slug: str, mode: str) -> TutorSession:
+        """A new session; the roadmap's active session is ended first, after its running turn finishes."""
+        active = await asyncio.to_thread(sessions.active_session_ids, self.deps.engine, slug)
+        return await self._end_locked(
+            active, lambda: sessions.create_session(self.deps.engine, slug, mode, enqueue=self.deps.enqueue))
+
     async def run_turn(self, session_id: str, turn: dict) -> AsyncIterator[TurnEvent]:
         lock = self._lock(session_id)
         if lock.locked():
             raise Busy(session_id)
         async with lock:
-            row = await asyncio.to_thread(self._session, session_id)
+            row = await asyncio.to_thread(self._session, session_id)  # under the lock: an ended session is refused
             cfg = _config(session_id)
             if "resume" in turn:
                 if set(turn) != {"resume"}:

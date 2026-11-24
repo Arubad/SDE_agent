@@ -11,6 +11,7 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 
 from backend.tutor.db import session_scope
 from backend.tutor.models import Roadmap, TutorSession
@@ -29,28 +30,51 @@ def _has_skills(spec: dict | None) -> bool:
 
 
 def create_session(engine: Engine, slug: str, mode: str, *, enqueue: Callable[..., Any]) -> TutorSession:
-    """A new active session. Ends the roadmap's active session(s) first."""
+    """A new active session. Ends the roadmap's active session(s) and inserts the new row in one transaction
+    (a partial unique index allows one active session per roadmap); a concurrent create that trips the index is
+    retried once. Callers coordinate with running turns through `TutorRuntime.create_session`."""
+    for attempt in (1, 2):
+        try:
+            row, ended = _create(engine, slug, mode)
+            break
+        except IntegrityError:
+            if attempt == 2:
+                raise
+    for old in ended:  # after the commit, so a curation job sees an ended session
+        enqueue("curate_session", {"session_id": str(old.id)}, (str(old.id),), roadmap_id=old.roadmap_id)
+    return row
+
+
+def _create(engine: Engine, slug: str, mode: str) -> tuple[TutorSession, list[TutorSession]]:
     with session_scope(engine) as s:
-        rm = get_roadmap_by_slug(s, slug)
+        rm = get_roadmap_by_slug(s, slug, lock=True)  # serialises creates on one roadmap
         if rm is None:
             raise LookupError(f"No roadmap '{slug}'")
         if rm.status not in READY_STATUSES or not _has_skills(rm.spec):
             raise NotReady(NOT_READY.format(slug=slug, status=rm.status))
-        roadmap_id = rm.id
-        active = list(s.scalars(select(TutorSession.id).where(
-            TutorSession.roadmap_id == roadmap_id, TutorSession.status == "active")))
-    for session_id in active:
-        end_session(engine, session_id, enqueue)
-    with session_scope(engine) as s:
-        row = TutorSession(roadmap_id=roadmap_id, mode=mode, status="active")
+        ended = list(s.scalars(select(TutorSession).where(
+            TutorSession.roadmap_id == rm.id, TutorSession.status == "active").with_for_update()))
+        now = datetime.now(timezone.utc)
+        for old in ended:
+            old.status, old.ended_at = "ended", now
+        s.flush()  # the old rows leave the unique index before the new one enters it
+        row = TutorSession(roadmap_id=rm.id, mode=mode, status="active")
         s.add(row)
         s.flush()
-        return row
+        return row, ended
+
+
+def active_session_ids(engine: Engine, slug: str) -> list[uuid.UUID]:
+    with session_scope(engine) as s:
+        return list(s.scalars(select(TutorSession.id).join(Roadmap, Roadmap.id == TutorSession.roadmap_id)
+                              .where(Roadmap.slug == slug, TutorSession.status == "active")
+                              .order_by(TutorSession.id)))
 
 
 def end_session(engine: Engine, session_id: uuid.UUID | str, enqueue: Callable[..., Any]) -> TutorSession:
-    """Idempotent: an ended session is returned as it is, and nothing is enqueued."""
-    sid = session_id if isinstance(session_id, uuid.UUID) else _uuid(session_id)
+    """Idempotent: an ended session is returned as it is, and nothing is enqueued. Callers coordinate with a
+    running turn through `TutorRuntime.end_session`."""
+    sid = session_id if isinstance(session_id, uuid.UUID) else parse_id(session_id)
     with session_scope(engine) as s:
         row = s.get(TutorSession, sid, with_for_update=True)
         if row is None:
@@ -63,7 +87,7 @@ def end_session(engine: Engine, session_id: uuid.UUID | str, enqueue: Callable[.
     return row
 
 
-def _uuid(value: str) -> uuid.UUID:
+def parse_id(value: str) -> uuid.UUID:
     try:
         return uuid.UUID(value)
     except ValueError:
