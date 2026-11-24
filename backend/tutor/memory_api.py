@@ -24,7 +24,7 @@ from backend.tutor.db import session_scope
 from backend.tutor.learner import store
 from backend.tutor.models import LearnerFact, LearnerSettings, Roadmap, SkillProgress, StudyPlan, TutorSession
 from backend.tutor.repo import get_roadmap_by_slug
-from backend.tutor.tutor import checkpoint, planner
+from backend.tutor.tutor import checkpoint, planner, retention
 from backend.tutor.tutor.sessions import parse_id
 
 UNAVAILABLE = "Database unavailable"
@@ -90,8 +90,11 @@ def _fact_count(engine: Engine) -> int:
         return s.scalar(select(func.count()).select_from(LearnerFact))
 
 
-def _save_settings(engine: Engine, changes: dict) -> dict:
+def _save_settings(engine: Engine, changes: dict, purge: bool) -> dict:
+    """The settings change and, when asked, the facts purge, in one transaction: both happen or neither."""
     with session_scope(engine) as s:
+        if purge:
+            store.purge_facts_in(s)
         row = s.get(LearnerSettings, 1)
         if row is None:
             row = LearnerSettings(id=1, retention_days=DEFAULT_RETENTION_DAYS)
@@ -107,11 +110,6 @@ def _kept_sessions(engine: Engine) -> list[uuid.UUID]:
     with session_scope(engine) as s:
         return list(s.scalars(select(TutorSession.id).where(
             TutorSession.status == "ended", TutorSession.raw_kept.is_(True))))
-
-
-def _unkeep(engine: Engine, sid: uuid.UUID) -> None:
-    with session_scope(engine) as s:
-        s.get(TutorSession, sid).raw_kept = False
 
 
 @router.get("/learner/settings")
@@ -136,14 +134,13 @@ async def put_settings(request: Request):
         return _error(409, PURGE_NEEDED.format(n=await asyncio.to_thread(_fact_count, engine)))
     if drop_raw and saver is None:
         return _unavailable()  # before anything changes
-    view = await asyncio.to_thread(_save_settings, engine, changes)
-    if purge:
-        await asyncio.to_thread(store.purge_facts, engine)
     if drop_raw:
+        # Threads first: a failure leaves consent on, so a retry still sees the revoke. The retention sweep
+        # also cleans whatever a crash leaves behind once consent is off.
         for sid in await asyncio.to_thread(_kept_sessions, engine):
             await checkpoint.delete_thread(saver, str(sid))
-            await asyncio.to_thread(_unkeep, engine, sid)
-    return view
+            await asyncio.to_thread(retention._unkeep, engine, sid)
+    return await asyncio.to_thread(_save_settings, engine, changes, purge)
 
 
 # --- facts ------------------------------------------------------------------------------------------------

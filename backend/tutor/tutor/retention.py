@@ -13,7 +13,7 @@ from sqlalchemy.engine import Engine
 from backend.tutor.db import session_scope
 from backend.tutor.jobs import queue
 from backend.tutor.learner import store
-from backend.tutor.models import TutorSession
+from backend.tutor.models import LearnerFact, TutorSession
 from backend.tutor.tutor import checkpoint
 
 log = logging.getLogger(__name__)
@@ -93,13 +93,43 @@ async def drop_stale_threads(engine: Engine, saver: Any) -> int:
     return n
 
 
+def _revoked(engine: Engine) -> tuple[list, bool]:
+    """Ended sessions still holding a raw thread while raw consent is not on, and whether personal consent is off
+    while facts remain."""
+    settings = store.get_settings(engine)
+    with session_scope(engine) as s:
+        kept = [] if settings is not None and settings.consent_raw_messages is True else list(s.scalars(
+            select(TutorSession.id).where(TutorSession.status == "ended", TutorSession.raw_kept.is_(True))))
+        facts = settings is not None and settings.consent_personal is False and s.scalar(
+            select(LearnerFact.id).limit(1)) is not None
+    return kept, bool(facts)
+
+
+async def sweep_revoked(engine: Engine, saver: Any) -> int:
+    """State-based cleanup of what a revoke left behind (a crash between its steps): delete the kept raw threads
+    while `consent_raw_messages` is not True, and purge every fact while `consent_personal` is False."""
+    kept, facts = await asyncio.to_thread(_revoked, engine)
+    n = 0
+    for sid in kept:
+        try:
+            await checkpoint.delete_thread(saver, str(sid))
+            await asyncio.to_thread(_unkeep, engine, sid)
+            n += 1
+        except Exception as exc:
+            log.warning("retention: revoked thread %s not deleted: %s", sid, type(exc).__name__)
+    if facts:
+        n += await asyncio.to_thread(store.purge_facts, engine)
+    return n
+
+
 async def run_forever(engine: Engine, saver: Any, enqueue: Callable[..., Any],
                       every_s: float = RETENTION_EVERY_S) -> None:
     """Re-enqueue, then sweep, now and every `every_s`. Failures are logged; cancel the task to stop it."""
     while True:
         for name, step in (("re-enqueue", lambda: reenqueue_uncurated(engine, enqueue)),
                            ("drop-stale", lambda: drop_stale_threads(engine, saver)),
-                           ("sweep", lambda: sweep(engine, saver))):
+                           ("sweep", lambda: sweep(engine, saver)),
+                           ("revoked", lambda: sweep_revoked(engine, saver))):
             try:
                 await step()
             except Exception as exc:

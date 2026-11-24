@@ -39,6 +39,14 @@ def client(engine, tmp_path):
 
 
 @pytest.fixture
+def lenient_client(engine, tmp_path):
+    """Answers 500 to an unhandled error instead of raising it into the test."""
+    app = create_app(Settings(web_dist=tmp_path / "no-dist", embedder="hash"), engine=engine)
+    with local_client(app, raise_server_exceptions=False) as c:
+        yield c
+
+
+@pytest.fixture
 def no_saver_client(engine, tmp_path):
     app = create_app(Settings(web_dist=tmp_path / "no-dist", embedder="hash"), engine=engine)
     with local_client(app) as c:
@@ -312,3 +320,70 @@ def test_export_without_saver_marks_messages_unavailable(no_saver_client, engine
     data = no_saver_client.get("/api/learner/export").json()
     row = next(s for s in data["sessions"] if s["id"] == kept)
     assert row["messages_unavailable"] is True and "messages" not in row
+
+
+# --- failure injection (revocation is all-or-nothing, and the sweep cleans a partial state) -----------------
+
+def test_thread_delete_failure_leaves_consent_on_and_retry_completes(lenient_client, engine, db_url, monkeypatch):
+    from backend.tutor.tutor import checkpoint
+    _consent(engine, True, True)
+    rm = _roadmap(engine)
+    a, b = _session(engine, rm, raw_kept=True), _session(engine, rm, raw_kept=True)
+    for sid in (a, b):
+        _seed(db_url, sid, [{"role": "user", "content": "hi"}])
+    real, calls = checkpoint.delete_thread, []
+
+    async def flaky(saver, sid):
+        calls.append(sid)
+        if len(calls) == 2:
+            raise OSError("boom")
+        await real(saver, sid)
+
+    monkeypatch.setattr(checkpoint, "delete_thread", flaky)
+    assert lenient_client.put("/api/learner/settings", json={"consent_raw_messages": False}).status_code == 500
+    assert lenient_client.get("/api/learner/settings").json()["consent_raw_messages"] is True
+    monkeypatch.setattr(checkpoint, "delete_thread", real)
+    assert lenient_client.put("/api/learner/settings", json={"consent_raw_messages": False}).status_code == 200
+    assert not _has_thread(db_url, a) and not _has_thread(db_url, b)
+    with session_scope(engine) as s:
+        assert s.query(TutorSession).filter(TutorSession.raw_kept.is_(True)).count() == 0
+
+
+def test_purge_failure_leaves_settings_unchanged(lenient_client, engine, monkeypatch):
+    _consent(engine, True)
+    _fact(engine, "likes diagrams")
+
+    def boom(s):
+        raise OSError("boom")
+
+    monkeypatch.setattr(store, "purge_facts_in", boom)
+    r = lenient_client.put("/api/learner/settings", json={"consent_personal": False, "confirm_purge": True})
+    assert r.status_code == 500
+    assert lenient_client.get("/api/learner/settings").json()["consent_personal"] is True
+    monkeypatch.undo()
+    assert lenient_client.put("/api/learner/settings", json={"consent_personal": False, "confirm_purge": True}
+                      ).status_code == 200
+    assert lenient_client.get("/api/learner/export").json()["facts"] == []
+
+
+def test_sweep_cleans_a_partial_revoke(engine, db_url):
+    from backend.tutor.tutor import retention
+
+    _consent(engine, True, True)
+    rm = _roadmap(engine)
+    kept = _session(engine, rm, raw_kept=True)
+    _seed(db_url, kept, [{"role": "user", "content": "hi"}])
+    _fact(engine, "stale fact")
+
+    async def go():
+        async with open_saver(db_url) as saver:
+            first = await retention.sweep_revoked(engine, saver)  # consent still on: nothing to do
+            _consent(engine, False, False)
+            return first, await retention.sweep_revoked(engine, saver)
+
+    first, second = asyncio.run(go())
+    assert first == 0 and second == 2
+    assert not _has_thread(db_url, kept)
+    with session_scope(engine) as s:
+        assert s.query(LearnerFact).count() == 0
+        assert s.get(TutorSession, uuid.UUID(kept)).raw_kept is False

@@ -198,10 +198,15 @@ def update_fact(engine: Engine, embedder: Embedder, fact_id: str, text: str, kin
         return {"id": str(fact.id), "action": "updated"}
 
 
+def purge_facts_in(s: Session) -> int:
+    """`purge_facts` inside the caller's transaction, so a purge can commit together with a settings change."""
+    return s.execute(delete(LearnerFact)).rowcount
+
+
 def purge_facts(engine: Engine) -> int:
     """Delete every fact and return how many. It neither checks nor changes consent; the caller does."""
     with session_scope(engine) as s:
-        return s.execute(delete(LearnerFact)).rowcount
+        return purge_facts_in(s)
 
 
 def get_progress(engine: Engine, roadmap: str) -> list[dict]:
