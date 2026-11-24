@@ -2,6 +2,7 @@
 import dataclasses
 import hashlib
 import re
+import time
 import uuid
 
 import anthropic
@@ -13,6 +14,8 @@ from backend.core import config, fake_llm
 from backend.core.fake_llm import FakeReply
 from backend.tutor.db import session_scope
 from backend.tutor.ingest.fetch import public_resolver
+from backend.core.llm import LLMUnavailable
+from backend.tutor.mcp import policy as policy_mod
 from backend.tutor.models import Resource, Roadmap, TutorSession
 from backend.tutor.settings import Settings
 from backend.tutor.tests.tutor_helpers import (
@@ -23,7 +26,7 @@ from backend.tutor.tests.tutor_helpers import (
     nodes,
     run,
 )
-from backend.tutor.tutor import budget
+from backend.tutor.tutor import budget, teacher
 from backend.tutor.tutor.budget import OUTAGE_MESSAGE
 from backend.tutor.tutor.compaction import SUMMARY_SCHEMA, compact, estimate_tokens
 from backend.tutor.tutor.teacher import (
@@ -246,6 +249,45 @@ async def test_no_contradiction_check_without_both_sources(rt, sid):
     assert _schema_requests("WebContradiction") == [] and _reply(events)["notice"] is None
 
 
+async def test_contradiction_outage_keeps_the_answer(rt, sid, monkeypatch, instant_retries):
+    calls = []
+
+    def down(**kwargs):
+        calls.append(kwargs["schema"]["title"])
+        raise LLMUnavailable("down")
+
+    monkeypatch.setattr(teacher, "haiku_json", down)
+    with fake_llm.script([FakeReply(tool_uses=[("kb__search", {"query": "pods"}), ("web__search", {"query": "p"})]),
+                          FakeReply(text=f"Pods. See {K8S}", citations=[0])]):
+        events = await run(rt, sid, {"action": "continue"})
+    assert calls == ["WebContradiction"] * 3  # retried, then given up
+    reply = _reply(events)
+    assert reply["notice"] is None and reply["sources"]["web"] == [{"url": K8S, "title": "Pods"}]
+    assert [e for e in events if e["type"] == "error"] == [] and events[-1]["type"] == "done"
+    stored = (await rt.state(sid))["messages"]
+    assert stored[-1] == {"role": "assistant", "content": reply["text"]} and len(stored) == 2
+    assert (await _values(rt, sid))["notice"] is None
+
+
+async def test_contradiction_budget_breach_keeps_the_answer(engine, clear_memo, gw, sid, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(config, "PRICE_TABLE_JSON", '{"fake": {"input": 100.0, "output": 100.0}}')
+    rt = _runtime(engine, gw, dataclasses.replace(Settings(), tutor_max_usd=0.002))  # one step: $0.0015
+    with fake_llm.script([FakeReply(tool_uses=[("kb__search", {"query": "pods"}), ("web__search", {"query": "p"})]),
+                          FakeReply(text=f"Pods. See {K8S}", citations=[0])]):
+        events = await run(rt, sid, {"action": "continue"})
+    assert _reply(events)["notice"] is None and [e for e in events if e["type"] == "error"] == []
+    assert _schema_requests("WebContradiction") == []
+
+
+async def test_no_contradiction_check_without_web_excerpts(rt, sid, gw):
+    gw.results["web__search"] = {"data": {"results": [{"url": wrap(K8S), "title": wrap("Pods")}]}}  # no snippet
+    with fake_llm.script([FakeReply(tool_uses=[("kb__search", {"query": "pods"}), ("web__search", {"query": "p"})]),
+                          FakeReply(text=f"Pods. See {K8S}", citations=[0])]):
+        events = await run(rt, sid, {"action": "continue"})
+    assert _reply(events)["sources"]["web"] == [{"url": K8S, "title": "Pods"}]
+    assert _schema_requests("WebContradiction") == [] and _reply(events)["notice"] is None
+
+
 def test_contradiction_schema():
     assert CONTRADICTION_SCHEMA["title"] == "WebContradiction"
     assert set(CONTRADICTION_SCHEMA["properties"]) == {"contradicts", "note"}
@@ -327,6 +369,37 @@ async def test_policy_seeded_and_allowed_urls_stored(engine, rt, sid, gw):
     stored = (await _values(rt, sid))["allowed_urls"]
     assert len(stored) == 500 and stored[-3:] == [K8S, VIDEO, "https://mine.example/page"]
     assert "https://old0.example/" not in stored and "https://old1.example/" not in stored  # oldest dropped
+
+
+async def test_seeding_resolves_nothing(engine, clear_memo, gw, sid):  # noqa: F811
+    calls = []
+
+    def blocking(host):  # a hung DNS: every lookup would cost the 5 s timeout
+        calls.append(host)
+        time.sleep(5)
+        return ["93.184.216.34"]
+
+    rt = make_runtime(engine, gateway=gw, url_resolver=blocking)
+    stored = [f"https://h{i}.example/" for i in range(499)] + ["https://intranet.example/"]
+    await rt.graph.aupdate_state({"configurable": {"thread_id": sid}}, {"allowed_urls": stored}, as_node="teacher")
+    started = time.monotonic()
+    with fake_llm.script([FakeReply(text="ok")]):
+        events = await run(rt, sid, {"action": "continue"})
+    assert time.monotonic() - started < 2 and calls == []
+    assert _reply(events)["text"] == "ok"
+
+
+async def test_seeded_private_host_is_refused_at_use_time(engine, clear_memo, gw, sid):  # noqa: F811
+    rt = make_runtime(engine, gateway=gw,
+                      url_resolver=lambda h: ["10.0.0.5"] if h == "intranet.example" else ["93.184.216.34"])
+    await rt.graph.aupdate_state({"configurable": {"thread_id": sid}},
+                                 {"allowed_urls": ["https://intranet.example/", "https://ok.example/"]},
+                                 as_node="teacher")
+    with fake_llm.script([FakeReply(tool_uses=[("web__search", {"query": "q"})]), FakeReply(text="ok")]):
+        await run(rt, sid, {"action": "continue"})
+    policy = gw.calls[0][2].policy
+    assert policy.refusal("https://intranet.example/x") == policy_mod.PRIVATE
+    assert policy.refusal("https://ok.example/x") is None
 
 
 async def test_user_urls_survive_sanitizing(rt, sid):

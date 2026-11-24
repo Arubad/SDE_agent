@@ -13,6 +13,7 @@ A URL passes `refusal` when all of these hold:
 Sources that fail the first two checks are never added, so a refused search result allows nothing.
 
 Refusal reasons are fixed strings: they reach the model, and the URL itself may be page-written text.
+`allow_hosts` never resolves (it trusts the caller's earlier vetting; `refusal` still checks the address).
 `allow_sources`, `allow_text` and `refusal` may resolve DNS (real DNS by default; tests inject a resolver), so
 the gateway calls them off its event loop."""
 from __future__ import annotations
@@ -114,6 +115,15 @@ class UrlPolicy:
         for url in urls:
             host = _host(url)
             if host is not None and self._address(host) is None:
+                self._hosts.add(host)
+
+    def allow_hosts(self, urls: Iterable[str]) -> None:
+        """Allow the hosts of these URLs without resolving them: for sources already vetted earlier (a tutor
+        session's stored URLs, the roadmap's resources), so no DNS runs per stored URL. Use-time `refusal()` still
+        resolves the host and refuses private, loopback and link-local addresses. URLs that could never be opened
+        (not absolute http(s), userinfo, backslash) are skipped."""
+        for url in urls:
+            if (host := _host(url)) is not None:
                 self._hosts.add(host)
 
     def allow_text(self, text: str) -> None:

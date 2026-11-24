@@ -12,15 +12,17 @@ One turn:
   the turn as sent; then the turn and the sanitised answer are appended. The loop's tool messages are not stored.
 - Tools: the gateway's `teacher` tools plus the local PROPOSE_TOOL. Every other call goes to `Gateway.call` with
   `CallContext(agent="teacher", policy, trace, lease=session_id)`; the gateway enforces the URL policy, so the
-  loop's `check_call` refuses nothing. The policy is seeded with `state.allowed_urls`, every user message's URLs
-  and the roadmap's resource URLs; it is never stored in state.
+  loop's `check_call` refuses nothing. The policy is seeded, by host and without DNS (`allow_hosts`), with
+  `state.allowed_urls`, every user message's URLs and the roadmap's resource URLs; `refusal` still resolves at use
+  time. The policy is never stored in state.
 - Model steps: `Budget.check` before each step, then the step under `with_llm_retry`; a retry first emits a reset
   `reply_delta` so the UI drops partial text.
 - Sources (D11): roadmap sources are the loop's citations. Web sources are the URLs of this turn's web-namespace
   tool results (WEB_NAMESPACES) that the answer mentions, in first-mention order, titled by their web.search
   result. Links in the answer are sanitised to roadmap and web source URLs and the learner's own URLs.
-- With roadmap and web sources both present, one low-effort WebContradiction call; a contradiction becomes the
-  reply's `notice` (and `state.notice`).
+- With roadmap and web sources both present (and a web excerpt to compare), one low-effort WebContradiction call;
+  a contradiction becomes the reply's `notice` (and `state.notice`). Its failure (budget, outage) only drops the
+  notice: the answer is kept (R9).
 - `allowed_urls` grows by this turn's search-result URLs and the learner's URLs (deduplicated, newest kept,
   at most MAX_ALLOWED_URLS).
 - The browser lease is released when the turn ends, however it ends.
@@ -41,7 +43,7 @@ from sqlalchemy.exc import IntegrityError
 
 from backend.agent.guard import sanitize_links
 from backend.agent.loop import default_model_turn, run_tool_loop
-from backend.core.llm import haiku_json
+from backend.core.llm import LLMUnavailable, haiku_json
 from backend.core.trace import current_trace
 from backend.tutor.db import session_scope
 from backend.tutor.ingest.fetch import system_resolver
@@ -50,7 +52,7 @@ from backend.tutor.mcp.gateway import CallContext
 from backend.tutor.mcp.policy import UrlPolicy, search_result_urls, text_urls
 from backend.tutor.models import Resource
 from backend.tutor.repo import get_roadmap_by_slug
-from backend.tutor.tutor.budget import Budget, with_llm_retry
+from backend.tutor.tutor.budget import Budget, BudgetExceeded, with_llm_retry
 from backend.tutor.tutor.compaction import compact
 from backend.tutor.tutor.graph import Group, node
 from backend.tutor.tutor.state import TutorState, reply_event
@@ -286,10 +288,14 @@ def _load(engine, slug: str) -> tuple[list[dict] | None, list[str]]:
     return snapshot, urls
 
 
-async def _contradiction(sources: list[dict], seen: _Seen, web: list[dict]) -> str | None:
+async def _contradiction(sources: list[dict], seen: _Seen, web: list[dict], budget: Budget, trace) -> str | None:
+    """The contradiction notice, or None. It never fails the turn (R9): with no web excerpt there is nothing to
+    compare, and a breached budget or an outage after the retries leaves the finished answer without a notice."""
     roadmap = [wrap(p["text"][:EXCERPT_CHARS]) for p in sources[:CONTRADICTION_INPUTS]]
     excerpts = [seen.excerpts[_key(w["url"])] for w in web if _key(w["url"]) in seen.excerpts]
     web_texts = [wrap(e[:EXCERPT_CHARS]) for e in excerpts[:CONTRADICTION_INPUTS]]
+    if not roadmap or not web_texts:
+        return None
     prompt = ("Roadmap material:\n" + "\n".join(f"{i}. {t}" for i, t in enumerate(roadmap, 1))
               + "\n\nWeb excerpts:\n" + "\n".join(f"{i}. {t}" for i, t in enumerate(web_texts, 1)))
 
@@ -297,7 +303,11 @@ async def _contradiction(sources: list[dict], seen: _Seen, web: list[dict]) -> s
         return await asyncio.to_thread(haiku_json, system=CONTRADICTION_SYSTEM, prompt=prompt,
                                        schema=CONTRADICTION_SCHEMA, effort="low", span_name="web_contradiction")
 
-    verdict = await with_llm_retry(call)
+    try:
+        budget.check(trace)
+        verdict = await with_llm_retry(call)
+    except (BudgetExceeded, LLMUnavailable):
+        return None
     return verdict["note"] if verdict["contradicts"] and verdict["note"] else None
 
 
@@ -325,8 +335,8 @@ async def _turn(deps: TutorDeps, state: TutorState, writer: Callable[[dict], Non
 
     policy = UrlPolicy(resolver=deps.url_resolver or system_resolver)
     seed = list(dict.fromkeys([*(state.get("allowed_urls") or []), *user_urls, *resource_urls]))
-    # One DNS lookup per URL (up to MAX_ALLOWED_URLS + the roadmap's), so they run side by side.
-    await asyncio.gather(*(asyncio.to_thread(policy.allow_sources, [url]) for url in seed))
+    # Hosts only, no DNS (up to MAX_ALLOWED_URLS + the roadmap's URLs every turn); `refusal` resolves at use time.
+    policy.allow_hosts(seed)
 
     trace = current_trace()
     ctx = CallContext(agent="teacher", policy=policy, trace=trace, lease=session_id)
@@ -380,7 +390,7 @@ async def _turn(deps: TutorDeps, state: TutorState, writer: Callable[[dict], Non
     web = seen.web_sources(result.text)
     allowed = {s["url"] for s in result.sources if s.get("url")} | {w["url"] for w in web} | set(user_urls)
     answer = sanitize_links(result.text, allowed)
-    notice = await _contradiction(result.sources, seen, web) if result.sources and web else None
+    notice = await _contradiction(result.sources, seen, web, budget, trace) if result.sources and web else None
     writer(reply_event(answer, roadmap_sources=result.sources, web_sources=web, notice=notice))
     return {"messages": [*history, {"role": "user", "content": turn}, {"role": "assistant", "content": answer}],
             "allowed_urls": _dedupe_newest([*(state.get("allowed_urls") or []), *seen.search,

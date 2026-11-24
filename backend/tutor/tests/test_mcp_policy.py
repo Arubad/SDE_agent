@@ -188,6 +188,24 @@ def test_default_resolver_is_real_dns():
     assert p.refusal("http://127.0.0.1/") is not None and p.refusal("http://169.254.169.254/") is not None
 
 
+def test_allow_hosts_records_hosts_without_dns():
+    calls = []
+
+    def counting(host):
+        calls.append(host)
+        return PRIVATE_HOSTS.get(host, ["93.184.216.34"])
+
+    p = UrlPolicy(resolver=counting)
+    p.allow_hosts([f"https://h{i % 7}.example/page{i}" for i in range(500)]
+                  + ["https://intranet.example/a", "ftp://files.example/", "https://u:p@creds.example/",
+                     "https://evil.example\\@good.example/"])
+    assert calls == []  # seeding resolves nothing
+    assert p.refusal("https://h3.example/other") is None  # same host as a seeded URL
+    assert p.refusal("https://intranet.example/b") == policy_mod.PRIVATE  # use time still checks the address
+    for url in ("https://files.example/", "https://creds.example/", "https://good.example/"):
+        assert p.refusal(url) == policy_mod.NOT_LISTED, url  # URLs that could never be opened allow nothing
+
+
 def test_dns_lookup_is_bounded(monkeypatch):
     assert DNS_TIMEOUT_S == 5.0
     monkeypatch.setattr(policy_mod, "DNS_TIMEOUT_S", 0.3)  # the same code path, without a 5 s test
