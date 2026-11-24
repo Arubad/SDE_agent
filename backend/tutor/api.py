@@ -34,8 +34,11 @@ from backend.tutor.mcp.registry import set_enabled
 from backend.tutor.repo import DuplicateRoadmap, create_roadmap, get_roadmap_by_slug, list_roadmaps
 from backend.tutor.roadmap.parse import normalize_spec
 from backend.tutor.settings import Settings
+from backend.tutor import tutor_api
 from backend.tutor.tutor import retention
 from backend.tutor.tutor.checkpoint import open_saver
+from backend.tutor.tutor.graph import TutorDeps, build_tutor_graph
+from backend.tutor.tutor.runtime import TutorRuntime
 from backend.tutor.telemetry import export_trace, setup_tracing
 
 log = logging.getLogger(__name__)
@@ -118,7 +121,8 @@ class _TracingMiddleware:
 
 
 def create_app(settings: Settings, *, engine: Engine | None = None, handlers: dict | None = None,
-               on_settled=None) -> FastAPI:
+               on_settled=None, tutor_groups: dict | None = None) -> FastAPI:
+    """`tutor_groups` overrides tutor graph groups by name (`build_tutor_graph`'s `groups`; tests plug in nodes)."""
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         settings.validate()
@@ -160,10 +164,19 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
                                                    tracer_provider=app.state.tracer_provider)
                 app.state.worker_pool.start()
                 stack.callback(app.state.worker_pool.stop)
+            app.state.tutor_runtime = None  # None: every tutor route answers 503
             if app.state.saver is not None:
-                # Startup and every RETENTION_EVERY_S: queue curation of ended sessions that missed it, then drop
-                # the raw threads past retention. Enqueueing needs only the engine; with no workers the jobs wait.
+                # Enqueueing (curation of ended sessions) needs only the engine; with no workers the jobs wait.
                 enqueue = JobContext(engine=app.state.engine).enqueue
+                # The graph is compiled once, here, on uvicorn's loop (D7). The agents' URL policy checks DNS
+                # with the crawler's resolver.
+                tutor_deps = TutorDeps(engine=app.state.engine, gateway=app.state.gateway, index=index,
+                                       embedder=embedder, settings=settings, saver=app.state.saver, enqueue=enqueue,
+                                       tracer_provider=app.state.tracer_provider,
+                                       url_resolver=app.state.net.fetcher.resolver)
+                app.state.tutor_runtime = TutorRuntime(tutor_deps, build_tutor_graph(tutor_deps, tutor_groups))
+                # Startup and every RETENTION_EVERY_S: queue curation of ended sessions that missed it, then drop
+                # the raw threads past retention.
                 task = asyncio.create_task(retention.run_forever(app.state.engine, app.state.saver, enqueue))
 
                 async def _stop_retention() -> None:
@@ -395,6 +408,9 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
                     raise
                 return _error(501, "Report not available yet")
             return build_report(session, r)
+
+    app.add_exception_handler(tutor_api.TutorUnavailable, tutor_api.unavailable_handler)
+    app.include_router(tutor_api.router)  # before the SPA catch-all
 
     dist = Path(settings.web_dist).resolve()
     index = dist / "index.html"

@@ -15,8 +15,9 @@
   when a thread with pending tasks gets new (non-Command) input, so no state surgery is needed; a test pins it.
 - `BudgetExceeded` and `LLMUnavailable` (after the nodes' own retries) end the turn with an `error` event. Either
   way, and always last, `done` carries the redacted trace summary; the session's `cost_usd` grows by the turn's
-  cost and the trace is exported. Other exceptions propagate (cost and export still happen). The checkpointer keeps
-  the state of the last completed super-step, so the next turn starts from there.
+  cost and the trace is exported. Other exceptions propagate (cost and export still happen, shielded, so also when
+  the consumer is cancelled, e.g. by a client disconnect). The checkpointer keeps the state of the last completed
+  super-step, so the next turn starts from there.
 """
 from __future__ import annotations
 
@@ -29,6 +30,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
 from typing import Any, get_args
 
+import anyio
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 from sqlalchemy import select, update
@@ -174,7 +176,10 @@ class TutorRuntime:
                 yield {"type": "done", "trace": redact_obj(trace.summary())}
             finally:
                 if not finished:  # an exception propagates, or the consumer left early
-                    await self._finish(session_id, trace)
+                    # Shielded: a consumer cancelled mid-turn (a client disconnect cancels the response's scope)
+                    # still records the cost and exports the trace.
+                    with anyio.CancelScope(shield=True):
+                        await self._finish(session_id, trace)
 
     async def _stream(self, graph_input: Any, cfg: dict) -> AsyncIterator[TurnEvent]:
         """Custom events as the nodes emit them, plus one `interrupt` event when the run pauses. A consumer that

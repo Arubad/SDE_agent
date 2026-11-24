@@ -110,6 +110,19 @@ def list_sessions(engine: Engine, slug: str) -> list[dict]:
                  "ended_at": _iso(r.ended_at), "summary": r.summary, "status": r.status} for r in rows]
 
 
+def get_session(engine: Engine, session_id: str) -> dict:
+    """One session's row with its roadmap's slug. Unknown (or not a UUID) -> `LookupError`."""
+    sid = parse_id(session_id)
+    with session_scope(engine) as s:
+        found = s.execute(select(TutorSession, Roadmap.slug).join(Roadmap, Roadmap.id == TutorSession.roadmap_id)
+                          .where(TutorSession.id == sid)).first()
+        if found is None:
+            raise LookupError(session_id)
+        r, slug = found
+        return {"id": str(r.id), "roadmap": slug, "mode": r.mode, "status": r.status,
+                "started_at": _iso(r.started_at), "ended_at": _iso(r.ended_at)}
+
+
 def ended_sessions(engine: Engine, roadmap: str, limit: int) -> list[TutorSession]:
     """The roadmap's ended sessions (by slug), newest `ended_at` first."""
     with session_scope(engine) as s:
