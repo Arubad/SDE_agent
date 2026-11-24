@@ -669,3 +669,187 @@ thead th {
   gap: 12px;
   align-items: center;
 }
+
+/* --- tutor chat --- */
+.tabs {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--line);
+}
+
+.tab {
+  background: transparent;
+  color: var(--muted);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 8px 12px;
+}
+
+.tab-active {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
+}
+
+.tutor h3,
+.sources h4 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.msg {
+  max-width: 100%;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+.msg-user {
+  align-self: flex-end;
+  background: var(--bg);
+  max-width: 90%;
+}
+
+.msg-assistant {
+  background: var(--surface);
+}
+
+.para {
+  margin: 0 0 8px;
+  white-space: pre-wrap;
+}
+
+.para:last-child {
+  margin-bottom: 0;
+}
+
+.notice {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.sources {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+
+.sources ol,
+.sources ul {
+  margin: 4px 0 8px;
+  padding-left: 22px;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.inline-field {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.composer-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.composer-row textarea,
+.composer-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.question,
+.modes {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+
+.question legend {
+  font-weight: 600;
+  padding: 0;
+  margin-bottom: 6px;
+}
+
+.payload {
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 8px;
+  background: var(--bg);
+  border-radius: 8px;
+  font: 0.8rem var(--font-mono);
+}
+
+.today-skill {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.timeline summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  cursor: pointer;
+}
+
+.lane {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  list-style: none;
+  margin: 4px 0;
+  padding: 0;
+}
+
+.sessions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.session-open {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+}
+
+.link-button {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+@media (max-width: 480px) {
+  .composer-row {
+    flex-direction: column;
+  }
+
+  .composer-row button {
+    width: 100%;
+  }
+}

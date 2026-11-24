@@ -19,6 +19,11 @@ import { statusText } from "./format";
 import { IngestProgress } from "./IngestProgress";
 import { IngestReport } from "./IngestReport";
 import { SpecReview } from "./SpecReview";
+import { SessionList } from "./tutor/SessionList";
+import { Tutor } from "./tutor/Tutor";
+
+type Tab = "overview" | "tutor" | "skills" | "sessions";
+const TUTOR_READY = ["ready", "ready_with_gaps"];
 
 function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : "Something went wrong.";
@@ -33,11 +38,16 @@ export function RoadmapDetail({
   slug,
   onBack,
   onUnauthorized,
+  onOpenRoadmap,
 }: {
   slug: string;
   onBack: () => void;
   onUnauthorized: (err: ApiError) => void;
+  onOpenRoadmap?: (slug: string) => void;
 }) {
+  const [tab, setTab] = useState<Tab>("overview");
+  // A session picked from the Sessions tab; null lets the Tutor tab open the active one.
+  const [openSession, setOpenSession] = useState<string | null>(null);
   const [detail, setDetail] = useState<Detail | null>(null);
   const [parsed, setParsed] = useState<ParseResult | null>(null);
   const [report, setReport] = useState<Report | null>(null);
@@ -202,6 +212,24 @@ export function RoadmapDetail({
     );
   }
 
+  const tutorReady = !!detail && TUTOR_READY.includes(detail.status);
+  const shown: Tab = tab === "tutor" && !tutorReady ? "overview" : tab;
+  const tabButton = (id: Tab, label: string, disabled = false, hint?: string) => (
+    <button
+      type="button"
+      role="tab"
+      id={`tab-${id}`}
+      aria-selected={shown === id}
+      aria-controls="tabpanel"
+      className={`tab${shown === id ? " tab-active" : ""}`}
+      disabled={disabled}
+      title={disabled ? hint : undefined}
+      onClick={() => setTab(id)}
+    >
+      {label}
+    </button>
+  );
+
   return (
     <div className="stack detail">
       <button type="button" className="back secondary" onClick={onBack}>
@@ -216,7 +244,35 @@ export function RoadmapDetail({
           {error}
         </p>
       )}
-      {body}
+      <div className="tabs" role="tablist" aria-label="Roadmap sections">
+        {tabButton("overview", "Overview")}
+        {tabButton("tutor", "Tutor", !tutorReady, "The tutor is available once the roadmap is ready.")}
+        {tabButton("skills", "Skill map", true, "Coming soon.")}
+        {tabButton("sessions", "Sessions")}
+      </div>
+      {!tutorReady && detail && <p className="muted small">The Tutor tab opens once the roadmap is ready.</p>}
+      <div id="tabpanel" role="tabpanel" aria-labelledby={`tab-${shown}`} className="stack">
+        {shown === "overview" && body}
+        {shown === "tutor" && (
+          <Tutor
+            slug={slug}
+            sessionId={openSession}
+            onNewSession={() => setOpenSession(null)}
+            onOpenRoadmap={onOpenRoadmap}
+            onUnauthorized={onUnauthorized}
+          />
+        )}
+        {shown === "sessions" && (
+          <SessionList
+            slug={slug}
+            onUnauthorized={onUnauthorized}
+            onOpen={(id) => {
+              setOpenSession(id);
+              setTab("tutor");
+            }}
+          />
+        )}
+      </div>
     </div>
   );
 }

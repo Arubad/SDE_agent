@@ -267,6 +267,7 @@ export function App() {
             key={selected}
             slug={selected}
             onUnauthorized={showPasscode}
+            onOpenRoadmap={select}
             onBack={() => {
               select(null);
               void load(); // statuses may have moved on
