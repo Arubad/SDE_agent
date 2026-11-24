@@ -110,12 +110,39 @@ def test_week_of_today_counts_only_days_from_today():
     assert [s["date"] for s in plan["sessions"][:3]] == ["2026-11-25", "2026-11-27", "2026-11-30"]
 
 
-def test_weekly_hours_fall_back_to_the_spec_then_five():
-    days = {**SETTINGS, "study_days": [0]}
-    two = build_plan(_spec([_skill(c) for c in "abc"], weekly_hours=0.75), [], days, MON)   # 1 per week
-    assert [s["date"] for s in two["sessions"]] == ["2026-11-23", "2026-11-30", "2026-12-07"]
-    five = build_plan(_spec([_skill(c) for c in "abc"]), [], {**days, "study_days": [0, 1, 2]}, MON)  # 6 per week
-    assert [s["date"] for s in five["sessions"]] == ["2026-11-23", "2026-11-24", "2026-11-25"]
+def _dates_of(plan):
+    return [s["date"] for s in plan["sessions"]]
+
+
+def test_weekly_hours_fall_back_to_the_spec():  # spec 0.75 h -> 1 session per week, whatever the study days
+    plan = build_plan(_spec([_skill(c) for c in "abcdef"], weekly_hours=0.75), [], SETTINGS, MON)
+    assert _dates_of(plan) == ["2026-11-23", "2026-11-30", "2026-12-07", "2026-12-14", "2026-12-21", "2026-12-28"]
+
+
+def test_weekly_hours_default_to_five_without_setting_or_spec():  # 5 h / 45 min -> 6 per week
+    plan = build_plan(_spec([_skill(c) for c in "abcdefg"]), [], SETTINGS, MON)
+    assert _dates_of(plan) == [f"2026-11-{d}" for d in (23, 24, 25, 26, 27, 28)] + ["2026-11-30"]
+
+
+def test_setting_beats_the_spec():
+    plan = build_plan(_spec([_skill(c) for c in "abc"], weekly_hours=0.75), [],
+                      {**SETTINGS, "weekly_hours": 1.5}, MON)  # 2 per week
+    assert _dates_of(plan) == ["2026-11-23", "2026-11-24", "2026-11-30"]
+
+
+def test_weekend_only_study_days():
+    plan = build_plan(_six(), [], {**SETTINGS, "study_days": [5, 6]}, MON)
+    assert _dates_of(plan)[:5] == ["2026-11-28", "2026-11-29", "2026-12-05", "2026-12-06", "2026-12-12"]
+
+
+def test_cap_of_one_with_several_study_days_is_one_per_iso_week():
+    plan = build_plan(_six(), [], {**SETTINGS, "weekly_hours": 0.75, "study_days": [1, 3, 5]}, MON)
+    assert _dates_of(plan)[:3] == ["2026-11-24", "2026-12-01", "2026-12-08"]
+
+
+def test_weekly_cap_across_the_year_boundary_uses_iso_weeks():  # 2026-12-31 and 2027-01-01 share ISO week 53
+    plan = build_plan(_six(), [], {**SETTINGS, "weekly_hours": 1.5}, date(2026, 12, 31))
+    assert _dates_of(plan)[:4] == ["2026-12-31", "2027-01-01", "2027-01-04", "2027-01-05"]
 
 
 def test_today_counts_only_when_a_study_day():
