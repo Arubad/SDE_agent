@@ -12,3 +12,5 @@ pypdf>=5.0
 yt-dlp>=2026.10.0
 pgvector>=0.3
 uv>=0.5
+langgraph==1.2.24
+langgraph-checkpoint-postgres==3.2.1

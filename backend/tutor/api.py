@@ -33,6 +33,7 @@ from backend.tutor.mcp.registry import set_enabled
 from backend.tutor.repo import DuplicateRoadmap, create_roadmap, get_roadmap_by_slug, list_roadmaps
 from backend.tutor.roadmap.parse import normalize_spec
 from backend.tutor.settings import Settings
+from backend.tutor.tutor.checkpoint import open_saver
 from backend.tutor.telemetry import export_trace, setup_tracing
 
 log = logging.getLogger(__name__)
@@ -127,6 +128,15 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
                 stack.callback(app.state.engine.dispose)
             else:
                 app.state.engine = engine
+            # The checkpointer needs a live database. If it is down the API still starts (and /api/health reports
+            # it); the tutor routes then have no saver and must answer 503.
+            app.state.saver = None
+            try:
+                url = settings.database_url if owns_engine else app.state.engine.url.render_as_string(
+                    hide_password=False)
+                app.state.saver = await stack.enter_async_context(open_saver(url))
+            except Exception as exc:
+                log.warning("checkpointer unavailable: %s", type(exc).__name__)
             app.state.tracer_provider = setup_tracing(settings.otel_endpoint)
             if app.state.tracer_provider is not None:
                 stack.callback(app.state.tracer_provider.shutdown)

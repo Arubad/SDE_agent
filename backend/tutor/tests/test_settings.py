@@ -114,3 +114,27 @@ def test_browser_render_parse():
     assert load_settings({"BROWSER_RENDER": "off"}).browser_render is False
     with pytest.raises(SettingsError, match="BROWSER_RENDER"):
         load_settings({"BROWSER_RENDER": "maybe"})
+
+
+def test_tutor_defaults():
+    s = load_settings({})
+    assert (s.tutor_max_steps, s.tutor_max_tokens, s.tutor_max_usd) == (6, 60_000, 0.02)
+    assert (s.working_memory_tokens, s.ingest_summaries, s.ingest_summary_budget_usd) == (12_000, True, 0.50)
+
+
+def test_tutor_overrides():
+    s = load_settings({"TUTOR_MAX_STEPS": "3", "TUTOR_MAX_TOKENS": "1000", "TUTOR_MAX_USD": "0.005",
+                       "WORKING_MEMORY_TOKENS": "500", "INGEST_SUMMARIES": "off",
+                       "INGEST_SUMMARY_BUDGET_USD": "1.25"})
+    assert (s.tutor_max_steps, s.tutor_max_tokens, s.tutor_max_usd) == (3, 1000, 0.005)
+    assert (s.working_memory_tokens, s.ingest_summaries, s.ingest_summary_budget_usd) == (500, False, 1.25)
+
+
+@pytest.mark.parametrize("env", [
+    {"TUTOR_MAX_STEPS": "0"}, {"TUTOR_MAX_TOKENS": "x"}, {"TUTOR_MAX_USD": "-1"}, {"TUTOR_MAX_USD": "nan"},
+    {"TUTOR_MAX_USD": "abc"}, {"WORKING_MEMORY_TOKENS": "0"}, {"INGEST_SUMMARIES": "maybe"},
+    {"INGEST_SUMMARY_BUDGET_USD": "inf"},
+])
+def test_tutor_settings_rejected(env):
+    with pytest.raises(SettingsError):
+        load_settings(env)
