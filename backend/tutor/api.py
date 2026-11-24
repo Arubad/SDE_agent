@@ -3,6 +3,7 @@ the MCP gateway and the SPA."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from dataclasses import asdict
@@ -33,6 +34,7 @@ from backend.tutor.mcp.registry import set_enabled
 from backend.tutor.repo import DuplicateRoadmap, create_roadmap, get_roadmap_by_slug, list_roadmaps
 from backend.tutor.roadmap.parse import normalize_spec
 from backend.tutor.settings import Settings
+from backend.tutor.tutor import retention
 from backend.tutor.tutor.checkpoint import open_saver
 from backend.tutor.telemetry import export_trace, setup_tracing
 
@@ -153,11 +155,23 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
             app.state.worker_pool = None
             if handlers and settings.ingest_workers > 0:
                 ctx = JobContext(engine=app.state.engine, net=app.state.net, settings=settings, index=index,
-                                 gateway=app.state.gateway)
+                                 gateway=app.state.gateway, embedder=embedder)
                 app.state.worker_pool = WorkerPool(ctx, handlers, settings.ingest_workers, on_settled=on_settled,
                                                    tracer_provider=app.state.tracer_provider)
                 app.state.worker_pool.start()
                 stack.callback(app.state.worker_pool.stop)
+            if app.state.saver is not None:
+                # Startup and every RETENTION_EVERY_S: queue curation of ended sessions that missed it, then drop
+                # the raw threads past retention. Enqueueing needs only the engine; with no workers the jobs wait.
+                enqueue = JobContext(engine=app.state.engine).enqueue
+                task = asyncio.create_task(retention.run_forever(app.state.engine, app.state.saver, enqueue))
+
+                async def _stop_retention() -> None:
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+
+                stack.push_async_callback(_stop_retention)
             await stack.enter_async_context(serve_mcp(http_servers))
             yield
 

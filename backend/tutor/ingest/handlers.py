@@ -38,6 +38,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from backend.tutor.db import session_scope
+from backend.tutor.tutor.curator import curate_session
 from backend.tutor.ingest.discover import _repo as parse_repo
 from backend.tutor.ingest.discover import discover, parse_youtube
 from backend.tutor.ingest.embed import HashEmbedder
@@ -608,7 +609,7 @@ def agent_recover(ctx, job: Job) -> dict:
 HANDLERS: dict[str, worker.Handler] = {
     "ingest_resource": ingest_resource, "fetch_page": fetch_page, "expand_playlist": expand_playlist,
     "video": video, "pdf": pdf, "github_repo": github_repo, "chunk_embed": chunk_embed, "recheck": recheck,
-    "summarize_document": summarize_document,
+    "summarize_document": summarize_document, "curate_session": curate_session,
     "agent_plan": agent_plan, "agent_recover": agent_recover,
 }
 
