@@ -40,6 +40,7 @@ class FakeReply:
     tool_uses: list[tuple[str, dict]] = field(default_factory=list)
     stop_reason: str | None = None  # None: "tool_use" if there are tool uses, else "end_turn"
     usage: dict | None = None  # merged over the default usage (any `anthropic.types.Usage` field)
+    citations: list[int] = field(default_factory=list)  # search_result indexes the text block cites
 
 
 requests: list[dict] = []  # a snapshot of every call's keyword arguments, in order
@@ -144,7 +145,9 @@ def _reply(kwargs: dict) -> Message:
         text = _default_text(kwargs)
     content: list[dict] = []
     if text is not None:
-        content.append({"type": "text", "text": text, "citations": None})
+        cites = [{"type": "search_result_location", "search_result_index": i, "source": "", "title": None,
+                  "cited_text": "", "start_block_index": 0, "end_block_index": 1} for i in reply.citations]
+        content.append({"type": "text", "text": text, "citations": cites or None})
     for name, args in reply.tool_uses:
         content.append({"type": "tool_use", "id": f"toolu_fake_{next(_ids)}", "name": name, "input": args})
     stop = reply.stop_reason or ("tool_use" if reply.tool_uses else "end_turn")

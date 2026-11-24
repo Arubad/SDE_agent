@@ -40,7 +40,7 @@ class TutorState(TypedDict, total=False):
 
 # A turn streams plain dicts, in the order they happen; the last one is always `done`:
 #   {"type": "node", "name": str}                       a node started
-#   {"type": "reply_delta", "text": str}                streamed answer text
+#   {"type": "reply_delta", "delta": str, "reset": bool} streamed answer text; `reset`: drop what came so far
 #   {"type": "reply", "text": str, "sources": {"roadmap": [...], "web": [...]}, "notice": str | None}
 #   {"type": "interrupt", "value": <interrupt value>}   the run paused; resume with {"resume": ...}
 #   {"type": "error", "message": str}                   a budget or an outage ended the turn

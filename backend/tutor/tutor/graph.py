@@ -58,6 +58,7 @@ class TutorDeps:
     saver: Any
     enqueue: Callable[..., Any] | None = None  # `JobContext.enqueue`-shaped, or None
     tracer_provider: Any = None  # None: traces are not exported
+    url_resolver: Any = None  # the agents' URL-policy DNS (`fetch.Resolver`); None: real DNS
 
 
 @dataclass(frozen=True)
@@ -154,10 +155,16 @@ def add_planner(builder: StateGraph, deps: TutorDeps) -> Group:
     return add(builder, deps)
 
 
+def add_teacher(builder: StateGraph, deps: TutorDeps) -> Group:
+    from backend.tutor.tutor.teacher import add_teacher as add  # teacher imports this module
+
+    return add(builder, deps)
+
+
 GROUPS: dict[str, Adder] = {
     "session_start": add_session_start,
     "planner": add_planner,
-    "teacher": _placeholder("teacher"),
+    "teacher": add_teacher,
     "assessor": _placeholder("assessor"),
     "researcher": _placeholder("researcher"),
     "exercise_stub": add_exercise_stub,

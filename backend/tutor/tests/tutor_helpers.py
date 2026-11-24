@@ -4,6 +4,7 @@ Import the fixtures into a test module (`from backend.tutor.tests.tutor_helpers 
 """
 from __future__ import annotations
 
+import copy
 import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
@@ -15,11 +16,13 @@ from sqlalchemy import text
 
 from backend.tutor.db import session_scope
 from backend.tutor.ingest.embed import HashEmbedder
+from backend.tutor.mcp.policy import search_result_urls
 from backend.tutor.models import TutorSession
 from backend.tutor.repo import create_roadmap
 from backend.tutor.settings import Settings
 from backend.tutor.tutor.graph import TutorDeps, build_tutor_graph
 from backend.tutor.tutor.runtime import TutorRuntime
+from backend.tutor.untrusted import unwrap
 
 
 def _skill(sid, prereqs=()):
@@ -35,13 +38,16 @@ SPEC = {"title": "Caching", "goals": ["learn caching"], "weekly_hours": 3, "stag
 
 @dataclass
 class FakeGateway:
-    """`tool_defs`, `call` and `release`, recording every call. `results` maps a tool name to its result (a dict,
-    or a callable of the args)."""
+    """`tool_defs`, `call` and `release`, recording every call and every released lease. `results` maps a tool name
+    (as called: wire or canonical) to its result (a dict, or a callable of the args); a copy is returned. Like the
+    real gateway, a `url_sources` result's `results[*].url` (fence stripped) become allowed sources of the call's
+    policy."""
 
     defs: dict[str, list[dict]] = field(default_factory=dict)  # agent -> tool definitions
     results: dict[str, Any] = field(default_factory=dict)
     calls: list[tuple[str, dict, Any]] = field(default_factory=list)  # (name, args, ctx)
     released: list[str] = field(default_factory=list)
+    url_sources: tuple[str, ...] = ("web.search", "web__search")
 
     async def tool_defs(self, agent: str) -> list[dict]:
         return list(self.defs.get(agent, []))
@@ -49,7 +55,11 @@ class FakeGateway:
     async def call(self, name: str, args: dict, ctx) -> dict:
         self.calls.append((name, args, ctx))
         result = self.results.get(name, {"error": f"unknown tool {name}"})
-        return result(args) if callable(result) else result
+        out = copy.deepcopy(result(args) if callable(result) else result)
+        policy = getattr(ctx, "policy", None)
+        if policy is not None and name in self.url_sources and "data" in out:
+            policy.allow_sources([unwrap(u) for u in search_result_urls(out["data"])])
+        return out
 
     async def release(self, lease: str) -> None:
         self.released.append(lease)

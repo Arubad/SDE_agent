@@ -26,7 +26,7 @@ from backend.tutor.tutor import budget, coordinator, runtime as runtime_mod
 from backend.tutor.tutor.budget import OUTAGE_MESSAGE, BudgetExceeded
 from backend.tutor.tutor.checkpoint import delete_thread, open_saver
 from backend.tutor.tutor.coordinator import COORDINATOR_SCHEMA
-from backend.tutor.tutor.graph import EXERCISE_TEXT, PLACEHOLDER_TEXT, emit, build_tutor_graph, single
+from backend.tutor.tutor.graph import EXERCISE_TEXT, PLACEHOLDER_TEXT, _placeholder, emit, build_tutor_graph, single
 from backend.tutor.tutor.runtime import RESUME_SHAPES, BadResume, Busy, SessionEnded
 from backend.tutor.tutor.state import Action, Route, reply_event
 
@@ -43,9 +43,13 @@ def instant_retries(monkeypatch):
     monkeypatch.setattr(budget, "RETRY_DELAYS", (0.0, 0.0))
 
 
+# Routing tests: a teacher that replies PLACEHOLDER_TEXT with no model call (the real one: test_tutor_teacher.py).
+STUB_TEACHER = {"teacher": _placeholder("teacher")}
+
+
 @pytest.fixture
 def rt(engine, clear_memo):  # noqa: F811
-    return make_runtime(engine)
+    return make_runtime(engine, STUB_TEACHER)
 
 
 @pytest.fixture
