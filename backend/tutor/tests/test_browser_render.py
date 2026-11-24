@@ -15,8 +15,9 @@ from backend.tutor.db import session_scope
 from backend.tutor.ingest import video
 from backend.tutor.ingest.fetch import public_resolver
 from backend.tutor.jobs import queue
-from backend.tutor.mcp.browser import EVALUATE_FUNCTION, RenderResult, render_page
-from backend.tutor.mcp.gateway import Gateway
+from backend.tutor.ingest.handlers import HANDLERS
+from backend.tutor.mcp.browser import BUSY, EVALUATE_FUNCTION, RenderResult, is_busy, render_page
+from backend.tutor.mcp.gateway import BROWSER_BUSY, CallContext, Gateway
 from backend.tutor.mcp.registry import Registry, ServerSpec, load_registry
 from backend.tutor.models import Job, Section
 from backend.tutor.tests.test_ingestion_flow import (SPA, _ctx, _docs, _drain, _page, _prose, _report, _resources,
@@ -71,9 +72,9 @@ def _playwright(pages: dict, calls: list) -> FastMCP:
 
 
 @contextlib.contextmanager
-def _gateway(server: FastMCP, *, enabled: bool = True):
+def _gateway(server: FastMCP, *, enabled: bool = True, timeout_s: float = 10):
     spec = ServerSpec(name="playwright", namespace="browser", transport="inproc", target="playwright",
-                      strip_prefix="browser_", timeout_s=10, enabled_default=enabled)
+                      strip_prefix="browser_", timeout_s=timeout_s, enabled_default=enabled)
     agents = load_registry(COMMITTED, {}).agents  # the committed crawler allow-list
     gw = Gateway(Registry(servers=(spec,), agents=agents), engine=None, inproc={"playwright": server}, env={})
     gw.start()
@@ -292,6 +293,53 @@ def test_concurrent_renders_take_turns_under_the_lease():
     assert {first, second} == {ROOT, other}
     assert calls == [("navigate", first), ("evaluate", EVALUATE_FUNCTION), ("close",), ("navigate", "about:blank"),
                      ("navigate", second), ("evaluate", EVALUATE_FUNCTION), ("close",)]
+
+
+def _fetch_page_job(engine, rid) -> Job:
+    with Session(engine) as s:
+        return s.scalars(select(Job).where(Job.roadmap_id == rid, Job.type == "fetch_page")).one()
+
+
+def test_busy_browser_is_retried_not_skipped(engine, tmp_path, clock):
+    """Another session holds the browser during the first attempt: the render is busy, the job backs off and
+    retries (no document yet), and the retry renders the page."""
+    calls = []
+    with _gateway(_playwright({ROOT: (ROOT, RENDERED)}, calls), timeout_s=0.3) as gw:
+        gw.call_sync("browser.navigate", {"url": ROOT}, CallContext(agent="crawler", lease="tutor"))
+        attempts = []
+
+        def fetch_page(c, job):
+            attempts.append(job.attempts)
+            try:
+                return HANDLERS["fetch_page"](c, job)
+            finally:
+                gw.release_sync("tutor")  # the tutor's turn ends after the first attempt
+
+        ctx = _ctx(engine, _site_with_spa(tmp_path), crawl_max_depth=0)
+        ctx.gateway = gw
+        rid = _roadmap(engine, "busy", [("docs", "doc", ROOT)])
+        _drain(ctx, rid, clock, {**HANDLERS, "fetch_page": fetch_page})
+    assert attempts == [1, 2]
+    job = _fetch_page_job(engine, rid)
+    assert (job.status, job.attempts) == ("done", 2)
+    doc = _root_doc(engine, rid)
+    assert (doc.status, doc.meta["rendered"]) == ("ok", "browser")
+
+
+def test_busy_browser_on_the_last_attempt_is_a_skip(engine, tmp_path, clock):
+    calls = []
+    with _gateway(_playwright({ROOT: (ROOT, RENDERED)}, calls), timeout_s=0.2) as gw:
+        gw.call_sync("browser.navigate", {"url": ROOT}, CallContext(agent="crawler", lease="tutor"))
+        ctx = _ctx(engine, _site_with_spa(tmp_path), crawl_max_depth=0)
+        ctx.gateway = gw
+        rid = _roadmap(engine, "always-busy", [("docs", "doc", ROOT)])
+        _drain(ctx, rid, clock)
+    assert calls == [("navigate", ROOT)]  # only the tutor's call ever reached the browser
+    job = _fetch_page_job(engine, rid)
+    assert (job.status, job.attempts) == ("done", job.max_attempts)
+    doc = _root_doc(engine, rid)
+    assert (doc.status, doc.reason, doc.meta["detail"]) == ("skipped", "needs_browser", BUSY)
+    assert is_busy(doc.meta["detail"]) and BUSY == f"browser unavailable: {BROWSER_BUSY}"
 
 
 def test_cli_ingest_runs_a_gateway(engine, db_url, tmp_path, monkeypatch, capsys):

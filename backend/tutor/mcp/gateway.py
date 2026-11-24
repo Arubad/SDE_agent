@@ -43,13 +43,14 @@
   package on first run; `timeout_s` otherwise), then the call gets `spec.timeout_for(tool)`: the server's
   `tool_timeouts` entry for that tool (keyed by the server's own tool name) or its `timeout_s`. Every timeout or
   transport error comes back as `{"error": ...}`; nothing here raises into the agent loop.
-- The browser lease: the server whose namespace is `browser` has one page, so one lease holds it at a time. A
-  browser call runs under `CallContext.lease` (`anon:<agent>` when None; the tutor passes its session id, each
-  crawler render a fresh `crawler:<hex>`). After the gate, a call from another lease waits until the lease is
-  released (`release` / `release_sync`; a no-op for a lease that is not the owner), or until it has been idle (no
-  call in flight) for LEASE_IDLE_S, at most the call's own timeout; then it is refused with BROWSER_BUSY, without
-  contacting the server. A lease that takes over from a previous owner first gets the internal `about:blank`
-  navigation below (releasing does not navigate). Other servers ignore leases.
+- The browser lease: the server whose namespace is `browser` has one page, so one lease holds it at a time, and
+  its calls run one at a time even within a lease (a turn's tool calls are gathered in parallel). A browser call
+  runs under `CallContext.lease` (`anon:<agent>` when None; the tutor passes its session id, each crawler render a
+  fresh `crawler:<hex>`). After the gate, a call waits until no browser call is in flight and the lease is its
+  own, free (`release` / `release_sync`; a no-op for a lease that is not the owner), or idle for LEASE_IDLE_S; at
+  most the call's own timeout, then it is refused with BROWSER_BUSY, without contacting the server. A lease that
+  takes over from a previous owner first gets the internal `about:blank` navigation below, once, on its first call
+  that connects (releasing does not navigate). Other servers ignore leases.
 - Traces: with `CallContext.trace`, every call records one `mcp:<canonical>` span (`tool`, redacted `args`, `ok`,
   `latency_ms`). A call that never ran (the gate, a blocked server, an unknown name, a raw request from another
   agent, a busy browser) records it too, with `ok=False, refused=True, reason=<its error, redacted, [:200]>`; the
@@ -197,7 +198,7 @@ class Gateway:
         self._enabled_lock: asyncio.Lock | None = None  # made per loop in start()
         self._lease = {"owner": None, "last": 0.0, "reset": False}  # the browser's holder, when it last used it,
         # and whether its next connected call resets the page first (it took over from a previous owner)
-        self._lease_busy = 0  # browser calls in flight (the lease is never taken over under one)
+        self._lease_busy = False  # a browser call is in flight (they run one at a time)
         self._lease_dirty = False  # some owner has held the browser: the next new owner's page is reset
         self._lease_cond: asyncio.Condition | None = None  # made per loop in start()
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -210,7 +211,7 @@ class Gateway:
         self._loop = asyncio.new_event_loop()
         self._enabled_lock = asyncio.Lock()
         self._lease_cond = asyncio.Condition()
-        self._lease["owner"], self._lease_busy = None, 0
+        self._lease["owner"], self._lease_busy = None, False
         self._thread = threading.Thread(target=self._run, name="mcp-gateway", daemon=True)
         self._thread.start()
 
@@ -543,20 +544,19 @@ class Gateway:
 
     # ---- the browser lease -------------------------------------------------------------------------------------
     async def _acquire(self, lease: str, timeout: float) -> bool:
-        """Hold the browser for one call (True), or False if another lease kept it for `timeout` seconds. Taking
-        over from a previous owner marks the page for a reset."""
+        """Hold the browser, alone, for one call (True), or False if it stayed busy or another lease's for
+        `timeout` seconds. Taking over from a previous owner marks the page for a reset."""
         deadline = time.monotonic() + timeout
         async with self._lease_cond:
             while True:
                 now, owner = time.monotonic(), self._lease["owner"]
-                if owner == lease:
-                    self._lease_busy += 1
-                    return True
                 idle = LEASE_IDLE_S - (now - self._lease["last"])
-                if self._lease_busy == 0 and (owner is None or idle <= 0):
+                if not self._lease_busy and owner == lease:
+                    self._lease_busy = True
+                    return True
+                if not self._lease_busy and (owner is None or idle <= 0):
                     self._lease.update(owner=lease, last=now, reset=self._lease_dirty)
-                    self._lease_dirty = True
-                    self._lease_busy += 1
+                    self._lease_dirty = self._lease_busy = True
                     return True
                 left = deadline - now
                 if left <= 0:
@@ -565,7 +565,7 @@ class Gateway:
                     await asyncio.wait_for(self._lease_cond.wait(), left if self._lease_busy else min(left, idle))
 
     async def _done(self, lease: str) -> None:
-        self._lease_busy -= 1
+        self._lease_busy = False
         if self._lease["owner"] == lease:
             self._lease["last"] = time.monotonic()
         async with self._lease_cond:

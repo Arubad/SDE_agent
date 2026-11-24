@@ -2,9 +2,10 @@
 
 Every fetched URL ends as a `Document` row whose `status`/`reason` say what happened (`ok`; `skipped` with the
 fetch outcome such as `not_found` or `robots_denied`; `failed` with `error`), so failures are states, not
-exceptions. Handlers raise only `RetryableError` (a transient fetch error before the last attempt) and
-`PermanentError` (the last attempt still failed); anything unexpected is retried by the worker and, once dead,
-reported by `report.finalize_roadmap` from the dead job.
+exceptions. Handlers raise only `RetryableError` (a transient fetch error, or a browser render refused because
+another session held the browser, before the last attempt) and `PermanentError` (the last attempt still failed);
+anything unexpected is retried by the worker and, once dead, reported by `report.finalize_roadmap` from the dead
+job.
 
 Job keys: a resource's own URL is keyed by the resource (`owner=True`: its Document belongs to it even when
 another resource reached the same URL first); everything discovered is keyed roadmap-wide, so a page, video,
@@ -45,7 +46,7 @@ from backend.tutor.ingest.segment import choose_segments
 from backend.tutor.ingest.video import TranscriptRouter, video_document
 from backend.tutor.jobs import queue, worker
 from backend.tutor.jobs.queue import PermanentError, RetryableError
-from backend.tutor.mcp.browser import RenderResult, render_page
+from backend.tutor.mcp.browser import RenderResult, is_busy, render_page
 from backend.tutor.models import Document, Job, Resource, Roadmap
 
 log = logging.getLogger(__name__)
@@ -221,6 +222,8 @@ def fetch_page(ctx, job: Job) -> dict:
     fr = ctx.net.fetcher.get(url)
     if fr.outcome == "needs_browser":
         rendered = _render(ctx, res, fr.url, own=owner and depth == 0)
+        if is_busy(rendered) and job.attempts < job.max_attempts:
+            raise RetryableError(rendered)  # the browser was in use, not broken: back off and render later
         if isinstance(rendered, RenderResult):
             page = extract_page(rendered.html, rendered.final_url)
             if _has_text(page):

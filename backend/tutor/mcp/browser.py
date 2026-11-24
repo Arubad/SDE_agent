@@ -13,8 +13,10 @@ steps:
 
 The result is a `RenderResult`, or a short reason string; nothing here raises for a render that failed.
 The browser has one tab and evaluate reads whatever page it shows, so the lease keeps every other session (another
-render, a tutor turn) out of it for the whole render: one that finds it held waits up to its call's timeout, then
-gets the gateway's `browser busy` (reported here as `browser unavailable: ...`)."""
+render, a tutor turn) out of it for the whole render. A render that finds it held waits up to the browser call's
+timeout, then gets the gateway's BROWSER_BUSY, reported as `BUSY` (`is_busy`): the crawler retries that one later
+instead of skipping the page. Each navigate/evaluate is given `2 * timeout_s + 5` s from here (the lease wait,
+then the call), so a busy browser reads as `BUSY`, not as a timeout."""
 from __future__ import annotations
 
 import json
@@ -26,7 +28,7 @@ from uuid import uuid4
 
 from backend.core.redact import redact
 from backend.tutor.ingest.fetch import Resolver, system_resolver
-from backend.tutor.mcp.gateway import RAW_AGENT, CallContext
+from backend.tutor.mcp.gateway import BROWSER_BUSY, RAW_AGENT, CallContext
 from backend.tutor.mcp.policy import UrlPolicy, page_urls
 from backend.tutor.mcp.results import RAW_CAP, _leaves
 
@@ -60,6 +62,14 @@ def _text(out: dict) -> str:
 
 def _unavailable(error: str) -> str:
     return f"browser unavailable: {redact(' '.join(str(error).split()))[:REASON_CHARS]}"
+
+
+BUSY = _unavailable(BROWSER_BUSY)  # another session held the browser for the whole wait: worth retrying
+
+
+def is_busy(reason: object) -> bool:
+    """Whether a `render_page` reason is `BUSY` (the browser was in use, not broken)."""
+    return reason == BUSY
 
 
 def _host(url: str) -> str:
@@ -104,6 +114,7 @@ def render_page(gateway: Gateway, url: str, *, scope_host: str, timeout_s: float
 
 
 def _render(gateway: Gateway, url: str, ctx: CallContext, scope_host: str, timeout_s: float) -> RenderResult | str:
+    timeout_s = 2 * timeout_s + 5  # the gateway's lease wait, then the call itself
     nav = gateway.call_sync("browser.navigate", {"url": url}, ctx, timeout=timeout_s)
     if "error" in nav:
         return LEFT_SITE if str(nav["error"]).startswith(_LEFT_PREFIX) else _unavailable(nav["error"])

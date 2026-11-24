@@ -786,21 +786,34 @@ async def test_reset_during_an_in_flight_refresh_is_not_lost(monkeypatch):
 
 
 # ---- the browser lease -------------------------------------------------------------------------------------------
-def _leased_browser(navigations):
-    """Playwright-shaped: `navigate` records its URL, `snapshot` records None; both report the page shown."""
+def _leased_browser(navigations, load):
+    """Playwright-shaped: `navigate` records its URL, `snapshot` records None; both report the page shown and
+    take a moment, counting how many run at once (`load["max"]`)."""
     b = FastMCP("browser")
     page = {"url": "about:blank"}
 
-    @b.tool
-    def browser_navigate(url: str) -> str:
-        navigations.append(url)
-        page["url"] = url
-        return f"### Page state\n- Page URL: {url}"
+    @contextlib.asynccontextmanager
+    async def busy():
+        load["now"] += 1
+        load["max"] = max(load["max"], load["now"])
+        try:
+            await asyncio.sleep(0.05)
+            yield
+        finally:
+            load["now"] -= 1
 
     @b.tool
-    def browser_snapshot() -> str:
-        navigations.append(None)
-        return f"### Page state\n- Page URL: {page['url']}"
+    async def browser_navigate(url: str) -> str:
+        async with busy():
+            navigations.append(url)
+            page["url"] = url
+            return f"### Page state\n- Page URL: {url}"
+
+    @b.tool
+    async def browser_snapshot() -> str:
+        async with busy():
+            navigations.append(None)
+            return f"### Page state\n- Page URL: {page['url']}"
 
     return b
 
@@ -817,11 +830,11 @@ def _kb():
 
 @pytest.fixture
 def gw_browser():
-    navigations = []
+    navigations, load = [], {"now": 0, "max": 0}
     specs = [_spec("playwright", "browser", strip_prefix="browser_", timeout_s=1), _spec("kb")]
-    with _gateway(specs, {"playwright": _leased_browser(navigations), "kb": _kb()},
+    with _gateway(specs, {"playwright": _leased_browser(navigations, load), "kb": _kb()},
                   agents={"t": ("*",), "u": ("*",)}) as gw:
-        gw.fake = type("Fake", (), {"navigations": navigations})()
+        gw.fake = type("Fake", (), {"navigations": navigations, "load": load})()
         yield gw
 
 
@@ -868,6 +881,22 @@ async def test_release_hands_over_and_resets_page(gw_browser):
     await gw_browser.release("A")  # not the owner any more: a no-op
     await gw_browser.call("browser.snapshot", {}, b)
     assert gw_browser.fake.navigations[-2:] == [None, None]
+
+
+async def test_calls_under_one_lease_run_one_at_a_time(gw_browser):
+    """A turn's tool calls run in parallel (run_tool_loop gathers them); the shared page sees one at a time, and
+    a pending reset runs once, before the first of them."""
+    a, b = ctx_with_policy(lease="A"), ctx_with_policy(lease="B")
+    await gw_browser.call("browser.navigate", {"url": "https://ok.example/"}, a)
+    await gw_browser.release("A")
+    outs = await asyncio.gather(gw_browser.call("browser.navigate", {"url": "https://ok.example/b"}, b),
+                                gw_browser.call("browser.snapshot", {}, b),
+                                gw_browser.call("browser.snapshot", {}, b))
+    assert all("data" in o for o in outs)
+    assert gw_browser.fake.load["max"] == 1
+    navs = gw_browser.fake.navigations
+    assert navs[:2] == ["https://ok.example/", "about:blank"] and navs.count("about:blank") == 1
+    assert sorted(navs[2:], key=str) == [None, None, "https://ok.example/b"]
 
 
 async def test_waiting_lease_gets_it_on_release(gw_browser):
