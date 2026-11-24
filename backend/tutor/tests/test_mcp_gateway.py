@@ -752,3 +752,33 @@ async def test_refused_call_is_traced():
         assert "data" in await gw.call("web.search", {"query": "q"}, CallContext(agent="teacher", trace=trace))
         assert "refused" not in trace.spans[-1].attrs and trace.spans[-1].attrs["ok"] is True
         await gw.call("web.search", {}, CallContext(agent="nobody"))  # no trace: nothing to record
+
+
+async def test_reset_during_an_in_flight_refresh_is_not_lost(monkeypatch):
+    """A refresh that read the old state before the switch changed must not stamp the cache fresh after reset."""
+    enabled, entered, release = {"web": True}, threading.Event(), threading.Event()
+    block = {"next": False}
+
+    def fake(engine, spec):
+        value = enabled[spec.name]  # read before the switch changes (the stale value)
+        if block["next"]:
+            block["next"] = False
+            entered.set()
+            release.wait(5)
+        return value
+
+    monkeypatch.setattr(gateway_mod, "effective_enabled", fake)
+    monkeypatch.setattr(gateway_mod, "ENABLED_TTL_S", 0.0)  # every call refreshes
+    with _gateway([_spec("web")], {"web": _web()}) as gw:
+        assert "data" in await gw.call("web.search", {"query": "q"}, CallContext(agent="all"))
+        block["next"] = True
+        in_flight = asyncio.ensure_future(gw.call("web.search", {"query": "q"}, CallContext(agent="all")))
+        assert await asyncio.to_thread(entered.wait, 5)  # its refresh holds the old value
+        monkeypatch.setattr(gateway_mod, "ENABLED_TTL_S", 60.0)  # from here on only an invalidation re-reads
+        enabled["web"] = False  # the Settings switch: set_enabled, then reset, then check
+        await gw.reset("web")
+        release.set()
+        await in_flight
+        assert (await gw.check("web")).state == "disabled"
+        out = await gw.call("web.search", {"query": "q"}, CallContext(agent="all"))
+        assert out == {"error": "web.search: server web is disabled"}

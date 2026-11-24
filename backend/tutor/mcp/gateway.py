@@ -6,8 +6,8 @@
   connection (one slow tool of our own is not a dead link).
 - Nothing blocking runs on the loop. The servers' on/off state (a database read, `registry.effective_enabled`)
   is cached: re-read in a worker thread at most every ENABLED_TTL_S, at the start of a call, `tool_defs`, `health`
-  and `check`; `reset(name)` (after the Settings switch) forces the next read. Before the first read, and if a
-  read fails, the last known state (at first the registry default) holds.
+  and `check`; `reset(name)` (after the Settings switch) forces the next read and discards a read already in
+  flight. Before the first read, and if a read fails, the last known state (at first the registry default) holds.
 - `tool_defs` waits at most TOOL_DEFS_WAIT_S for servers to connect and lists the ones that did; a slower connect
   keeps running in the background under its own connect budget (one per server) and is listed next time.
 - Names: a tool is `<namespace>.<tool>` (canonical, after `strip_prefix`) in the registry, traces and the UI, and
@@ -183,6 +183,7 @@ class Gateway:
         self._connecting: dict[str, asyncio.Task] = {}  # server -> a connect tool_defs stopped waiting for
         self._enabled: dict[str, bool] = {}  # server -> on/off, refreshed off the loop (_refresh_enabled)
         self._enabled_at: float | None = None
+        self._enabled_gen = 0  # bumped by reset: a read that started before it is stale
         self._enabled_lock: asyncio.Lock | None = None  # made per loop in start()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -278,12 +279,21 @@ class Gateway:
 
     async def _refresh_enabled(self) -> None:
         """Re-read every server's on/off state in a worker thread, at most every ENABLED_TTL_S (`reset` forces
-        the next one). A failed read keeps the last known state and is retried after the TTL."""
+        the next one). A failed read keeps the last known state and is retried after the TTL. A read that a
+        `reset` overtook (it may hold the state from before the switch) is discarded and done again."""
         async with self._enabled_lock:
             if self._enabled_at is not None and time.monotonic() - self._enabled_at < ENABLED_TTL_S:
                 return
-            with suppress(Exception):
-                self._enabled = await asyncio.to_thread(self._read_enabled)
+            while True:
+                gen = self._enabled_gen
+                try:
+                    read = await asyncio.to_thread(self._read_enabled)
+                except Exception:
+                    read = None
+                if gen == self._enabled_gen:
+                    break
+            if read is not None:
+                self._enabled = read
             self._enabled_at = time.monotonic()
 
     def _read_enabled(self) -> dict[str, bool]:
@@ -357,7 +367,8 @@ class Gateway:
             task.add_done_callback(self._closing.discard)
 
     async def _reset(self, name: str) -> None:
-        self._enabled_at = None  # the switch may just have changed: read it again on next use
+        self._enabled_gen += 1  # the switch may just have changed: read it again on next use, and drop a
+        self._enabled_at = None  # read already in flight (it may have seen the old state)
         conn = self._conns.get(name)
         if conn is None:
             return
