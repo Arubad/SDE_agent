@@ -18,7 +18,8 @@ from pydantic import Field
 from backend.core.trace import Trace
 from backend.tutor.ingest.fetch import public_resolver
 from backend.tutor.mcp import gateway as gateway_mod
-from backend.tutor.mcp.gateway import ENABLED_TTL_S, TOOL_DEFS_WAIT_S, CallContext, Gateway, wire_name
+from backend.tutor.mcp.gateway import (BROWSER_BUSY, ENABLED_TTL_S, TOOL_DEFS_WAIT_S, CallContext, Gateway,
+                                       wire_name)
 from backend.tutor.mcp.policy import UrlPolicy
 from backend.tutor.mcp.registry import Registry, ServerSpec
 from backend.tutor.mcp.results import CAP, _finish
@@ -782,3 +783,144 @@ async def test_reset_during_an_in_flight_refresh_is_not_lost(monkeypatch):
         assert (await gw.check("web")).state == "disabled"
         out = await gw.call("web.search", {"query": "q"}, CallContext(agent="all"))
         assert out == {"error": "web.search: server web is disabled"}
+
+
+# ---- the browser lease -------------------------------------------------------------------------------------------
+def _leased_browser(navigations):
+    """Playwright-shaped: `navigate` records its URL, `snapshot` records None; both report the page shown."""
+    b = FastMCP("browser")
+    page = {"url": "about:blank"}
+
+    @b.tool
+    def browser_navigate(url: str) -> str:
+        navigations.append(url)
+        page["url"] = url
+        return f"### Page state\n- Page URL: {url}"
+
+    @b.tool
+    def browser_snapshot() -> str:
+        navigations.append(None)
+        return f"### Page state\n- Page URL: {page['url']}"
+
+    return b
+
+
+def _kb():
+    kb = FastMCP("kb")
+
+    @kb.tool
+    def list_roadmaps() -> str:
+        return "kubernetes"
+
+    return kb
+
+
+@pytest.fixture
+def gw_browser():
+    navigations = []
+    specs = [_spec("playwright", "browser", strip_prefix="browser_", timeout_s=1), _spec("kb")]
+    with _gateway(specs, {"playwright": _leased_browser(navigations), "kb": _kb()},
+                  agents={"t": ("*",), "u": ("*",)}) as gw:
+        gw.fake = type("Fake", (), {"navigations": navigations})()
+        yield gw
+
+
+def ctx_with_policy(lease=None, agent="t", trace=None):
+    policy = UrlPolicy(resolver=public_resolver)
+    policy.allow_sources(["https://ok.example/"])
+    return CallContext(agent=agent, policy=policy, trace=trace, lease=lease)
+
+
+async def test_lease_constants():
+    assert gateway_mod.LEASE_IDLE_S == 60.0
+    assert BROWSER_BUSY == "browser busy: another session is using it"
+
+
+async def test_second_lease_waits_then_busy(gw_browser):
+    trace = Trace("t")
+    a, b = ctx_with_policy(lease="A"), ctx_with_policy(lease="B", trace=trace)
+    await gw_browser.call("browser.navigate", {"url": "https://ok.example/"}, a)
+    t0 = time.monotonic()
+    out = await gw_browser.call("browser.snapshot", {}, b)
+    assert out == {"error": BROWSER_BUSY}
+    assert 0.9 <= time.monotonic() - t0 < 5  # waited the call's own timeout (timeout_s=1), then gave up
+    assert gw_browser.fake.navigations == ["https://ok.example/"]  # B never reached the browser
+    (span,) = trace.spans
+    assert span.name == "mcp:browser.snapshot" and span.attrs["refused"] is True and span.attrs["ok"] is False
+    assert span.attrs["reason"] == BROWSER_BUSY
+    assert "data" in await gw_browser.call("browser.snapshot", {}, a)  # A still holds it
+
+
+async def test_same_lease_keeps_the_page(gw_browser):
+    a = ctx_with_policy(lease="A")
+    await gw_browser.call("browser.navigate", {"url": "https://ok.example/"}, a)
+    await gw_browser.call("browser.snapshot", {}, a)
+    assert gw_browser.fake.navigations == ["https://ok.example/", None]  # no reset: first owner, then same owner
+
+
+async def test_release_hands_over_and_resets_page(gw_browser):
+    a, b = ctx_with_policy(lease="A"), ctx_with_policy(lease="B")
+    await gw_browser.call("browser.navigate", {"url": "https://ok.example/"}, a)
+    await gw_browser.release("A")
+    out = await gw_browser.call("browser.snapshot", {}, b)
+    assert gw_browser.fake.navigations[-2:] == ["about:blank", None]     # reset before B's first call
+    assert "about:blank" in out["data"]["result"]  # B never sees A's page
+    await gw_browser.release("A")  # not the owner any more: a no-op
+    await gw_browser.call("browser.snapshot", {}, b)
+    assert gw_browser.fake.navigations[-2:] == [None, None]
+
+
+async def test_waiting_lease_gets_it_on_release(gw_browser):
+    a, b = ctx_with_policy(lease="A"), ctx_with_policy(lease="B")
+    await gw_browser.call("browser.navigate", {"url": "https://ok.example/"}, a)
+    waiting = asyncio.ensure_future(gw_browser.call("browser.snapshot", {}, b))
+    await asyncio.sleep(0.2)
+    assert not waiting.done()
+    await gw_browser.release("A")
+    assert "data" in await asyncio.wait_for(waiting, 5)
+    assert gw_browser.fake.navigations == ["https://ok.example/", "about:blank", None]
+
+
+async def test_reset_waits_for_a_call_that_connects(gw_browser):
+    a, b = ctx_with_policy(lease="A"), ctx_with_policy(lease="B")
+    await gw_browser.call("browser.navigate", {"url": "https://ok.example/"}, a)
+    await gw_browser.release("A")
+    real_open, failures = gw_browser._open, [1]
+
+    async def flaky(conn, canonical):
+        if failures:
+            failures.pop()
+            return {"error": f"{canonical} unavailable: down"}
+        return await real_open(conn, canonical)
+
+    gw_browser._open = flaky
+    assert "unavailable" in (await gw_browser.call("browser.snapshot", {}, b))["error"]
+    await gw_browser.call("browser.snapshot", {}, b)
+    assert gw_browser.fake.navigations == ["https://ok.example/", "about:blank", None]  # reset on the next call
+
+
+async def test_idle_lease_expires(gw_browser, monkeypatch):
+    monkeypatch.setattr(gateway_mod, "LEASE_IDLE_S", 0.1)
+    await gw_browser.call("browser.navigate", {"url": "https://ok.example/"}, ctx_with_policy(lease="A"))
+    await asyncio.sleep(0.2)
+    assert "error" not in await gw_browser.call("browser.snapshot", {}, ctx_with_policy(lease="B"))
+    assert gw_browser.fake.navigations[-2:] == ["about:blank", None]
+
+
+async def test_no_lease_means_one_per_agent(gw_browser):
+    await gw_browser.call("browser.navigate", {"url": "https://ok.example/"}, ctx_with_policy(agent="t"))
+    assert "data" in await gw_browser.call("browser.snapshot", {}, ctx_with_policy(agent="t"))
+    assert await gw_browser.call("browser.snapshot", {}, ctx_with_policy(agent="u")) == {"error": BROWSER_BUSY}
+    await gw_browser.release("anon:t")
+    assert "data" in await gw_browser.call("browser.snapshot", {}, ctx_with_policy(agent="u"))
+
+
+async def test_non_browser_calls_ignore_leases(gw_browser):
+    await gw_browser.call("browser.navigate", {"url": "https://ok.example/"}, ctx_with_policy(lease="A"))
+    assert "error" not in await gw_browser.call("kb.list_roadmaps", {}, CallContext(agent="t", lease="B"))
+
+
+async def test_release_sync_from_worker_thread(gw_browser):
+    await gw_browser.call("browser.navigate", {"url": "https://ok.example/"}, ctx_with_policy(lease="A"))
+    await asyncio.to_thread(gw_browser.release_sync, "A")
+    assert "data" in await gw_browser.call("browser.snapshot", {}, ctx_with_policy(lease="B"))

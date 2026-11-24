@@ -43,10 +43,17 @@
   package on first run; `timeout_s` otherwise), then the call gets `spec.timeout_for(tool)`: the server's
   `tool_timeouts` entry for that tool (keyed by the server's own tool name) or its `timeout_s`. Every timeout or
   transport error comes back as `{"error": ...}`; nothing here raises into the agent loop.
+- The browser lease: the server whose namespace is `browser` has one page, so one lease holds it at a time. A
+  browser call runs under `CallContext.lease` (`anon:<agent>` when None; the tutor passes its session id, each
+  crawler render a fresh `crawler:<hex>`). After the gate, a call from another lease waits until the lease is
+  released (`release` / `release_sync`; a no-op for a lease that is not the owner), or until it has been idle (no
+  call in flight) for LEASE_IDLE_S, at most the call's own timeout; then it is refused with BROWSER_BUSY, without
+  contacting the server. A lease that takes over from a previous owner first gets the internal `about:blank`
+  navigation below (releasing does not navigate). Other servers ignore leases.
 - Traces: with `CallContext.trace`, every call records one `mcp:<canonical>` span (`tool`, redacted `args`, `ok`,
   `latency_ms`). A call that never ran (the gate, a blocked server, an unknown name, a raw request from another
-  agent) records it too, with `ok=False, refused=True, reason=<its error, redacted, [:200]>`; the canonical name
-  is the best guess when the name did not resolve.
+  agent, a busy browser) records it too, with `ok=False, refused=True, reason=<its error, redacted, [:200]>`; the
+  canonical name is the best guess when the name did not resolve.
 """
 from __future__ import annotations
 
@@ -91,6 +98,8 @@ _HASHED = re.compile(r"_[0-9a-f]{8}$")  # what `_hashed` ends a wire name with
 BLANK = "about:blank"  # where the gateway sends a browser that left the allowed sites
 TOOL_DEFS_WAIT_S = 5.0  # tool_defs lists what connected by then; slower servers finish connecting in the background
 ENABLED_TTL_S = 5.0  # how long the servers' on/off state (a database read) is reused
+LEASE_IDLE_S = 60.0  # a browser lease with no call for this long may be taken over
+BROWSER_BUSY = "browser busy: another session is using it"
 
 
 def _hashed(wire: str, canonical: str) -> str:
@@ -124,6 +133,7 @@ class CallContext:
     trace: Trace | None = None
     raw: bool = False  # crawler only: no untrusted wrap, RAW_CAP instead of CAP
     approve: Callable[[dict], bool | Awaitable[bool]] | None = None  # asked before every `ask` tool call
+    lease: str | None = None  # who holds the browser for this call (None: `anon:<agent>`)
 
 
 @dataclass
@@ -185,6 +195,11 @@ class Gateway:
         self._enabled_at: float | None = None
         self._enabled_gen = 0  # bumped by reset: a read that started before it is stale
         self._enabled_lock: asyncio.Lock | None = None  # made per loop in start()
+        self._lease = {"owner": None, "last": 0.0, "reset": False}  # the browser's holder, when it last used it,
+        # and whether its next connected call resets the page first (it took over from a previous owner)
+        self._lease_busy = 0  # browser calls in flight (the lease is never taken over under one)
+        self._lease_dirty = False  # some owner has held the browser: the next new owner's page is reset
+        self._lease_cond: asyncio.Condition | None = None  # made per loop in start()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
 
@@ -194,6 +209,8 @@ class Gateway:
             return
         self._loop = asyncio.new_event_loop()
         self._enabled_lock = asyncio.Lock()
+        self._lease_cond = asyncio.Condition()
+        self._lease["owner"], self._lease_busy = None, 0
         self._thread = threading.Thread(target=self._run, name="mcp-gateway", daemon=True)
         self._thread.start()
 
@@ -254,6 +271,16 @@ class Gateway:
         except TimeoutError:
             fut.cancel()
             return {"error": f"{name} timed out after {timeout}s"}
+
+    async def release(self, lease: str) -> None:
+        """Give the browser back (if `lease` holds it); the next owner's first call resets the page."""
+        await asyncio.wrap_future(self._submit(self._release(lease)))
+
+    def release_sync(self, lease: str, timeout: float | None = 15) -> None:
+        """`release` for worker threads (never the gateway's own loop thread)."""
+        if threading.current_thread() is self._thread:
+            raise RuntimeError("release_sync from the gateway loop would deadlock; use release()")
+        self._submit(self._release(lease)).result(timeout)
 
     async def health(self, refresh: bool = False) -> list[ServerHealth]:
         return await asyncio.wrap_future(self._submit(self._health(refresh)))
@@ -479,25 +506,77 @@ class Gateway:
         return conn.client is None and conn.state == "down" and time.monotonic() - conn.failed_at < RETRY_DOWN_S
 
     async def _call(self, name: str, args: dict, ctx: CallContext) -> dict:
-        """Resolve, gate and invoke; with `ctx.trace`, one `mcp:<canonical>` span either way (a call that never
-        ran is `ok=False, refused=True, reason=<its error>`)."""
+        """Resolve, gate, hold the browser lease (browser tools only) and invoke; with `ctx.trace`, one
+        `mcp:<canonical>` span either way (a call that never ran is `ok=False, refused=True, reason=<its error>`)."""
         t0 = time.perf_counter()
         await self._refresh_enabled()
         args = unwrap_url_args(args)  # once: the policy check, the approver and the call all see these
         routed = await self._route(name, args, ctx)
         if isinstance(routed[0], ServerSpec):
             spec, canonical = routed
-            t0 = time.perf_counter()  # the call's latency, not the gate's (an approver may wait for a person)
+            if spec.namespace != "browser":
+                return await self._traced_invoke(spec, canonical, name, args, ctx)
+            lease = ctx.lease or f"anon:{ctx.agent}"
+            if await self._acquire(lease, self._call_timeout(spec, name, canonical)):
+                try:
+                    return await self._traced_invoke(spec, canonical, name, args, ctx)
+                finally:
+                    await self._done(lease)
+            routed = (_Refused(error=BROWSER_BUSY), canonical)  # never reached the server
+        out, canonical = routed
+        if ctx.trace is not None:
             with self._span(ctx, canonical, args) as s:
-                out = await self._invoke(spec, canonical, name, args, ctx)
-                if s is not None:
-                    _record(s, out, t0)
-        else:
-            out, canonical = routed
-            if ctx.trace is not None:
-                with self._span(ctx, canonical, args) as s:
-                    _record(s, out, t0)
+                _record(s, out, t0)
         return dict(out) if isinstance(out, _Refused) else out
+
+    async def _traced_invoke(self, spec: ServerSpec, canonical: str, name: str, args: dict, ctx: CallContext) -> dict:
+        t0 = time.perf_counter()  # the call's latency, not the gate's (an approver may wait for a person)
+        with self._span(ctx, canonical, args) as s:
+            out = await self._invoke(spec, canonical, name, args, ctx)
+            if s is not None:
+                _record(s, out, t0)
+        return dict(out) if isinstance(out, _Refused) else out
+
+    def _call_timeout(self, spec: ServerSpec, name: str, canonical: str) -> float:
+        tool = self._names.get(name) or self._names.get(canonical)
+        return spec.timeout_for(tool.name) if tool is not None and tool.spec.name == spec.name else spec.timeout_s
+
+    # ---- the browser lease -------------------------------------------------------------------------------------
+    async def _acquire(self, lease: str, timeout: float) -> bool:
+        """Hold the browser for one call (True), or False if another lease kept it for `timeout` seconds. Taking
+        over from a previous owner marks the page for a reset."""
+        deadline = time.monotonic() + timeout
+        async with self._lease_cond:
+            while True:
+                now, owner = time.monotonic(), self._lease["owner"]
+                if owner == lease:
+                    self._lease_busy += 1
+                    return True
+                idle = LEASE_IDLE_S - (now - self._lease["last"])
+                if self._lease_busy == 0 and (owner is None or idle <= 0):
+                    self._lease.update(owner=lease, last=now, reset=self._lease_dirty)
+                    self._lease_dirty = True
+                    self._lease_busy += 1
+                    return True
+                left = deadline - now
+                if left <= 0:
+                    return False
+                with suppress(TimeoutError):  # woken by a call ending or a release; else when it may be idle
+                    await asyncio.wait_for(self._lease_cond.wait(), left if self._lease_busy else min(left, idle))
+
+    async def _done(self, lease: str) -> None:
+        self._lease_busy -= 1
+        if self._lease["owner"] == lease:
+            self._lease["last"] = time.monotonic()
+        async with self._lease_cond:
+            self._lease_cond.notify_all()
+
+    async def _release(self, lease: str) -> None:
+        if self._lease["owner"] != lease:
+            return
+        self._lease["owner"] = None
+        async with self._lease_cond:
+            self._lease_cond.notify_all()
 
     def _span(self, ctx: CallContext, canonical: str, args: dict):
         if ctx.trace is None:
@@ -543,6 +622,9 @@ class Gateway:
         client = await self._open(conn, canonical)  # (re)lists tools on a new connection
         if isinstance(client, dict):
             return client
+        if spec.namespace == "browser" and self._lease["reset"]:  # a new owner never sees the last one's page;
+            self._lease["reset"] = False  # kept until a call connects (a failed connect cannot reset the page)
+            await self._blank(conn)
         tool = self._names.get(name) or self._names.get(canonical)
         if tool is None or tool.spec.name != spec.name:
             return _Refused(error=f"unknown tool {name}")
@@ -639,9 +721,9 @@ class Gateway:
         return None
 
     async def _blank(self, conn: _Conn) -> None:
-        """`browser.navigate {"url": "about:blank"}`, past the gate and the URL policy, never shown to the model.
-        Tried twice (a tool error or exception), but not again after a timeout; a failure is otherwise ignored
-        (the result is refused either way)."""
+        """`browser.navigate {"url": "about:blank"}`, past the gate, the URL policy and the lease, never shown to
+        the model. Tried twice (a tool error or exception), but not again after a timeout; a failure is otherwise
+        ignored (the result is refused either way)."""
         nav = self._names.get(f"{conn.spec.namespace}.navigate")
         client = conn.client
         if nav is None or nav.spec.name != conn.spec.name or client is None:

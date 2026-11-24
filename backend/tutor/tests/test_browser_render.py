@@ -230,6 +230,70 @@ def test_render_page_result_and_reasons():
     assert calls == [("close",)]  # refused before the browser was touched; close is still sent
 
 
+class _FakeGateway:
+    """Answers render_page's calls in Playwright MCP's formats; records each call's lease and every release."""
+
+    def __init__(self):
+        self.leases, self.released = [], []
+
+    def call_sync(self, name, args, ctx, timeout=None):
+        self.leases.append(ctx.lease)
+        if name == "browser.navigate":
+            return {"data": {"result": f"### Page state\n- Page URL: {args['url']}"}}
+        if name == "browser.evaluate":
+            return {"data": {"result": f"### Result\n{json.dumps(RENDERED)}"}}
+        return {"data": {"result": "closed"}}
+
+    def release_sync(self, lease):
+        self.released.append(lease)
+
+
+@pytest.fixture
+def fake_gateway():
+    return _FakeGateway()
+
+
+def test_render_page_releases_its_lease(fake_gateway):
+    out = render_page(fake_gateway, "https://site.example/a", scope_host="site.example", resolver=public_resolver)
+    assert out == RenderResult(final_url="https://site.example/a", html=RENDERED)
+    assert fake_gateway.released and fake_gateway.released[0].startswith("crawler:")
+    # navigate, evaluate and close all ran under that one lease, released once at the end
+    assert fake_gateway.leases == fake_gateway.released * 3 and len(fake_gateway.released) == 1
+    render_page(fake_gateway, "https://site.example/b", scope_host="site.example", resolver=public_resolver)
+    assert len(set(fake_gateway.released)) == 2  # every render takes a fresh lease
+
+
+def test_render_page_releases_after_a_failure(fake_gateway):
+    def boom(*a, **kw):
+        raise RuntimeError("gateway stopped")
+
+    fake_gateway.call_sync = boom
+    assert render_page(fake_gateway, "https://site.example/a", scope_host="site.example",
+                       resolver=public_resolver).startswith("browser unavailable: ")
+    assert len(fake_gateway.released) == 1 and fake_gateway.released[0].startswith("crawler:")
+
+
+def test_concurrent_renders_take_turns_under_the_lease():
+    """Two crawler workers render at once: the second waits for the first's lease (no lock any more), gets the
+    page reset to about:blank on hand-over, and each reads only its own page."""
+    other = "https://spa.test/docs/other"
+    other_html = _page("Other", _prose("Other page"))
+    calls, out = [], {}
+    with _gateway(_playwright({ROOT: (ROOT, RENDERED), other: (other, other_html)}, calls)) as gw:
+        workers = [threading.Thread(target=lambda u=u: out.update({u: render_page(
+            gw, u, scope_host="spa.test", resolver=public_resolver)})) for u in (ROOT, other)]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join(30)
+    assert out == {ROOT: RenderResult(final_url=ROOT, html=RENDERED),
+                   other: RenderResult(final_url=other, html=other_html)}
+    first, second = calls[0][1], calls[4][1]
+    assert {first, second} == {ROOT, other}
+    assert calls == [("navigate", first), ("evaluate", EVALUATE_FUNCTION), ("close",), ("navigate", "about:blank"),
+                     ("navigate", second), ("evaluate", EVALUATE_FUNCTION), ("close",)]
+
+
 def test_cli_ingest_runs_a_gateway(engine, db_url, tmp_path, monkeypatch, capsys):
     # R7: the CLI starts (and stops) a gateway too; here its browser is a refused loopback port (no network)
     from backend.tutor.__main__ import main
