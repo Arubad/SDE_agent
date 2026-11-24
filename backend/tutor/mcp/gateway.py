@@ -2,7 +2,14 @@
 
 - One background thread runs an asyncio loop that owns one `fastmcp.Client` per server. `start()` connects
   nothing: a client is opened on first use and kept open; any transport error or timeout drops it, marks the server
-  `down`, and the next use reopens it.
+  `down`, and the next use reopens it. The one exception: a call timeout on an in-process server keeps the
+  connection (one slow tool of our own is not a dead link).
+- Nothing blocking runs on the loop. The servers' on/off state (a database read, `registry.effective_enabled`)
+  is cached: re-read in a worker thread at most every ENABLED_TTL_S, at the start of a call, `tool_defs`, `health`
+  and `check`; `reset(name)` (after the Settings switch) forces the next read. Before the first read, and if a
+  read fails, the last known state (at first the registry default) holds.
+- `tool_defs` waits at most TOOL_DEFS_WAIT_S for servers to connect and lists the ones that did; a slower connect
+  keeps running in the background under its own connect budget (one per server) and is listed next time.
 - Names: a tool is `<namespace>.<tool>` (canonical, after `strip_prefix`) in the registry, traces and the UI, and
   `wire_name(...)` (`^[a-zA-Z0-9_-]{1,64}$`) on the wire to Claude. `call` accepts either.
 - Allow-lists: an agent sees and may call only the canonical names its registry patterns match (`fnmatch`).
@@ -15,24 +22,31 @@
   resolve DNS) run in a worker thread, never on the gateway loop.
 - Fenced URLs: every `url` / `*_url` argument has one exact `untrusted.wrap` fence stripped first (the model passes
   a web.search URL back as it was shown); the gate, the approver and the call all get these same arguments.
-- With a policy, after the call and before fencing: `web.search` result URLs become allowed sources, a `web.fetch`
-  whose `final_url` (where its redirects ended) is refused becomes an error, and a
+- With a policy, after the call and before fencing: the URLs in a non-error result of a `registry.url_sources`
+  tool (default `web.search`; its `results[*].url`, else every URL in the result's strings) become allowed
+  sources, a `web.fetch` whose `final_url` (where its redirects ended) is refused becomes an error, and a
   `browser.*` result whose `Page URL:` is refused, or that reports none (except `close`, `evaluate` and errors),
   becomes an error, after an internal `browser.navigate` to `about:blank` (not gated, not policed, never shown;
-  its failure is ignored).
+  tried twice unless the first attempt timed out, and a failure is otherwise ignored).
 - Results come back in the agent loop's `ToolCaller` shape (`backend/agent/loop.py`):
   - a tool error -> `{"error": <its text>}`;
   - structured content `{"passages": [...]}` -> passed through unchanged (citations need the raw text);
   - other structured content -> `{"data": <it>}`; no structured content -> `{"data": {"text": <joined text>}}`.
   For an `untrusted` server every string leaf of `data` (and an error's text) is fenced with `untrusted.wrap`.
-  Then the whole result is capped at `results.CAP` characters of its JSON: the largest string leaves are cut and get
-  ` [truncated N chars]` appended (after the fence, which is never cut). `CallContext.raw` (crawler only) skips
-  the wrap and uses `results.RAW_CAP`. (Shaping lives in `results.py`.)
+  Then the whole result is capped at `results.CAP` characters of its JSON, measured ASCII-escaped (`\\uXXXX`, as
+  it is sent): the largest string leaves are cut and get ` [truncated N chars]` appended (after the fence, which is
+  never cut). `CallContext.raw` (crawler only) skips the wrap and uses `results.RAW_CAP`. (Shaping lives in
+  `results.py`.)
 - External (non-inproc) servers' tool descriptions reach the model fenced and capped (DESC_CHARS), and every
   `description` inside their input schemas is cut to SCHEMA_DESC_CHARS; own (inproc) descriptions are our code.
 - Timeouts: connecting has its own budget (`max(timeout_s, stdio_connect_s)` for stdio, which may download a
-  package on first run; `timeout_s` otherwise), then the call gets `timeout_s`. Every timeout or transport error
-  comes back as `{"error": ...}`; nothing here raises into the agent loop.
+  package on first run; `timeout_s` otherwise), then the call gets `spec.timeout_for(tool)`: the server's
+  `tool_timeouts` entry for that tool (keyed by the server's own tool name) or its `timeout_s`. Every timeout or
+  transport error comes back as `{"error": ...}`; nothing here raises into the agent loop.
+- Traces: with `CallContext.trace`, every call records one `mcp:<canonical>` span (`tool`, redacted `args`, `ok`,
+  `latency_ms`). A call that never ran (the gate, a blocked server, an unknown name, a raw request from another
+  agent) records it too, with `ok=False, refused=True, reason=<its error, redacted, [:200]>`; the canonical name
+  is the best guess when the name did not resolve.
 """
 from __future__ import annotations
 
@@ -59,7 +73,7 @@ from mcp.shared.exceptions import McpError
 from backend.core.redact import redact
 from backend.core.trace import Trace
 from backend.tutor.mcp.registry import Registry, ServerSpec, effective_enabled, missing_env
-from backend.tutor.mcp.policy import arg_urls, page_urls, search_result_urls, unwrap_url_args
+from backend.tutor.mcp.policy import arg_urls, page_urls, search_result_urls, text_urls, unwrap_url_args
 from backend.tutor.mcp.results import _finish, _leaves, _shape
 from backend.tutor.untrusted import wrap
 
@@ -75,6 +89,8 @@ DESC_CHARS, SCHEMA_DESC_CHARS = 1024, 300  # external tool descriptions (then fe
 _BAD = re.compile(r"[^a-zA-Z0-9_-]")
 _HASHED = re.compile(r"_[0-9a-f]{8}$")  # what `_hashed` ends a wire name with
 BLANK = "about:blank"  # where the gateway sends a browser that left the allowed sites
+TOOL_DEFS_WAIT_S = 5.0  # tool_defs lists what connected by then; slower servers finish connecting in the background
+ENABLED_TTL_S = 5.0  # how long the servers' on/off state (a database read) is reused
 
 
 def _hashed(wire: str, canonical: str) -> str:
@@ -134,6 +150,10 @@ class _Tool:
     schema: dict
 
 
+class _Refused(dict):
+    """An error result for a call that never ran (the gate, a blocked server, an unknown name): traced as refused."""
+
+
 @dataclass
 class _Conn:
     spec: ServerSpec
@@ -160,6 +180,10 @@ class Gateway:
         self._conns: dict[str, _Conn] = {}
         self._names: dict[str, _Tool] = {}  # wire and canonical -> tool
         self._closing: set[asyncio.Task] = set()
+        self._connecting: dict[str, asyncio.Task] = {}  # server -> a connect tool_defs stopped waiting for
+        self._enabled: dict[str, bool] = {}  # server -> on/off, refreshed off the loop (_refresh_enabled)
+        self._enabled_at: float | None = None
+        self._enabled_lock: asyncio.Lock | None = None  # made per loop in start()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
 
@@ -168,6 +192,7 @@ class Gateway:
         if self._loop is not None:
             return
         self._loop = asyncio.new_event_loop()
+        self._enabled_lock = asyncio.Lock()
         self._thread = threading.Thread(target=self._run, name="mcp-gateway", daemon=True)
         self._thread.start()
 
@@ -194,6 +219,7 @@ class Gateway:
         self._thread.join(15)
         self._loop = self._thread = None
         self._conns.clear()
+        self._connecting.clear()
 
     def _submit(self, coro):
         if self._loop is None:
@@ -202,6 +228,9 @@ class Gateway:
         return asyncio.run_coroutine_threadsafe(coro, self._loop)
 
     async def _close_all(self) -> None:
+        for task in list(self._connecting.values()):
+            task.cancel()
+        await asyncio.gather(*self._connecting.values(), return_exceptions=True)
         for conn in self._conns.values():
             self._drop(conn)
         if self._closing:
@@ -229,7 +258,7 @@ class Gateway:
         return await asyncio.wrap_future(self._submit(self._health(refresh)))
 
     async def check(self, name: str) -> ServerHealth:
-        return await asyncio.wrap_future(self._submit(self._check(self._specs[name])))
+        return await asyncio.wrap_future(self._submit(self._check_now(self._specs[name])))
 
     async def reset(self, name: str) -> None:
         """Close that server's connection and forget its tools and health (after an on/off toggle)."""
@@ -242,9 +271,23 @@ class Gateway:
         return self._conns[spec.name]
 
     def _blocked(self, spec: ServerSpec) -> Literal["disabled", "missing_env"] | None:
-        if not effective_enabled(self.engine, spec):
+        """From the cached on/off state (the registry default before the first refresh); never queries."""
+        if not self._enabled.get(spec.name, spec.enabled_default):
             return "disabled"
         return "missing_env" if missing_env(spec, self.env) else None
+
+    async def _refresh_enabled(self) -> None:
+        """Re-read every server's on/off state in a worker thread, at most every ENABLED_TTL_S (`reset` forces
+        the next one). A failed read keeps the last known state and is retried after the TTL."""
+        async with self._enabled_lock:
+            if self._enabled_at is not None and time.monotonic() - self._enabled_at < ENABLED_TTL_S:
+                return
+            with suppress(Exception):
+                self._enabled = await asyncio.to_thread(self._read_enabled)
+            self._enabled_at = time.monotonic()
+
+    def _read_enabled(self) -> dict[str, bool]:
+        return {s.name: effective_enabled(self.engine, s) for s in self.registry.servers}
 
     def _client(self, spec: ServerSpec) -> Client:
         if spec.transport == "inproc":
@@ -314,6 +357,7 @@ class Gateway:
             task.add_done_callback(self._closing.discard)
 
     async def _reset(self, name: str) -> None:
+        self._enabled_at = None  # the switch may just have changed: read it again on next use
         conn = self._conns.get(name)
         if conn is None:
             return
@@ -397,6 +441,7 @@ class Gateway:
     async def _tool_defs(self, agent: str) -> list[dict]:
         if not self.registry.agents.get(agent):
             return []
+        await self._refresh_enabled()
         live = await self._load_live()
         up = {s.name for s in live if self._conn(s).client is not None}
         tools = {t.wire: t for t in self._names.values()
@@ -405,27 +450,62 @@ class Gateway:
                 for w, t in sorted(tools.items())]
 
     async def _load_live(self) -> list[ServerSpec]:
-        """Connect every enabled, configured server (concurrently, each within its timeout) except those that
-        failed in the last RETRY_DOWN_S; return the enabled, configured ones."""
+        """Connect every enabled, configured server (concurrently, each within its connect budget) except those
+        that failed in the last RETRY_DOWN_S; return the enabled, configured ones. Waits at most TOOL_DEFS_WAIT_S:
+        a slower connect is left running (kept in `_connecting`, one per server) and lists next time."""
         live = [s for s in self.registry.servers if self._blocked(s) is None]
-        due = [s for s in live if not self._recently_failed(self._conn(s))]
-        await asyncio.gather(*(self._open(self._conn(s), s.namespace) for s in due))
+        due = [s for s in live if not self._recently_failed(self._conn(s)) and s.name not in self._connecting]
+        tasks = {s.name: asyncio.create_task(self._open(self._conn(s), s.namespace)) for s in due}
+        if tasks:
+            await asyncio.wait(tasks.values(), timeout=TOOL_DEFS_WAIT_S)
+        for name, task in tasks.items():
+            if not task.done():
+                self._connecting[name] = task
+                task.add_done_callback(lambda t, n=name: self._connecting.pop(n, None))
         return live
 
     def _recently_failed(self, conn: _Conn) -> bool:
         return conn.client is None and conn.state == "down" and time.monotonic() - conn.failed_at < RETRY_DOWN_S
 
     async def _call(self, name: str, args: dict, ctx: CallContext) -> dict:
-        if ctx.raw and ctx.agent != RAW_AGENT:
-            return {"error": f"raw results are only for the {RAW_AGENT} agent"}
+        """Resolve, gate and invoke; with `ctx.trace`, one `mcp:<canonical>` span either way (a call that never
+        ran is `ok=False, refused=True, reason=<its error>`)."""
+        t0 = time.perf_counter()
+        await self._refresh_enabled()
         args = unwrap_url_args(args)  # once: the policy check, the approver and the call all see these
+        routed = await self._route(name, args, ctx)
+        if isinstance(routed[0], ServerSpec):
+            spec, canonical = routed
+            t0 = time.perf_counter()  # the call's latency, not the gate's (an approver may wait for a person)
+            with self._span(ctx, canonical, args) as s:
+                out = await self._invoke(spec, canonical, name, args, ctx)
+                if s is not None:
+                    _record(s, out, t0)
+        else:
+            out, canonical = routed
+            if ctx.trace is not None:
+                with self._span(ctx, canonical, args) as s:
+                    _record(s, out, t0)
+        return dict(out) if isinstance(out, _Refused) else out
+
+    def _span(self, ctx: CallContext, canonical: str, args: dict):
+        if ctx.trace is None:
+            return nullcontext()
+        return ctx.trace.span(f"mcp:{canonical}", kind="tool", tool=canonical,
+                              args=redact(json.dumps(args, default=str, ensure_ascii=False))[:200])
+
+    async def _route(self, name: str, args: dict, ctx: CallContext) -> tuple[ServerSpec, str] | tuple[dict, str]:
+        """(server, canonical) to invoke, or (the result, best-guess canonical) for a call that does not run."""
         tool = self._names.get(name)
         owners = self._owners(name)
+        best = tool.canonical if tool else owners[0][1] if owners else name
+        if ctx.raw and ctx.agent != RAW_AGENT:
+            return _Refused(error=f"raw results are only for the {RAW_AGENT} agent"), best
         gated = None  # (server, canonical) already gated
         if tool is None and owners and (name.startswith(owners[0][0].namespace + ".") or not _HASHED.search(name)):
             gated = (owners[0][0].name, owners[0][1])  # known without listing: gate before anything connects
             if (refused := await self._gate(owners[0][0], owners[0][1], args, ctx)) is not None:
-                return refused
+                return refused, best
         if tool is None:  # not listed yet (first use, after reset): list whichever servers could own it first
             candidates = [s for s, _ in owners] or list(self.registry.servers)
             candidates = [s for s in candidates if self._could_allow(ctx.agent, s.namespace) and not self._blocked(s)]
@@ -435,24 +515,16 @@ class Gateway:
             if tool is None and owners and owners[0][0] in candidates:
                 failed = opened[candidates.index(owners[0][0])]
                 if isinstance(failed, dict):  # the likely owner is unreachable: report it, do not try again
-                    return failed
+                    return failed, best
         guess = (tool.spec, tool.canonical) if tool else (owners[0] if owners else None)
         if guess is None:
-            return {"error": f"unknown tool {name}"}
+            return _Refused(error=f"unknown tool {name}"), best
         spec, canonical = guess
         if (spec.name, canonical) != gated and (refused := await self._gate(spec, canonical, args, ctx)) is not None:
-            return refused
+            return refused, canonical
         if (refused := self._blocked_error(spec, canonical)) is not None:
-            return refused
-        span = ctx.trace.span(f"mcp:{canonical}", kind="tool", tool=canonical,
-                              args=redact(json.dumps(args, default=str, ensure_ascii=False))[:200]) \
-            if ctx.trace else nullcontext()
-        t0 = time.perf_counter()
-        with span as s:
-            out = await self._invoke(spec, canonical, name, args, ctx)
-            if s is not None:
-                s.set(ok="error" not in out, latency_ms=round((time.perf_counter() - t0) * 1000))
-        return out
+            return refused, canonical
+        return spec, canonical
 
     async def _invoke(self, spec: ServerSpec, canonical: str, name: str, args: dict, ctx: CallContext) -> dict:
         conn = self._conn(spec)
@@ -462,18 +534,21 @@ class Gateway:
             return client
         tool = self._names.get(name) or self._names.get(canonical)
         if tool is None or tool.spec.name != spec.name:
-            return {"error": f"unknown tool {name}"}
+            return _Refused(error=f"unknown tool {name}")
         if tool.canonical != canonical and (refused := await self._gate(spec, tool.canonical, args, ctx)) is not None:
             return refused  # the name now resolves to another tool than the one gated (relisted meanwhile)
+        timeout = spec.timeout_for(tool.name)
         try:
-            result = await asyncio.wait_for(client.call_tool(tool.name, args, raise_on_error=False), spec.timeout_s)
+            result = await asyncio.wait_for(client.call_tool(tool.name, args, raise_on_error=False), timeout)
         except McpError as e:  # the server answered with a protocol error: the connection is fine
             return _finish({"error": str(e)}, spec, ctx, canonical)
+        except TimeoutError:  # an in-process server is our own code on this loop: one slow tool is not a dead link
+            if spec.transport != "inproc" and conn.client is client:
+                self._fail(conn, f"timed out after {timeout}s")
+            return {"error": f"{canonical} timed out after {timeout}s"}
         except Exception as e:
             if conn.client is client:
                 self._fail(conn, self._reason(spec, e, ""))
-            if isinstance(e, TimeoutError):
-                return {"error": f"{canonical} timed out after {spec.timeout_s}s"}
             return self._unavailable(spec, canonical, self._scrub(spec, str(e) or type(e).__name__)[:ERROR_CHARS])
         out = _shape(result, spec)
         if ctx.policy is not None and (refused := await self._after(conn, tool, out, ctx)) is not None:
@@ -486,25 +561,25 @@ class Gateway:
         for an `ask` tool. Nothing connects."""
         verdict = self.decision(ctx.agent, canonical)
         if verdict == "deny":
-            return {"error": f"tool {canonical} is not allowed for {ctx.agent}"}
+            return _Refused(error=f"tool {canonical} is not allowed for {ctx.agent}")
         if ctx.policy is not None and (urls := arg_urls(args)):
             if (reason := await asyncio.to_thread(_first_refusal, ctx.policy, urls)) is not None:
-                return {"error": f"refused by URL policy: {reason}"}
+                return _Refused(error=f"refused by URL policy: {reason}")
         if verdict == "ask":  # nobody is asked about a call that cannot run, and a blocked server is refused here
             if (refused := self._blocked_error(spec, canonical)) is not None:
                 return refused  # (not left to _call: the server may be enabled before _call looks again)
             if await self._approved(spec, canonical, args, ctx):
                 return None
             if ctx.approve is None:
-                return {"error": f"approval required for {canonical}"}
-            return {"error": f"{canonical} was not approved"}
+                return _Refused(error=f"approval required for {canonical}")
+            return _Refused(error=f"{canonical} was not approved")
         return None
 
     def _blocked_error(self, spec: ServerSpec, canonical: str) -> dict | None:
         if (blocked := self._blocked(spec)) == "disabled":
-            return {"error": f"{canonical}: server {spec.name} is disabled"}
+            return _Refused(error=f"{canonical}: server {spec.name} is disabled")
         if blocked == "missing_env":
-            return {"error": f"{canonical}: server {spec.name} needs {', '.join(missing_env(spec, self.env))}"}
+            return _Refused(error=f"{canonical}: server {spec.name} needs {', '.join(missing_env(spec, self.env))}")
         return None
 
     async def _approved(self, spec: ServerSpec, canonical: str, args: dict, ctx: CallContext) -> bool:
@@ -522,12 +597,16 @@ class Gateway:
         return answer is True
 
     async def _after(self, conn: _Conn, tool: _Tool, out: dict, ctx: CallContext) -> dict | None:
-        """On the raw shaped result (before fencing and capping): web.search results become allowed sources; a
-        web.fetch whose `final_url` (after redirects) is off-policy becomes an error; a browser result whose `Page URL:` is off-policy, or a non-error one with no such line (fail closed; only
-        `close` and the crawler's `evaluate` carry none), is replaced by an error and the page is reset. The
-        policy calls (DNS) run off the loop."""
-        if tool.canonical == "web.search" and (found := search_result_urls(out.get("data"))):
-            await asyncio.to_thread(ctx.policy.allow_sources, found)
+        """On the raw shaped result (before fencing and capping): the URLs of a `registry.url_sources` tool's
+        non-error result become allowed sources (its `results[*].url`, else every URL in its strings); a
+        web.fetch whose `final_url` (after redirects) is off-policy becomes an error; a browser result whose
+        `Page URL:` is off-policy, or a non-error one with no such line (fail closed; only `close` and the
+        crawler's `evaluate` carry none), is replaced by an error and the page is reset. The policy calls (DNS)
+        run off the loop."""
+        if tool.canonical in self.registry.url_sources and "error" not in out:
+            found = search_result_urls(out.get("data")) or [u for c, k in _leaves(out, []) for u in text_urls(c[k])]
+            if found:
+                await asyncio.to_thread(ctx.policy.allow_sources, found)
         data = out.get("data")
         if tool.canonical == "web.fetch" and isinstance(data, dict) and "final_url" in data:
             if (reason := await asyncio.to_thread(_first_refusal, ctx.policy, [data["final_url"]])) is not None:
@@ -549,17 +628,28 @@ class Gateway:
         return None
 
     async def _blank(self, conn: _Conn) -> None:
-        """`browser.navigate {"url": "about:blank"}`, past the gate and the URL policy, never shown to the model."""
+        """`browser.navigate {"url": "about:blank"}`, past the gate and the URL policy, never shown to the model.
+        Tried twice (a tool error or exception), but not again after a timeout; a failure is otherwise ignored
+        (the result is refused either way)."""
         nav = self._names.get(f"{conn.spec.namespace}.navigate")
         client = conn.client
         if nav is None or nav.spec.name != conn.spec.name or client is None:
             return
-        with suppress(Exception):
-            await asyncio.wait_for(client.call_tool(nav.name, {"url": BLANK}, raise_on_error=False),
-                                   conn.spec.timeout_s)
+        for _ in range(2):
+            try:
+                result = await asyncio.wait_for(client.call_tool(nav.name, {"url": BLANK}, raise_on_error=False),
+                                                conn.spec.timeout_for(nav.name))
+            except TimeoutError:
+                return
+            except Exception:
+                continue
+            if not result.is_error:
+                return
 
     # ---- health ------------------------------------------------------------------------------------------------
     async def _health(self, refresh: bool) -> list[ServerHealth]:
+        await self._refresh_enabled()
+
         async def one(spec: ServerSpec) -> ServerHealth:
             conn = self._conns.get(spec.name)
             if refresh or self._blocked(spec) or conn is None or conn.state is None:
@@ -567,6 +657,10 @@ class Gateway:
             return self._report(spec, conn)
 
         return list(await asyncio.gather(*(one(s) for s in self.registry.servers)))
+
+    async def _check_now(self, spec: ServerSpec) -> ServerHealth:
+        await self._refresh_enabled()
+        return await self._check(spec)
 
     async def _check(self, spec: ServerSpec) -> ServerHealth:
         blocked = self._blocked(spec)
@@ -594,6 +688,12 @@ class Gateway:
 
 
 # ---- helpers -------------------------------------------------------------------------------------------------------
+def _record(span, out: dict, t0: float) -> None:
+    span.set(ok="error" not in out, latency_ms=round((time.perf_counter() - t0) * 1000))
+    if isinstance(out, _Refused):
+        span.set(refused=True, reason=redact(out["error"])[:200])
+
+
 def _first_refusal(policy: UrlPolicy, urls: list[str]) -> str | None:
     """The first URL's refusal reason (worker thread: `refusal` may resolve DNS)."""
     return next((r for u in urls if (r := policy.refusal(u)) is not None), None)

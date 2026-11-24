@@ -42,9 +42,11 @@ an on/off switch (`GET /api/mcp/servers`; the switch is stored in the database a
   are cut first). External tool descriptions are fenced and capped too (1,024 characters; schema descriptions 300). The
   own servers' `passages` are the exception: they pass unfenced because they are citations, but are validated and
   capped. Text from a server that fails to connect is fenced as well.
-- Each server has a `timeout_s` (default 20) and a separate connect budget (for stdio, at least 60 s, for a cold
-  `uvx` download). A server that is down returns an error result and shows `down`; the others keep working. Startup
-  never waits for any server.
+- Each server has a `timeout_s` (default 20; `kb` 60, `ingest` 30) and a separate connect budget (for stdio, at
+  least 60 s, for a cold `uvx` download). `tool_timeouts` overrides it per tool, keyed by the server's own tool name
+  (`ingest`: `create_roadmap` 120, `wait_for_ingestion` 900). A server that is down returns an error result and
+  shows `down`; the others keep working. A call timeout on an in-process server leaves it connected. Startup never
+  waits for any server, and listing tools waits at most 5 s (slower servers keep connecting and appear next time).
 - Secrets: health output and errors are redacted, every header value and every `requires_env` value is shown as
   `[redacted]`, and the registry refuses a `${VAR}` without a default in `headers`, `url` or `args` unless the
   variable is in `requires_env`. A stdio child gets only the MCP default environment plus its own `requires_env`
@@ -84,8 +86,9 @@ A model-driven agent may open only URLs that came from a search result, from the
 roadmap's resources, plus same-site navigation from those pages. Private, loopback and link-local addresses are
 always refused, resolved through real DNS off the gateway's event loop. How it is checked:
 
-- **Arguments**: every `url` or `*_url` argument is checked before the call. Results of `web.search` add their URLs
-  to the agent's allowed list (read from the raw result, before fencing). Those URLs reach the model fenced; when one
+- **Arguments**: every `url` or `*_url` argument is checked before the call. Results of the tools listed in the
+  registry's top-level `url_sources` (`web.search` and `docs.mslearn.microsoft_docs_search`) add their URLs to the
+  agent's allowed list (read from the raw result, before fencing). A DNS lookup that takes over 5 s is refused. Those URLs reach the model fenced; when one
   comes back as an argument with the fence around it, the gateway strips that one fence first, and the check, the
   approver and the server all get the same stripped value.
 - **`web.fetch` redirects**: the fetcher address-checks every redirect hop, and the gateway also checks the result's
@@ -150,7 +153,7 @@ Edit `backend/tutor/mcp/servers.json` (or point `MCP_REGISTRY` at another file) 
 - `transport` is `http` (needs `url`), `stdio` (needs `command`, optional `args`) or `inproc` (the platform's own).
   Pin stdio packages to an exact version (`uvx pkg==x.y.z`).
 - Allowed keys: `name`, `namespace`, `transport`, `target`, `command`, `args`, `url`, `headers`, `requires_env`,
-  `enabled`, `untrusted`, `timeout_s`, `strip_prefix`, `note`. `${VAR}` and `${VAR:-default}` are expanded from the
+  `enabled`, `untrusted`, `timeout_s`, `tool_timeouts`, `strip_prefix`, `note`. `${VAR}` and `${VAR:-default}` are expanded from the
   environment; a `${VAR}` without a default must be listed in `requires_env`, or the registry fails to load.
 - Servers are untrusted by default; leave it that way for anything you do not run.
 - Nothing is reachable by an agent until it is allowed: add globs for the namespace to the agents in `agents`, and

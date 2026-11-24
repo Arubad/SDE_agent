@@ -202,3 +202,54 @@ def test_field_types_accepted(tmp_path):
     assert (spec.enabled_default, spec.untrusted, spec.timeout_s, spec.args) == (False, True, 2.0, ("x",))
     assert spec.headers == {"H": "v"} and spec.requires_env == ("E",)
     assert load_registry(_write(tmp_path, [_inproc("a", timeout_s=0.5)]), {}).servers[0].timeout_s == 0.5
+
+
+def test_tool_timeouts_and_url_sources_parse(tmp_path):
+    p = tmp_path / "servers.json"
+    servers = [_inproc("kb", timeout_s=60, tool_timeouts={"wait_for_ingestion": 900, "quick": 0.5}),
+               {"name": "mslearn", "namespace": "docs.mslearn", "transport": "http", "url": "https://x.invalid/mcp"},
+               _inproc("web")]
+    sources = ["web.search", "docs.mslearn.microsoft_docs_search"]
+    p.write_text(json.dumps({"servers": servers, "agents": {}, "url_sources": sources}))
+    reg = load_registry(p, {})
+    spec = reg.servers[0]
+    assert spec.tool_timeouts == {"wait_for_ingestion": 900.0, "quick": 0.5}
+    assert spec.timeout_for("wait_for_ingestion") == 900 and spec.timeout_for("search") == 60
+    assert reg.servers[1].tool_timeouts == {} and reg.servers[1].timeout_for("x") == 20.0
+    assert reg.url_sources == ("web.search", "docs.mslearn.microsoft_docs_search")
+    # without the key, web.search results still become allowed sources (the Phase 3 behaviour)
+    assert load_registry(_write(tmp_path, [_inproc("web")]), {}).url_sources == ("web.search",)
+    assert Registry(servers=(), agents={}).url_sources == ("web.search",)
+
+
+@pytest.mark.parametrize("value", [{"x": "slow"}, {"x": 0}, {"x": -1}, {"x": True}, {"x": None}, ["x"], "x: 5"])
+def test_tool_timeouts_must_be_positive_numbers(tmp_path, value):
+    with pytest.raises(RegistryError, match="tool_timeouts"):
+        load_registry(_write(tmp_path, [_inproc("kb", tool_timeouts=value)]), {})
+
+
+@pytest.mark.parametrize("value", ["web.search", [3], [""], {"web.search": True}])
+def test_url_sources_must_be_a_list_of_names(tmp_path, value):
+    p = tmp_path / "servers.json"
+    p.write_text(json.dumps({"servers": [_inproc("web")], "agents": {}, "url_sources": value}))
+    with pytest.raises(RegistryError, match="url_sources"):
+        load_registry(p, {})
+
+
+def test_url_sources_must_name_a_namespace(tmp_path):
+    p = tmp_path / "servers.json"
+    p.write_text(json.dumps({"servers": [_inproc("web")], "agents": {}, "url_sources": ["nope.search"]}))
+    with pytest.raises(RegistryError, match="matches no server namespace"):
+        load_registry(p, {})
+    assert load_registry(p, {}, allow_unknown=True).url_sources == ("nope.search",)
+
+
+def test_committed_timeouts_and_url_sources():
+    reg = load_registry(COMMITTED, {})
+    by = {s.name: s for s in reg.servers}
+    assert by["kb"].timeout_s == 60.0
+    ingest = by["ingest"]
+    assert ingest.timeout_s == 30.0
+    assert ingest.tool_timeouts == {"create_roadmap": 120.0, "wait_for_ingestion": 900.0}
+    assert ingest.timeout_for("wait_for_ingestion") == 900.0 and ingest.timeout_for("ingestion_status") == 30.0
+    assert reg.url_sources == ("web.search", "docs.mslearn.microsoft_docs_search")
