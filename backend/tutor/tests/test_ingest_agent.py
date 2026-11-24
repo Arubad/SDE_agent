@@ -609,7 +609,6 @@ def test_web_text_never_reaches_the_model_unwrapped(engine, tmp_path, clock):
     ctx = _ctx(engine, site, ingest_agent=False)
     rid = _roadmap(engine, "inj", [("a", "doc", "https://ok.test/a"), ("hop", "doc", "https://ok.test/hop")])
     _drain(ctx, rid, clock)  # the /INJ link 404s and lands in the skipped list
-    fake_llm.reset()  # the section-summary requests of that drain are not the agent's
     with fake_llm.script([
         FakeReply(tool_uses=[("kb_status", {}), ("web_search", {"query": "extra", "category": "general"})]),
         FakeReply(tool_uses=[("peek_page", {"url": f"https://res.test/{INJ}"}),
@@ -628,7 +627,9 @@ def test_web_text_never_reaches_the_model_unwrapped(engine, tmp_path, clock):
         sent += [json.dumps(m["content"]) for m in req["messages"] if m["role"] == "user"]
     assert any(INJ in t for t in sent)  # the content did reach the model, wrapped
     assert not [t for t in sent if INJ in _outside_wrapping(t)]
-    assert INJ not in json.dumps(fake_llm.requests[0]["messages"][0])  # nothing web-derived in the user turn
+    assert any("study aids" in json.dumps(r["system"]) and INJ in json.dumps(r["messages"]) for r in fake_llm.requests)
+    agent_reqs = [r for r in fake_llm.requests if "study aids" not in json.dumps(r["system"])]
+    assert INJ not in json.dumps(agent_reqs[0]["messages"][0])  # nothing web-derived in the user turn
     assert {a.tool: a.outcome for a in _actions(engine, rid)}["web_search"] == "ok"  # None title/snippet tolerated
 
 

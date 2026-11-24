@@ -84,10 +84,12 @@ class SectionNotes(BaseModel):
 
 
 def summary_spend(engine: Engine, roadmap_id) -> float:
-    """What the roadmap's `summarize_document` jobs have cost so far (sum of their results' `cost_usd`)."""
+    """What the roadmap's `summarize_document` jobs have cost so far: each job's result `cost_usd` plus the
+    `spent_usd` a failed attempt left in its payload (see `_remember_spend`)."""
     with Session(engine) as s:
         return float(s.execute(text(
-            "SELECT COALESCE(SUM((result->>'cost_usd')::float), 0) FROM jobs "
+            "SELECT COALESCE(SUM(COALESCE((result->>'cost_usd')::float, 0) "
+            "+ COALESCE((payload->>'spent_usd')::float, 0)), 0) FROM jobs "
             "WHERE roadmap_id = :rid AND type = 'summarize_document'"), {"rid": roadmap_id}).scalar_one())
 
 
@@ -111,8 +113,17 @@ def _prompt(doc: Document, batch: list[Section], want_card: bool) -> str:
     parts = [f"Document title: {wrap(doc.title or doc.url)}", f"Kind: {doc.kind}"]
     parts.append("Also write the card for this video." if want_card else "Set card to null.")
     for sec in batch:
-        parts.append(f"Section id: {sec.id}\nPath: {sec.path or '(top)'}\n{wrap((sec.text or '')[:SECTION_CHARS])}")
+        parts.append(f"Section id: {sec.id}\nPath: {wrap(sec.path) if sec.path else '(top)'}\n{wrap((sec.text or '')[:SECTION_CHARS])}")
     return "\n\n".join(parts)
+
+
+def _remember_spend(engine: Engine, job, spent: float) -> None:
+    """A failed attempt has no result, so its spend is kept in the job's payload (`spent_usd`, added up over the
+    attempts); `summary_spend` counts it, so the budget sees what a retried job already paid."""
+    with session_scope(engine) as s:
+        s.execute(text("UPDATE jobs SET payload = payload || jsonb_build_object('spent_usd', "
+                       "COALESCE((payload->>'spent_usd')::float, 0) + :c) WHERE id = :id"),
+                  {"c": spent, "id": job.id})
 
 
 def _cost(trace) -> float:
@@ -137,6 +148,9 @@ def summarize_document(ctx, job) -> dict:
         s.expunge_all()
     if not sections:
         return done({"skipped": "no_sections"})
+    sections = [sec for sec in sections if sec.summary is None]  # a retry (or re-run) pays only for what is left
+    if not sections:
+        return done({"sections": 0})
     cap = ctx.settings.ingest_summary_budget_usd
     schema = SectionNotes.json_schema()
     n = 0
@@ -144,11 +158,12 @@ def summarize_document(ctx, job) -> dict:
         if summary_spend(ctx.engine, job.roadmap_id) + (_cost(trace) - base) >= cap:
             return done({"sections": n, "skipped": "budget"})
         batch = sections[i:i + BATCH]
-        want_card = i == 0 and doc.kind == "video"
+        want_card = i == 0 and doc.kind == "video" and not doc.summary
         try:
             reply = haiku_json(system=SUMMARY_SYSTEM, prompt=_prompt(doc, batch, want_card), schema=schema,
                                effort="low", max_tokens=4000, span_name="summarize_sections")
         except LLMUnavailable as e:
+            _remember_spend(ctx.engine, job, _cost(trace) - base)
             raise RetryableError(f"summaries: model unavailable: {e}") from e
         n += _store(ctx.engine, doc, batch, reply, want_card)
     return done({"sections": n})

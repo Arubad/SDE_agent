@@ -209,3 +209,30 @@ def test_report_counts_summaries(engine):
         s.scalars(select(Job).where(Job.key == "b")).one().result = {"skipped": "budget", "cost_usd": 0.5}
     with Session(engine) as s:
         assert build_report(s, s.get(Roadmap, doc.roadmap_id))["summaries"]["skipped_budget"] is True
+
+
+def test_retry_after_partial_batch_pays_only_for_the_rest(engine, monkeypatch):
+    from backend.core.trace import start_trace
+
+    doc, ids = _doc(engine)
+    ctx = _ctx(engine)
+    job = ctx.enqueue("summarize_document", {"document_id": str(doc.id)}, (doc.id,), roadmap_id=doc.roadmap_id)
+    # the fake model has no price: charge 0.1 per completed model call
+    monkeypatch.setattr(summaries, "_cost", lambda trace: 0.1 * sum(1 for sp in trace.spans if sp.status == "ok"))
+    start_trace("attempt1")
+    with fake_llm.script([_reply(ids[:BATCH]), FakeReply(stop_reason="refusal")]):
+        with pytest.raises(RetryableError):
+            summarize_document(ctx, job)
+    spent = summaries.summary_spend(engine, doc.roadmap_id)
+    assert spent == pytest.approx(0.1)  # the failed attempt's first batch is counted though the job has no result
+    assert _section(engine, ids[0]).summary and _section(engine, ids[BATCH]).summary is None
+    fake_llm.requests.clear()
+    start_trace("attempt2")
+    with fake_llm.script([_reply(ids[BATCH:])]):
+        out = summarize_document(ctx, job)
+    assert out["sections"] == 2 and len(fake_llm.requests) == 1
+    prompt = fake_llm.requests[0]["messages"][0]["content"]
+    assert f"Section id: {ids[BATCH]}" in prompt and f"Section id: {ids[0]}" not in prompt
+    assert _section(engine, ids[9]).summary == f"S {ids[9]}"
+    assert out["cost_usd"] == pytest.approx(0.1)  # this attempt only; the worker stores it as the result
+    assert summaries.summary_spend(engine, doc.roadmap_id) == pytest.approx(0.1)  # attempt 1's, kept in the payload
