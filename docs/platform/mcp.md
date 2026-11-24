@@ -78,7 +78,9 @@ On top of that the registry has rules, and **deny beats ask beats allow**:
 
 `create_roadmap` and `approve_roadmap` take an optional `idempotency_key`. The same key with the same arguments replays the
 first result; the same key with different arguments is an error; a call that failed releases its key; a claim older
-than 15 minutes can be claimed again.
+than 15 minutes can be claimed again. Every claim carries its own token, and a result is stored or a claim released
+only by the call holding the current token, so a slow first call that finishes or fails after its claim was taken over
+cannot overwrite or delete the live claim.
 
 ## The URL rule
 
@@ -246,7 +248,8 @@ claude mcp add roadmap-knowledge -e PYTHONPATH=<repo> -- <repo>/backend/venv/bin
 
 ## Known limits
 
-- Facts the learner stored stay recallable after consent is revoked; Phase 4 decides between hiding and purging.
+- `learner.recall` and `learner.list_facts` return nothing while personal-memory consent is off, and a memory is at most
+  1000 characters. Revoking consent hides the stored facts; the Memory API (Phase 4) is what purges them.
 - Browser isolation per agent (see the threat model), and the residual risks listed there.
 - `/mcp/*` is for a client on this machine; do not expose it except through the passcode-protected tunnel.
 

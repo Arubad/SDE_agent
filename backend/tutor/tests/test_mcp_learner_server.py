@@ -5,6 +5,7 @@ from sqlalchemy import text
 
 from backend.tutor.db import session_scope
 from backend.tutor.ingest.embed import HashEmbedder
+from backend.tutor.learner import store
 from backend.tutor.mcp.servers.learner import build_learner_server
 from backend.tutor.repo import create_roadmap
 
@@ -170,3 +171,78 @@ async def test_foreign_dimension_facts_never_break_or_leak(engine, server):
     assert (await _call(server, "remember", text=t + " please"))["action"] == "updated"
     hits = await _call(server, "recall", query=t, top_k=20)
     assert hits and all(h["text"] != "foreign" for h in hits)
+
+
+async def test_remember_length_capped(engine, server):
+    _consent(engine, True)
+    with pytest.raises(ToolError, match="at most 1000"):
+        await _call(server, "remember", text="x" * 1001)
+    assert (await _call(server, "remember", text="y" * 1000))["action"] == "inserted"
+
+
+async def test_recall_and_list_empty_without_consent(engine, server):
+    _consent(engine, True)
+    _roadmap(engine)
+    await _call(server, "remember", text="likes videos")
+    await _call(server, "remember", text="likes labs", roadmap="rm")
+    _consent(engine, False)
+    assert await _call(server, "recall", query="videos") == []
+    assert await _call(server, "recall", query="labs", roadmap="rm") == []
+    assert await _call(server, "list_facts") == [] and await _call(server, "list_facts", roadmap="rm") == []
+    assert _count(engine) == 2  # hidden, not deleted: purging is the Memory API's job
+    _consent(engine, True)
+    assert len(await _call(server, "list_facts")) == 1
+
+
+def test_consented_means_personal_consent(engine, clean):
+    assert store.consented(engine) is False
+    _consent(engine, True)
+    assert store.consented(engine) is True and store.get_settings(engine).consent_raw_messages is None
+    _consent(engine, False)
+    assert store.consented(engine) is False
+
+
+def test_purge_facts_deletes_all(engine, clean):
+    _consent(engine, True)
+    emb = HashEmbedder()
+    store.remember(engine, emb, "likes videos about networking", "fact", None)
+    store.remember(engine, emb, "wants the kubernetes certification", "goal", None)
+    _consent(engine, False)  # purge neither checks nor changes consent
+    assert store.purge_facts(engine) == 2 and _count(engine) == 0
+    assert store.consented(engine) is False and store.purge_facts(engine) == 0
+
+
+def test_update_fact_redacts_reembeds_and_keeps_history(engine, clean):
+    emb = HashEmbedder()
+    _consent(engine, True)
+    fid = store.remember(engine, emb, "prefers long lectures", "preference", None)["id"]
+    out = store.update_fact(engine, emb, fid, "prefers short labs, mail a@b.co", "goal")
+    assert out == {"id": fid, "action": "updated"}
+    with session_scope(engine) as s:
+        row = s.execute(text("SELECT kind, text, provenance, embedder FROM learner_facts")).one()
+    assert row.kind == "goal" and "a@b.co" not in row.text and row.embedder == store.embedder_name(emb)
+    assert row.provenance["history"][0]["text"] == "prefers long lectures"
+    assert [h["text"] for h in store.recall(engine, emb, "short labs", 1, None)] == [row.text]
+    with pytest.raises(ValueError, match="at most 1000"):
+        store.update_fact(engine, emb, fid, "x" * 1001, "fact")
+    with pytest.raises(ValueError, match="No fact"):
+        store.update_fact(engine, emb, "00000000-0000-0000-0000-000000000000", "t", "fact")
+    with pytest.raises(ValueError, match="No fact 'nope'"):
+        store.update_fact(engine, emb, "nope", "t", "fact")
+    _consent(engine, False)
+    with pytest.raises(ValueError, match="Personal memory is off"):
+        store.update_fact(engine, emb, fid, "t", "fact")
+
+
+def test_set_mastery_next_review_at_and_provenance(engine, clean):
+    from datetime import datetime, timezone
+    _roadmap(engine)
+    due = datetime(2026, 12, 1, tzinfo=timezone.utc)
+    out = store.set_mastery(engine, "rm", "a", 0.5, None, next_review_at=due)
+    assert out["next_review_at"] == due.isoformat()
+    assert store.set_mastery(engine, "rm", "a", 0.6, None)["next_review_at"] == due.isoformat()  # kept
+    _consent(engine, True)
+    fid = store.remember(engine, HashEmbedder(), "curated note", "fact", None, {"source": "curator"})["id"]
+    with session_scope(engine) as s:
+        assert s.execute(text("SELECT provenance FROM learner_facts")).scalar() == {"source": "curator"}
+    assert store.skills(SPEC)[1]["id"] == "b" and fid

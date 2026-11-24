@@ -516,7 +516,12 @@ def chunk_embed(ctx, job: Job) -> dict:
 
 def recheck(ctx, job: Job) -> dict:
     """Is the resource still there, and did it change? Records `{status: ok|changed|dead, at}` on the
-    resource's own document (`meta.recheck`) and on `Resource.stats.recheck`."""
+    resource's own document (`meta.recheck`) and on `Resource.stats.recheck`.
+
+    A page that was ingested through the browser (`meta.rendered == "browser"`) still answers `needs_browser`
+    to a plain fetch. That is not a dead link: it is recorded `{status: ok, outcome: needs_browser}`, meaning
+    reachable, with its content not compared (a plain fetch cannot see the rendered text). Any other
+    `needs_browser` outcome is `dead`."""
     res = _resource(ctx.engine, job.payload["resource_id"])
     yt = ctx.net.youtube
     vid, lst = parse_youtube(res.url)
@@ -530,7 +535,13 @@ def recheck(ctx, job: Job) -> dict:
         outcome = fr.outcome
         if fr.outcome == "error" and job.attempts < job.max_attempts:
             raise RetryableError(fr.reason or "fetch error")
-        if fr.outcome != "ok":
+        if fr.outcome == "needs_browser":
+            with Session(ctx.engine) as s:
+                kept = s.execute(select(Document.status, Document.meta).where(
+                    Document.roadmap_id == res.roadmap_id, Document.url == res.url)).first()
+            rendered = kept is not None and kept.status == "ok" and (kept.meta or {}).get("rendered") == "browser"
+            status = "ok" if rendered else "dead"
+        elif fr.outcome != "ok":
             status = "dead"
         else:
             with Session(ctx.engine) as s:

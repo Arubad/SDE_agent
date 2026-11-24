@@ -67,32 +67,53 @@ def approval_message(spec: dict, choices: dict[str, str | None]) -> str:
     return text.rstrip("\n")
 
 
+def _find(session, slug: str, lock: bool = False):
+    rm = get_roadmap_by_slug(session, slug, lock=lock)
+    if rm is None:
+        raise ValueError(f"No roadmap '{slug}'")
+    return rm
+
+
+def _resolve_choices(engine: Engine, net, slug: str) -> dict[str, str | None]:
+    """Look up each resource's top candidate with no row lock held (it can take network time)."""
+    with session_scope(engine) as s:
+        r = _find(s, slug)
+        spec = normalize_spec(r.spec, r.source_text)
+    return top_choices([x.model_dump(mode="json") for x in resolve_spec(spec, net)])
+
+
+def _lock_and_approve(engine: Engine, settings, slug: str, choices: dict[str, str | None]) -> dict:
+    """Take the row lock, re-check the roadmap is still `parsed`, then approve. A status that changed since
+    the choices were made is a Conflict."""
+    with session_scope(engine) as s:
+        r = _find(s, slug, lock=True)
+        if r.status != "parsed":
+            raise service.Conflict(f"Roadmap is '{r.status}'; it can only be approved while parsed.")
+        service.approve(s, r, normalize_spec(r.spec, r.source_text), choices, agent=settings.ingest_agent)
+        return {"status": "ingesting", "slug": slug, "roadmap_id": r.id}
+
+
+def _approve_impl(engine: Engine, net, settings, on_settled, slug: str,
+                  choices: dict[str, str | None] | None = None) -> dict:
+    """Mirror the HTTP approve route. Without `choices` the resources are resolved again (no model call)
+    before the row lock is taken, so the lock is held only for the re-check and the approve."""
+    try:
+        if choices is None:
+            choices = _resolve_choices(engine, net, slug)
+        out = _lock_and_approve(engine, settings, slug, choices)
+    except service.Conflict as exc:
+        raise ValueError(str(exc)) from exc
+    roadmap_id = out.pop("roadmap_id", None)
+    if roadmap_id is not None:
+        maybe_settle(engine, roadmap_id, on_settled)
+    return out
+
+
 def build_ingestion_server(engine: Engine, net, settings, *, on_settled) -> FastMCP:
     server = FastMCP("ingestion")
 
-    def _find(session, slug: str, lock: bool = False):
-        rm = get_roadmap_by_slug(session, slug, lock=lock)
-        if rm is None:
-            raise ValueError(f"No roadmap '{slug}'")
-        return rm
-
     def _approve(slug: str, choices: dict[str, str | None] | None) -> dict:
-        """Mirror the HTTP approve route. Without `choices` the resources are resolved again (no model call)."""
-        try:
-            with session_scope(engine) as s:
-                r = _find(s, slug, lock=True)
-                if r.status != "parsed":
-                    raise service.Conflict(
-                        f"Roadmap is '{r.status}'; it can only be approved while parsed.")
-                spec = normalize_spec(r.spec, r.source_text)
-                if choices is None:
-                    choices = top_choices([x.model_dump(mode="json") for x in resolve_spec(spec, net)])
-                service.approve(s, r, spec, choices, agent=settings.ingest_agent)
-                roadmap_id = r.id
-        except service.Conflict as exc:
-            raise ValueError(str(exc)) from exc
-        maybe_settle(engine, roadmap_id, on_settled)
-        return {"status": "ingesting", "slug": slug}
+        return _approve_impl(engine, net, settings, on_settled, slug, choices)
 
     def _create_and_parse(slug: str, title: str, source_text: str) -> dict:
         try:
@@ -156,10 +177,13 @@ def build_ingestion_server(engine: Engine, net, settings, *, on_settled) -> Fast
     async def wait_for_ingestion(slug: str, ctx: Context,
                                  timeout_s: int = Field(600, ge=10, le=3600)) -> dict:
         """Wait until ingestion is finished (ready, ready_with_gaps or failed) or the timeout passes, reporting
-        progress. done_jobs counts jobs in a final state (done or dead)."""
+        progress. A roadmap not yet approved (draft or parsed) is returned at once. done_jobs counts jobs in a
+        final state (done or dead)."""
         deadline = anyio.current_time() + timeout_s
         while True:
             prog = await anyio.to_thread.run_sync(_status, slug)
+            if prog["status"] in service.PARSE_STATUSES:  # no jobs will run until it is approved
+                return prog
             by_state: dict[str, int] = {}
             for states in prog["jobs"].values():
                 for state, n in states.items():

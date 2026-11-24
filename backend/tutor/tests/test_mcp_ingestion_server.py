@@ -220,7 +220,7 @@ async def test_failed_call_releases_key(server, engine, monkeypatch):
 async def test_running_claim_is_reported(server, engine):
     from backend.tutor.mcp.idempotency import args_hash
     with session_scope(engine) as s:
-        s.execute(text("INSERT INTO mcp_idempotency (tool, key, args_hash) VALUES ('approve_roadmap', 'k', :h)"),
+        s.execute(text("INSERT INTO mcp_idempotency (tool, key, args_hash, claim_token) VALUES ('approve_roadmap', 'k', :h, 'tok')"),
                   {"h": args_hash({"slug": "x"})})
     async with Client(server) as c:
         with pytest.raises(ToolError, match="still running"):
@@ -232,3 +232,50 @@ def test_top_choices_highest_score_first_tie_and_none():
                                                {"url": "u3", "score": 3}]},
            {"resource_id": "b", "candidates": []}]
     assert top_choices(res) == {"a": "u2", "b": None}
+
+
+async def test_wait_for_ingestion_returns_at_once_when_parsed(server, engine):
+    import time
+    async with Client(server) as c:
+        await c.call_tool("create_roadmap", _args())  # no elicitation handler: stays parsed
+        t0 = time.monotonic()
+        data = (await c.call_tool("wait_for_ingestion", {"slug": "k8s", "timeout_s": 60})).data
+    assert data["status"] == "parsed" and time.monotonic() - t0 < 5  # POLL_S is 2s and the timeout 60s
+
+
+def test_approve_resolves_before_taking_the_row_lock(engine, net, settings, monkeypatch):
+    order = []
+    monkeypatch.setattr(ingestion, "_resolve_choices", lambda *a: order.append("resolve") or {})
+    monkeypatch.setattr(ingestion, "_lock_and_approve", lambda *a: order.append("lock") or {"status": "ingesting"})
+    assert ingestion._approve_impl(engine, net, settings, None, "rm") == {"status": "ingesting"}
+    assert order == ["resolve", "lock"]
+
+
+async def test_resolution_runs_without_the_row_lock(server, engine, net, settings, monkeypatch):
+    async with Client(server) as c:
+        await c.call_tool("create_roadmap", _args())
+    held = []
+    real = ingestion._resolve_choices
+
+    def watch(*a):
+        with session_scope(engine) as s:  # a locked row would make NOWAIT fail
+            held.append(s.execute(text("SELECT id FROM roadmaps WHERE slug = 'k8s' FOR UPDATE NOWAIT")).first())
+        return real(*a)
+
+    monkeypatch.setattr(ingestion, "_resolve_choices", watch)
+    assert ingestion._approve_impl(engine, net, settings, settled_hook(engine, settings), "k8s")["status"] == "ingesting"
+    assert held and held[0] is not None
+
+
+def test_status_change_during_resolution_is_a_conflict(clean, engine, net, settings, monkeypatch):
+    def resolve_then_change(*a):
+        with session_scope(engine) as s:
+            s.execute(text("UPDATE roadmaps SET status = 'failed' WHERE slug = 'k8s'"))
+        return {}
+
+    with session_scope(engine) as s:
+        from backend.tutor.repo import create_roadmap as mk
+        mk(s, slug="k8s", title="K", source_text="x").status = "parsed"
+    monkeypatch.setattr(ingestion, "_resolve_choices", resolve_then_change)
+    with pytest.raises(ValueError, match="only be approved while parsed"):
+        ingestion._approve_impl(engine, net, settings, None, "k8s")
