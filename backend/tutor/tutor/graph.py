@@ -12,6 +12,8 @@ Shape: START -> coordinator -> <group> ... -> END.
   wires its own way out (e.g. a conditional edge).
 - To replace a placeholder (Tasks 7-11), change that group's adder in GROUPS, e.g. a `session_start` group of
   `session_start_prepare` -> `session_start_ask` returns `Group("session_start_prepare", "session_start_ask")`.
+  A group that routes onward itself returns `Group(entry, None, wire)`: `wire(builder, entries)` runs once every
+  group exists (`entries`: group name -> entry node), as `session_start` does for `planner` and `assessor`.
   Routes and FOLLOWS keep naming the group.
 - `node(name, fn)` wraps every node: it emits `{"type": "node", "name"}` and runs `fn` inside the
   `node:<name>` trace span. An interrupt node's `fn` must call `interrupt()` first (D8): LangGraph re-runs it from
@@ -62,6 +64,9 @@ class TutorDeps:
 class Group:
     entry: str
     exit: str | None  # connected to FOLLOWS[group] or END by build_tutor_graph; None: the group wires its exits
+    # With exit None: called by build_tutor_graph once every group exists, as `wire(builder, entries)` where
+    # `entries` maps each group name to its entry node, so the group can route to other groups.
+    wire: Callable[[StateGraph, dict[str, str]], None] | None = None
 
 
 NodeFn = Callable[[TutorState], Awaitable[dict | None]]
@@ -137,8 +142,14 @@ def _placeholder(name: str) -> Adder:
     return add
 
 
+def add_session_start(builder: StateGraph, deps: TutorDeps) -> Group:
+    from backend.tutor.tutor.session_start import add_session_start as add  # session_start imports this module
+
+    return add(builder, deps)
+
+
 GROUPS: dict[str, Adder] = {
-    "session_start": _placeholder("session_start"),
+    "session_start": add_session_start,
     "planner": _placeholder("planner"),
     "teacher": _placeholder("teacher"),
     "assessor": _placeholder("assessor"),
@@ -153,12 +164,17 @@ def build_tutor_graph(deps: TutorDeps, groups: Mapping[str, Adder] | None = None
     coordinator = add_coordinator(builder, deps)
     entries: dict[str, str] = {}
     exits: dict[str, str | None] = {}
+    wired: list[Group] = []
     for name, add in {**GROUPS, **(groups or {})}.items():
         group = add(builder, deps)
         entries[name], exits[name] = group.entry, group.exit
+        if group.wire is not None:
+            wired.append(group)
     builder.add_edge(START, coordinator.entry)
     targets = set(ROUTE_MAP.values()) | set(ACTION_MAP.values())
     builder.add_conditional_edges(coordinator.exit, route_target, {END: END, **{t: entries[t] for t in targets}})
+    for group in wired:
+        group.wire(builder, entries)
     for name, exit_node in exits.items():
         if exit_node is not None:
             builder.add_edge(exit_node, entries[FOLLOWS[name]] if name in FOLLOWS else END)

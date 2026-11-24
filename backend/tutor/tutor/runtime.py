@@ -6,7 +6,7 @@
   `SessionEnded`.
 - Turns: `{"text": str}` (redacted before it enters graph state), `{"action": Action}` (plus `"topic"` with
   `research`), or `{"resume": value}`, which needs a pending interrupt whose `kind` has a validator in RESUME_SHAPES
-  that accepts `value`; otherwise `BadResume`, before the graph runs, so state is unchanged. The value is then
+  that accepts `value` (a validator may take `(value, pending)`); otherwise `BadResume`, before the graph runs, so state is unchanged. The value is then
   `redact_obj`ed (its strings; dict keys are not learner text) before the graph sees it.
 - A text or action turn while an interrupt is pending abandons it (R5): the new input starts a fresh run from
   START; the state before the interrupt is kept, and `pending()` is None afterwards. LangGraph does exactly this
@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import uuid
 import weakref
 from collections.abc import AsyncIterator, Callable
@@ -36,10 +37,21 @@ from backend.tutor.models import Roadmap, TutorSession
 from backend.tutor.telemetry import export_trace
 from backend.tutor.tutor.budget import OUTAGE_MESSAGE, BudgetExceeded
 from backend.tutor.tutor.graph import TutorDeps
+from backend.tutor.tutor.session_start import resume_ok
 from backend.tutor.tutor.state import Action, TurnEvent
 
 # Interrupt value `kind` -> a check of a resume value's shape. Later tasks register their kinds here.
-RESUME_SHAPES: dict[str, Callable[[Any], bool]] = {}
+# A validator takes `(value)` or `(value, pending)`; the latter also sees the pending interrupt value, for answers
+# that must match what was offered (e.g. a choice among the card's options).
+RESUME_SHAPES: dict[str, Callable[..., bool]] = {"session_start": resume_ok}
+
+
+def _accepts(valid: Callable[..., bool], value: Any, pending: Any) -> bool:
+    try:
+        takes_pending = len(inspect.signature(valid).parameters) >= 2
+    except (TypeError, ValueError):
+        takes_pending = False
+    return valid(value, pending) if takes_pending else valid(value)
 
 
 class Busy(Exception):
@@ -140,7 +152,7 @@ class TutorRuntime:
             raise BadResume("nothing is waiting for an answer")
         kind = pending.get("kind") if isinstance(pending, dict) else None
         valid = RESUME_SHAPES.get(kind)
-        if valid is None or not valid(value):
+        if valid is None or not _accepts(valid, value, pending):
             raise BadResume(f"that answer does not fit the pending {kind!r} question")
 
     async def _finish(self, session_id: str, trace: Trace) -> None:

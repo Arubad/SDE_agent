@@ -97,9 +97,8 @@ def test_assessor_may_only_search_the_roadmap():
     assert load_registry(Settings().mcp_registry, {}).agents["assessor"] == ("kb.search",)
 
 
-@pytest.mark.parametrize("action,node", [("start", "session_start"), ("continue", "teacher"), ("quiz", "assessor"),
-                                         ("plan", "planner"), ("research", "researcher"),
-                                         ("recap", "session_start")])
+@pytest.mark.parametrize("action,node", [("continue", "teacher"), ("quiz", "assessor"),
+                                         ("plan", "planner"), ("research", "researcher")])
 async def test_buttons_route_without_model(rt, sid, action, node):
     events = await run(rt, sid, {"action": action})
     assert nodes(events) == ["coordinator", node]
@@ -131,7 +130,7 @@ async def test_classifier_sees_the_last_four_messages(rt, sid):
 
 
 @pytest.mark.parametrize("route,node", [("continue_lesson", "teacher"), ("question", "teacher"),
-                                        ("new_topic", "researcher"), ("recap", "session_start")])
+                                        ("new_topic", "researcher")])
 async def test_text_routes(rt, sid, route, node):
     with fake_llm.script([FakeReply(json={"route": route})]):
         events = await run(rt, sid, {"text": f"please {route}"})
@@ -316,7 +315,7 @@ async def test_text_abandons_a_pending_interrupt(engine, clear_memo):  # noqa: F
     rt, sid = await _asked(engine)
     with fake_llm.script([FakeReply(json={"route": "recap"})]):
         events = await run(rt, sid, {"text": "recap please"})
-    assert nodes(events) == ["coordinator", "session_start"] and interrupts(events) == []
+    assert nodes(events) == ["coordinator", "session_start_prepare"] and interrupts(events) == []
     assert await rt.pending(sid) is None
     assert [m["content"] for m in (await rt.state(sid))["messages"]] == ["first message", "recap please"]
 

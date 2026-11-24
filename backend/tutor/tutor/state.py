@@ -33,6 +33,7 @@ class TutorState(TypedDict, total=False):
     asked: list[str]  # question keys asked this session
     mastery_log: list[dict]
     proposal: dict | None
+    session_next: str | None  # session_start's own routing: "planner", "assessor" or None (end the turn)
     allowed_urls: list[str]
     notice: str | None
 

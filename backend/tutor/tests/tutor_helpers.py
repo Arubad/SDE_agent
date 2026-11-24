@@ -5,6 +5,7 @@ Import the fixtures into a test module (`from backend.tutor.tests.tutor_helpers 
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -104,3 +105,22 @@ def route_requests(requests: list[dict]) -> list[dict]:
     """The fake model requests whose output schema is the coordinator's `TutorRoute`."""
     return [r for r in requests
             if ((r.get("output_config") or {}).get("format") or {}).get("schema", {}).get("title") == "TutorRoute"]
+
+
+def add_ended_session(engine, session_id: str, *, summary: str | None = None, title: str | None = None,
+                      ended_at: datetime | None = None) -> str:
+    """An ended session on the same roadmap as `session_id`; returns its id."""
+    with session_scope(engine) as s:
+        rm_id = s.get(TutorSession, uuid.UUID(session_id)).roadmap_id
+        row = TutorSession(roadmap_id=rm_id, mode="tutor", status="ended", summary=summary, title=title,
+                           ended_at=ended_at or datetime.now(timezone.utc))
+        s.add(row)
+        s.flush()
+        return str(row.id)
+
+
+class Enqueued(list):
+    """A `JobContext.enqueue`-shaped callable recording `(type, payload, key_parts, roadmap_id)`."""
+
+    def __call__(self, type, payload, key_parts=(), *, roadmap_id):
+        self.append((type, payload, tuple(key_parts), roadmap_id))
