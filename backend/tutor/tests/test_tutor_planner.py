@@ -37,6 +37,10 @@ MON = date(2026, 11, 23)
 SETTINGS = {"weekly_hours": None, "session_minutes": 45, "study_days": [0, 1, 2, 3, 4, 5, 6], "deadline": None}
 
 
+async def _answer(rt, sid, approved):
+    return await run(rt, sid, {"resume": {"approved": approved, "card": (await rt.pending(sid))["id"]}})
+
+
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
@@ -338,11 +342,11 @@ async def test_big_replan_waits_for_approval_and_shows_payload(engine, clear_mem
     events = await run(rt, sid, {"action": "plan"})
     assert nodes(events) == ["coordinator", "planner", "planner_approve"] and not _plan_events(events)
     (card,) = interrupts(events)
-    assert card == {"kind": "approval", "action": "replace_plan",
+    assert card == {"kind": "approval", "id": card["id"], "action": "replace_plan",
                     "summary": "Your plan changed: 2 skills differ in the next 5 sessions. Use the new plan?",
                     "payload": {"old": [[c] for c in "abcde"], "new": [[c] for c in "cdef"], "version": 2}}
     assert _statuses(engine, slug) == [(1, "active"), (2, "proposed")]
-    events = await run(rt, sid, {"resume": {"approved": False}})
+    events = await _answer(rt, sid, False)
     (ev,) = _plan_events(events)
     assert ev["version"] == 1 and ev["today"]["session"]["skills"] == ["a"]
     assert _firsts(active_plan(engine, slug)) == list("abcdef")
@@ -355,18 +359,21 @@ async def test_big_replan_waits_for_approval_and_shows_payload(engine, clear_mem
 async def test_approving_makes_the_proposal_active(engine, clear_memo):  # noqa: F811
     rt, sid, slug = await _big(engine)
     await run(rt, sid, {"action": "plan"})
-    events = await run(rt, sid, {"resume": {"approved": True}})
+    events = await _answer(rt, sid, True)
     (ev,) = _plan_events(events)
     assert ev["version"] == 2 and ev["today"]["session"]["skills"] == ["c"]
     assert _firsts(active_plan(engine, slug)) == list("cdef")
     assert _statuses(engine, slug) == [(1, "superseded"), (2, "active")]
 
 
-@pytest.mark.parametrize("bad", [{}, {"approved": "yes"}, {"approved": 1}, {"approved": True, "x": 1},
-                                 {"choice": "skip"}, True])
+@pytest.mark.parametrize("bad", [{}, {"approved": True}, {"approved": "yes", "card": "ID"}, {"approved": 1, "card": "ID"},
+                                 {"approved": True, "card": "ID", "x": 1}, {"approved": True, "card": "other"},
+                                 {"approved": True, "card": 1}, {"choice": "skip"}, True])
 async def test_approval_resume_shape_is_strict(engine, clear_memo, bad):  # noqa: F811
     rt, sid, _ = await _big(engine)
-    await run(rt, sid, {"action": "plan"})
+    (card,) = interrupts(await run(rt, sid, {"action": "plan"}))
+    if isinstance(bad, dict):
+        bad = {k: card["id"] if v == "ID" else v for k, v in bad.items()}
     with pytest.raises(BadResume):
         await run(rt, sid, {"resume": bad})
     assert await rt.pending(sid) is not None

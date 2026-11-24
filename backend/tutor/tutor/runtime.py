@@ -48,9 +48,11 @@ from backend.tutor.tutor.state import Action, TurnEvent
 # Interrupt value `kind` -> a check of a resume value's shape. Later tasks register their kinds here.
 # A validator takes `(value)` or `(value, pending)`; the latter also sees the pending interrupt value, for answers
 # that must match what was offered (e.g. a choice among the card's options).
-def approval_ok(value: Any) -> bool:
-    """An approval interrupt resumes with exactly `{"approved": bool}` (D8)."""
-    return isinstance(value, dict) and set(value) == {"approved"} and isinstance(value["approved"], bool)
+def approval_ok(value: Any, pending: Any) -> bool:
+    """An approval interrupt resumes with exactly `{"approved": bool, "card": <the pending card's id>}` (D8, R10):
+    an answer to an earlier card is not an answer to this one."""
+    return (isinstance(value, dict) and set(value) == {"approved", "card"} and isinstance(value["approved"], bool)
+            and isinstance(pending, dict) and isinstance(pending.get("id"), str) and value["card"] == pending["id"])
 
 
 RESUME_SHAPES: dict[str, Callable[..., bool]] = {"session_start": resume_ok, "approval": approval_ok,

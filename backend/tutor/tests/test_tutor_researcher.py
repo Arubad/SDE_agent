@@ -19,7 +19,9 @@ from backend.tutor.tests.tutor_helpers import (
     replies,
     run,
 )
-from backend.tutor.tutor.researcher import MAX_RESOURCES, RESEARCH_SYSTEM, slug_for, strip_links
+from backend.tutor.roadmap.parse import extract_urls
+from backend.tutor.tutor.runtime import BadResume
+from backend.tutor.tutor.researcher import MAX_RESOURCES, RESEARCH_SYSTEM, count_resources, slug_for, strip_links
 from backend.tutor.untrusted import wrap
 
 pytestmark = pytest.mark.anyio
@@ -69,6 +71,11 @@ def _research(md=MD):
     return fake_llm.script([FakeReply(tool_uses=[("web__search", {"query": "probes"})]), FakeReply(text=md)])
 
 
+async def _answer(rt, sid, approved=True):
+    """Answer the pending card (its id is part of the answer, R10)."""
+    return await run(rt, sid, {"resume": {"approved": approved, "card": (await rt.pending(sid))["id"]}})
+
+
 async def _to_first_card(rt, sid, topic="kubernetes probes"):
     with _research():
         return await run(rt, sid, {"action": "research", "topic": topic})
@@ -100,15 +107,15 @@ async def test_two_approvals_then_ingest_through_gateway(engine, clear_memo):  #
     gw = _gateway(engine)
     rt, sid = _rt(engine, gw), new_session(engine)
     (card,) = interrupts(await _to_first_card(rt, sid))
-    events = await run(rt, sid, {"resume": {"approved": True}})
+    events = await _answer(rt, sid, True)
     (card2,) = interrupts(events)
     assert nodes(events) == ["research_approve_create", "research_create", "research_approve_ingest"]
     slug = card["payload"]["args"]["slug"]
     key = card["payload"]["args"]["idempotency_key"].removesuffix(":create")
-    assert card2 == {"kind": "approval", "action": "approve_roadmap", "summary": "Ingest 'K8s Ops' (2 resources)",
+    assert card2 == {"kind": "approval", "id": card2["id"], "action": "approve_roadmap", "summary": "Ingest 'K8s Ops' (2 resources)",
                      "payload": {"tool": "ingest.approve_roadmap",
                                  "args": {"slug": slug, "idempotency_key": f"{key}:approve"}, "spec": PARSED}}
-    events = await run(rt, sid, {"resume": {"approved": True}})
+    events = await _answer(rt, sid, True)
     assert replies(events) == ["Ingesting 'K8s Ops'. It will appear under Roadmaps; "
                                "I'll keep teaching from the web meanwhile."]
     assert [e for e in events if e["type"] == "roadmap_created"] == [{"type": "roadmap_created", "slug": slug}]
@@ -126,8 +133,8 @@ async def test_approver_refuses_changed_args(engine, clear_memo):  # noqa: F811
     gw = _gateway(engine)
     rt, sid = _rt(engine, gw), new_session(engine)
     await _to_first_card(rt, sid)
-    await run(rt, sid, {"resume": {"approved": True}})
-    await run(rt, sid, {"resume": {"approved": True}})
+    await _answer(rt, sid, True)
+    await _answer(rt, sid, True)
     for name, payload, answer in gw.approvals:
         assert answer is True
         approver = next(c[2] for c in gw.calls if c[0] == name).approve
@@ -140,7 +147,7 @@ async def test_decline_creates_nothing(engine, clear_memo):  # noqa: F811
     gw = _gateway(engine)
     rt, sid = _rt(engine, gw), new_session(engine)
     (card,) = interrupts(await _to_first_card(rt, sid))
-    events = await run(rt, sid, {"resume": {"approved": False}})
+    events = await _answer(rt, sid, False)
     assert replies(events) == ["OK, nothing was created."]
     assert not any(c[0].startswith("ingest") for c in gw.calls) and gw.approvals == []
     with session_scope(engine) as s:
@@ -153,8 +160,8 @@ async def test_decline_at_second_card_keeps_draft(engine, clear_memo):  # noqa: 
     gw = _gateway(engine)
     rt, sid = _rt(engine, gw), new_session(engine)
     (card,) = interrupts(await _to_first_card(rt, sid))
-    await run(rt, sid, {"resume": {"approved": True}})
-    events = await run(rt, sid, {"resume": {"approved": False}})
+    await _answer(rt, sid, True)
+    events = await _answer(rt, sid, False)
     assert replies(events) == ["OK, nothing was ingested. 'K8s Ops' stays in Roadmaps as a draft you can "
                                "approve later."]
     assert [c[0] for c in gw.calls if c[0].startswith("ingest")] == ["ingest.create_roadmap"]
@@ -166,7 +173,7 @@ async def test_decline_at_second_card_keeps_draft(engine, clear_memo):  # noqa: 
 async def test_create_error_ends_the_turn(engine, clear_memo):  # noqa: F811
     rt, sid = _rt(engine, _gateway(engine, create_error="boom")), new_session(engine)
     await _to_first_card(rt, sid)
-    events = await run(rt, sid, {"resume": {"approved": True}})
+    events = await _answer(rt, sid, True)
     assert replies(events) == ["I couldn't create the roadmap: boom"] and not interrupts(events)
     assert (await rt.state(sid)).get("proposal") is None
 
@@ -174,8 +181,8 @@ async def test_create_error_ends_the_turn(engine, clear_memo):  # noqa: F811
 async def test_ingest_error_is_reported(engine, clear_memo):  # noqa: F811
     rt, sid = _rt(engine, _gateway(engine, approve_error="queue down")), new_session(engine)
     await _to_first_card(rt, sid)
-    await run(rt, sid, {"resume": {"approved": True}})
-    events = await run(rt, sid, {"resume": {"approved": True}})
+    await _answer(rt, sid, True)
+    events = await _answer(rt, sid, True)
     assert replies(events) == ["I couldn't start ingesting 'K8s Ops': queue down"]
     assert not [e for e in events if e["type"] == "roadmap_created"]
 
@@ -244,8 +251,50 @@ async def test_strip_links_rules():
     assert out == "[A](https://a.example/1) and B see . and https://a.example/1.\nP"
 
 
-async def test_strip_links_caps_resources():
+STRIP_FORMS = [
+    "- [see http://evil.example/x](https://a.example/1)",
+    '- [T](https://a.example/1 "http://evil.example/y")',
+    "- [T](<https://a.example/1> 'x') HTTPS://evil.example/x and Http://evil.example/y.",
+    "- [HTTPS://evil.example/x](HTTPS://evil.example/x)",
+    "- [T](https://a.example/1) ftp://evil.example/f and [U](javascript://evil.example/%0Aalert(1))",
+    "- <HTTP://evil.example/z> [x]( https://a.example/1 )[y](http://evil.example/q)",
+]
+
+
+@pytest.mark.parametrize("text", STRIP_FORMS)
+async def test_strip_links_leaves_only_allowed_urls(text):
+    out = await strip_links(text, {"https://a.example/1"}, _Policy())
+    assert "evil" not in out.lower()
+    assert set(extract_urls(out)) <= {"https://a.example/1"}
+    assert not re.findall(r"[a-z][a-z0-9+.-]*://(?!a\.example/1)", out, re.I)
+    assert ("https://a.example/1" in out) == ("a.example" in text) and "\"" not in out and "'x'" not in out
+
+
+async def test_strip_links_caps_resources_by_url_not_line():
     urls = {f"https://a.example/{i}" for i in range(20)}
-    text = "### S\n" + "\n".join(f"- [R{i}](https://a.example/{i})" for i in range(20))
+    text = "### S\n- " + " ".join(f"[R{i}](https://a.example/{i})" for i in range(20)) + "\n- [R0](https://a.example/0)"
     out = await strip_links(text, urls, _Policy())
-    assert out.count("](") == MAX_RESOURCES and "R11" in out and "R12" not in out and out.startswith("### S")
+    assert len(extract_urls(out)) == MAX_RESOURCES == count_resources(out)
+    assert "[R11](" in out and "[R12](" not in out and "R12" in out and out.startswith("### S")
+    assert out.endswith("[R0](https://a.example/0)")  # a repeat of a kept URL adds no resource
+
+
+async def test_card_counts_what_the_parser_will_make():
+    md = "# T\n### S\n- [A](https://a.example/1) [B](https://a.example/2) https://a.example/3 [A](https://a.example/1)"
+    assert count_resources(md) == 3
+
+
+async def test_approval_answer_must_name_the_pending_card(engine, clear_memo):  # noqa: F811
+    rt, sid = _rt(engine, _gateway(engine)), new_session(engine)
+    (card,) = interrupts(await _to_first_card(rt, sid))
+    old = {"resume": {"approved": True, "card": card["id"]}}
+    await run(rt, sid, old)
+    pending = await rt.pending(sid)
+    assert pending["action"] == "approve_roadmap" and pending["id"] != card["id"]
+    before = await rt.state(sid)
+    for bad in (old, {"resume": {"approved": True}}, {"resume": {"approved": True, "card": 5}},
+                {"resume": {"approved": "yes", "card": pending["id"]}},
+                {"resume": {"approved": True, "card": pending["id"], "x": 1}}):
+        with pytest.raises(BadResume):
+            await run(rt, sid, bad)
+    assert await rt.state(sid) == before and await rt.pending(sid) == pending

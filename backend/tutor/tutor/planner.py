@@ -2,7 +2,7 @@
 
 Group `planner`: `planner` (computes the plan; reads and writes the plan tables) -> `planner_approve` only when the
 change is big, else the turn ends. `planner_approve` interrupts first (D8) with an approval card and resumes with
-`{"approved": bool}` (`RESUME_SHAPES["approval"]`). Enter the group through `ENTRY` from any node (Task 10 does after
+`{"approved": bool, "card": <the card's id>}` (`RESUME_SHAPES["approval"]`). Enter the group through `ENTRY` from any node (Task 10 does after
 grading). The planner owns `state.today` and overwrites `state.proposal` unconditionally.
 
 Plan shape: `{"sessions": [{"index", "date", "skills": [id], "minutes"}], "skipped_mastered": [id],
@@ -11,6 +11,7 @@ Plan shape: `{"sessions": [{"index", "date", "skills": [id], "minutes"}], "skipp
 from __future__ import annotations
 
 import math
+import uuid
 from collections.abc import Iterator
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -297,7 +298,7 @@ def add_planner(builder: StateGraph, deps: TutorDeps) -> Group:
             proposed = save_plan(engine, slug, new, "proposed")
             n = replaced_count(old, new)
             return {"proposal": {
-                "kind": "approval", "action": "replace_plan",
+                "kind": "approval", "id": uuid.uuid4().hex, "action": "replace_plan",
                 "summary": f"Your plan changed: {n} skills differ in the next {HORIZON} sessions. Use the new plan?",
                 "payload": {"old": _next_skills(old), "new": _next_skills(new), "version": proposed}}}
         if old is None or _sequence(old) != _sequence(new):
