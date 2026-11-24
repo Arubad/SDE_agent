@@ -155,6 +155,12 @@ def add_planner(builder: StateGraph, deps: TutorDeps) -> Group:
     return add(builder, deps)
 
 
+def add_assessor(builder: StateGraph, deps: TutorDeps) -> Group:
+    from backend.tutor.tutor.assessor import add_assessor as add  # assessor imports this module
+
+    return add(builder, deps)
+
+
 def add_teacher(builder: StateGraph, deps: TutorDeps) -> Group:
     from backend.tutor.tutor.teacher import add_teacher as add  # teacher imports this module
 
@@ -165,7 +171,7 @@ GROUPS: dict[str, Adder] = {
     "session_start": add_session_start,
     "planner": add_planner,
     "teacher": add_teacher,
-    "assessor": _placeholder("assessor"),
+    "assessor": add_assessor,
     "researcher": _placeholder("researcher"),
     "exercise_stub": add_exercise_stub,
 }

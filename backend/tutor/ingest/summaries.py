@@ -93,7 +93,7 @@ def summary_spend(engine: Engine, roadmap_id) -> float:
             "WHERE roadmap_id = :rid AND type = 'summarize_document'"), {"rid": roadmap_id}).scalar_one())
 
 
-def _valid_question(q: dict) -> dict | None:
+def valid_question(q: dict) -> dict | None:
     kind, answer = q.get("type"), str(q.get("answer") or "").strip()
     options = [str(o) for o in (q.get("options") or [])]
     if not str(q.get("prompt") or "").strip() or not answer:
@@ -177,7 +177,7 @@ def _store(engine: Engine, doc: Document, batch: list[Section], reply: dict, wan
             notes[note["id"]] = note
     with session_scope(engine) as s:
         for sid, note in notes.items():
-            quiz = [q for q in (_valid_question(q) for q in (note.get("questions") or []) if isinstance(q, dict))
+            quiz = [q for q in (valid_question(q) for q in (note.get("questions") or []) if isinstance(q, dict))
                     if q][:MAX_QUESTIONS]
             row = s.get(Section, sid)
             if row is not None:

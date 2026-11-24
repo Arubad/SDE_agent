@@ -25,7 +25,7 @@ from backend.tutor.tests.tutor_helpers import (
     run,
 )
 from backend.tutor.tutor import runtime as runtime_mod
-from backend.tutor.tutor.graph import single
+from backend.tutor.tutor.graph import _placeholder, single
 from backend.tutor.tutor.runtime import BadResume, Busy, SessionEnded
 from backend.tutor.tutor.session_start import NO_SESSION_TEXT, NO_SUMMARY_TEXT
 from backend.tutor.tutor.sessions import NotReady, create_session, end_session, last_ended, list_sessions
@@ -178,7 +178,8 @@ async def test_last_without_summary_says_not_ready(engine, rt):
     assert replies(await run(rt, sid, {"resume": {"choice": "recap_last"}})) == [NO_SUMMARY_TEXT]
 
 
-async def test_warm_up_goes_to_assessor_with_weak_spot_focus(engine, rt):
+async def test_warm_up_goes_to_assessor_with_weak_spot_focus(engine, clear_memo):  # noqa: F811
+    rt = make_runtime(engine, {"assessor": _placeholder("assessor")})  # the real one: test_tutor_assessor.py
     sid = new_session(engine)
     add_ended_session(engine, sid, summary="s")
     await run(rt, sid, {"action": "start"})

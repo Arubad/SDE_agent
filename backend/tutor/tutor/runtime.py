@@ -38,6 +38,7 @@ from backend.core.redact import redact, redact_obj
 from backend.core.trace import Trace, start_trace
 from backend.tutor.models import Roadmap, TutorSession
 from backend.tutor.telemetry import export_trace
+from backend.tutor.tutor.assessor import resume_ok as quiz_resume_ok
 from backend.tutor.tutor.budget import OUTAGE_MESSAGE, BudgetExceeded
 from backend.tutor.tutor.graph import TutorDeps
 from backend.tutor.tutor import sessions
@@ -52,7 +53,8 @@ def approval_ok(value: Any) -> bool:
     return isinstance(value, dict) and set(value) == {"approved"} and isinstance(value["approved"], bool)
 
 
-RESUME_SHAPES: dict[str, Callable[..., bool]] = {"session_start": resume_ok, "approval": approval_ok}
+RESUME_SHAPES: dict[str, Callable[..., bool]] = {"session_start": resume_ok, "approval": approval_ok,
+                                                  "quiz": quiz_resume_ok}
 
 
 def _accepts(valid: Callable[..., bool], value: Any, pending: Any) -> bool:
