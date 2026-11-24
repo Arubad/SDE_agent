@@ -12,6 +12,7 @@ from backend.core.trace import Trace
 T = TypeVar("T")
 
 OUTAGE_MESSAGE = "The model is unavailable right now. Your session is saved; try again in a minute."
+RETRY_DELAYS: tuple[float, ...] = (1.0, 2.0)  # read at call time, so tests can make retries instant
 
 
 class BudgetExceeded(Exception):
@@ -39,9 +40,10 @@ class Budget:
             raise BudgetExceeded("cost", f"${s['cost_usd']:.4f}", f"${self.max_usd:.4f}")
 
 
-async def with_llm_retry(fn: Callable[[], Awaitable[T]], *, delays: tuple[float, ...] = (1.0, 2.0)) -> T:
-    """Call `fn`; on `LLMUnavailable` wait and retry once per delay. Other exceptions propagate at once."""
-    for delay in delays:
+async def with_llm_retry(fn: Callable[[], Awaitable[T]], *, delays: tuple[float, ...] | None = None) -> T:
+    """Call `fn`; on `LLMUnavailable` wait and retry once per delay (default `RETRY_DELAYS`). Other exceptions
+    propagate at once."""
+    for delay in RETRY_DELAYS if delays is None else delays:
         try:
             return await fn()
         except LLMUnavailable:

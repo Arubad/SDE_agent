@@ -37,6 +37,7 @@
                 "docs.*", "repo.*", "papers.*", "ref.*", "learner.recall", "learner.get_progress"],
     "researcher": ["kb.search", "web.search", "web.fetch", "browser.navigate", "browser.snapshot", "docs.*",
                    "repo.*", "papers.*", "ref.*"],
+    "assessor": ["kb.search"],
     "crawler": ["browser.navigate", "browser.evaluate", "browser.close"]
   },
   "rules": {"deny": ["ref.wikipedia.wikipedia_*"],
