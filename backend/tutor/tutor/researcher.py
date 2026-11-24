@@ -9,17 +9,19 @@ found, an error, a decline) by clearing `state.proposal`; the edges after `resea
 - `research` runs the tool loop with the `researcher` tools (`agent="researcher"`, lease released in `finally`),
   history-free. Its answer is a Markdown roadmap; every link whose URL did not appear in a tool result this turn
   (or fails the URL policy) is reduced to its title (links are rebuilt without title attributes), bare disallowed URLs are removed, and
-  URLs beyond MAX_RESOURCES are neutralised. `state.proposal` = `{"slug", "title", "source_text", "key", "id"}`.
+  URLs beyond MAX_RESOURCES are neutralised. `state.proposal` = `{"slug", "title", "source_text", "key", "id", "allowed"}`.
 - Both approval nodes call `interrupt()` first (D8) with a card built from `state.proposal`. The gateway's `ask`
   tools get sync approvers built from the args the learner approved: `lambda p: p["args"] == approved_args`.
 - `research_create` calls `ingest.create_roadmap` (it parses; the ingest server returns no spec to the gateway's
-  client), then reads the parsed spec from the database (D5: deterministic reads are allowed) for the second card.
+  client), then reads the parsed spec from the database (D5: deterministic reads and writes are allowed), clears every resource
+  `url` / `url_hint` outside `allowed` (R12: the URLs that survived stripping) and stores it for the second card.
   `state.proposal` becomes `{"slug", "title", "key", "spec", "id"}`.
 - Conversation messages: the request as sent and the final reply, nothing else (no tool messages, no source text).
 """
 from __future__ import annotations
 
 import asyncio
+import copy
 import re
 import uuid
 
@@ -30,6 +32,7 @@ from sqlalchemy import select
 from backend.agent.loop import default_model_turn, run_tool_loop
 from backend.core.trace import current_trace
 from backend.tutor.db import session_scope
+from backend.tutor.ingest.service import Conflict, update_spec
 from backend.tutor.mcp.gateway import CallContext
 from backend.tutor.mcp.policy import text_urls
 from backend.tutor.models import Roadmap
@@ -181,10 +184,26 @@ def _spec_resources(spec: dict) -> int:
     return sum(len(st.get("resources") or []) for st in (spec or {}).get("stages") or [])
 
 
-def _parsed_spec(engine, slug: str) -> dict | None:
+def _parsed_spec(engine, slug: str, allowed: list[str]) -> dict | None:
+    """The parsed spec with every resource `url` and `url_hint` outside `allowed` (R12) cleared and stored again.
+    The parse model can lift a link the text only hints at (`www.x/y`, `x%3A%2F%2F...`) into a hint that
+    `approve_roadmap` would fetch; only URLs this turn's tool results showed stay. A cleared resource may still be
+    resolved by search."""
+    keep = {url_key(u) for u in allowed}
     with session_scope(engine) as s:
         rm = get_roadmap_by_slug(s, slug)
-        return rm.spec if rm is not None else None
+        if rm is None or not rm.spec:
+            return None
+        spec, changed = copy.deepcopy(rm.spec), False
+        for stage in spec.get("stages") or []:
+            for res in stage.get("resources") or []:
+                for field in ("url", "url_hint"):
+                    if res.get(field) and url_key(res[field]) not in keep:
+                        res[field], changed = None, True
+        try:
+            return update_spec(s, rm, spec) if changed else spec
+        except Conflict:
+            return None
 
 
 # --- the nodes ----------------------------------------------------------------------------------------------
@@ -202,7 +221,7 @@ async def research(deps: TutorDeps, state: TutorState) -> dict:
     title = title_of(markdown, topic)
     slug = await asyncio.to_thread(slug_for, title, deps.engine)
     return {"proposal": {"slug": slug, "title": title, "source_text": markdown, "key": uuid.uuid4().hex,
-                         "id": uuid.uuid4().hex}}  # `id`: the card's id (R10), made before its interrupt node
+                         "id": uuid.uuid4().hex, "allowed": extract_urls(markdown)}}  # `id`: the card's id (R10), made before its interrupt node
 
 
 async def _research_markdown(deps: TutorDeps, state: TutorState, topic: str) -> str:
@@ -255,7 +274,7 @@ def add_researcher(builder: StateGraph, deps: TutorDeps) -> Group:
         out = await gateway.call("ingest.create_roadmap", approved, ctx)
         if "error" in out:
             return _done(state, f"I couldn't create the roadmap: {_error_text(out['error'])}")
-        spec = await asyncio.to_thread(_parsed_spec, engine, p["slug"])
+        spec = await asyncio.to_thread(_parsed_spec, engine, p["slug"], p["allowed"])
         if not spec:
             return _done(state, "I couldn't create the roadmap: it was not parsed.")
         return {"proposal": {"slug": p["slug"], "title": p["title"], "key": p["key"], "spec": spec,

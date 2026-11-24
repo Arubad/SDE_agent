@@ -1,4 +1,5 @@
 """The researcher (Task 11): web research to a mini roadmap, two approvals, ingestion through the gated tools."""
+import copy
 import re
 
 import pytest
@@ -33,7 +34,10 @@ MD = ("# K8s Ops\n## Basics\n### Probes\nHealth checks.\n- [Probes](" + GOOD + "
       "- [Bad](https://evil.example/x)\n### Pods\n- [Pods](" + GOOD + "/pods)\n")
 PARSED = {"title": "K8s Ops", "goals": [], "weekly_hours": None, "stages": [
     {"id": "s1", "title": "Basics", "timeframe": None, "summary": "", "practice_goals": [],
-     "resources": [{"id": "r1", "title": "Probes", "url": GOOD}, {"id": "r2", "title": "Pods", "url": GOOD + "/pods"}],
+     "resources": [{"id": "r1", "title": "Probes", "kind": "article", "url": GOOD, "url_hint": None, "query": "q",
+                    "skill_ids": ["probes"]},
+                   {"id": "r2", "title": "Pods", "kind": "article", "url": GOOD + "/pods", "url_hint": None,
+                    "query": "q", "skill_ids": []}],
      "skills": [{"id": "probes", "title": "Probes", "objectives": [], "prerequisites": []}]}]}
 
 
@@ -47,13 +51,23 @@ def _search(*urls):
                                  for u in urls]}}
 
 
-def _gateway(engine, create_error=None, approve_error=None):
+def _evil_spec():
+    spec = copy.deepcopy(PARSED)
+    res = {"kind": "other", "query": "q", "skill_ids": []}
+    spec["stages"][0]["resources"] += [
+        {**res, "id": "e1", "title": "e1", "url": "https://evil.example/a", "url_hint": "https://evil.example/h"},
+        {**res, "id": "e2", "title": "e2", "url": None, "url_hint": "www.evil.example/g"},
+        {**res, "id": "e3", "title": "e3", "url": None, "url_hint": GOOD + "/"}]
+    return spec
+
+
+def _gateway(engine, create_error=None, approve_error=None, spec=None):
     def create(args):
         if create_error:
             return {"error": wrap(create_error)}
         with session_scope(engine) as s:
             rm = create_roadmap(s, slug=args["slug"], title=args["title"], source_text=args["source_text"])
-            rm.spec, rm.status = PARSED, "parsed"
+            rm.spec, rm.status = spec or PARSED, "parsed"
         return {"data": {"status": wrap("parsed"), "slug": wrap(args["slug"])}}
 
     return FakeGateway(
@@ -298,3 +312,20 @@ async def test_approval_answer_must_name_the_pending_card(engine, clear_memo):  
         with pytest.raises(BadResume):
             await run(rt, sid, bad)
     assert await rt.state(sid) == before and await rt.pending(sid) == pending
+
+
+async def test_off_list_urls_are_cleared_from_the_parsed_spec(engine, clear_memo):  # noqa: F811
+    rt, sid = _rt(engine, _gateway(engine, spec=_evil_spec())), new_session(engine)
+    (card,) = interrupts(await _to_first_card(rt, sid))
+    events = await _answer(rt, sid, True)
+    (card2,) = interrupts(events)
+    with session_scope(engine) as s:
+        stored = get_roadmap_by_slug(s, card["payload"]["args"]["slug"]).spec
+    assert card2["payload"]["spec"] == stored
+    for spec in (stored, card2["payload"]["spec"]):
+        res = {r["title"]: r for st in spec["stages"] for r in st["resources"]}
+        assert (res["e1"]["url"], res["e1"]["url_hint"], res["e2"]["url_hint"]) == (None, None, None)
+        assert res["e3"]["url_hint"] == GOOD + "/"  # allowed, compared as the cap does
+        assert res["Probes"]["url"] == GOOD and res["Pods"]["url"] == GOOD + "/pods"
+        assert "evil" not in str(spec)
+    assert card2["summary"] == "Ingest 'K8s Ops' (5 resources)"
