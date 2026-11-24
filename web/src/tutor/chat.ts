@@ -318,9 +318,9 @@ export async function runTurn(
   return finished;
 }
 
-/** Turn controls are disabled only while a turn runs: a pending card never blocks free text or an action (R5). */
-export function controlsLocked(busy: boolean, _pending: Interrupt | null): boolean {
-  return busy;
+/** The resume answers for exactly the quiz's current questions: stale keys from an earlier card are dropped. */
+export function quizAnswers(questions: { id: string }[], answers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(questions.map((q) => [q.id, answers[q.id] ?? ""]));
 }
 
 export function turnErrorText(err: unknown): string {

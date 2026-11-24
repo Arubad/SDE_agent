@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { QuizInterrupt } from "./chat";
+import { type QuizInterrupt, quizAnswers } from "./chat";
 
 /** A quiz interrupt: multiple choice (answers are the option text) and short answers. All must be answered. */
 export function QuizCard({
@@ -19,7 +19,7 @@ export function QuizCard({
       aria-label="Quiz"
       onSubmit={(e) => {
         e.preventDefault();
-        if (complete && !busy) onSubmit({ answers });
+        if (complete && !busy) onSubmit({ answers: quizAnswers(value.questions, answers) });
       }}
     >
       <h3>Quiz</h3>

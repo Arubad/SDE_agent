@@ -3,7 +3,7 @@ import { ApiError } from "../api";
 import {
   type ChatState,
   cacheHitRate,
-  controlsLocked,
+  quizAnswers,
   initial,
   lanes,
   messagesFromServer,
@@ -178,10 +178,8 @@ describe("reset and controls", () => {
     s = reduce(s, { type: "reset" });
     expect(s).toEqual(initial);
   });
-  it("controls stay enabled with a pending card and lock only while busy", () => {
-    const card = { kind: "quiz", skill_id: "s", questions: [] };
-    expect(controlsLocked(false, card)).toBe(false);
-    expect(controlsLocked(true, card)).toBe(true);
-    expect(controlsLocked(true, null)).toBe(true);
+  it("quiz answers cover exactly the current questions; stale keys are not sent", () => {
+    const out = quizAnswers([{ id: "q2" }, { id: "q3" }], { q1: "old", q2: "b", q3: "c" });
+    expect(out).toEqual({ q2: "b", q3: "c" });
   });
 });

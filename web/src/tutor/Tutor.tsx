@@ -13,7 +13,6 @@ import { ApprovalCard } from "./ApprovalCard";
 import {
   type ApprovalInterrupt,
   type ChatMessage,
-  controlsLocked,
   initial,
   type QuizInterrupt,
   reduce,
@@ -225,7 +224,8 @@ export function Tutor({
 
   const ended = session.status === "ended";
   const qa = session.mode === "qa";
-  const locked = controlsLocked(busy, chat.pending);
+  // A pending card never blocks free text or an action (R5): only a running turn locks the controls.
+  const locked = busy;
   const pending = ended ? null : chat.pending;
   const act = (action: string) => void send(session.id, { action });
   const resume = (value: unknown) => void send(session.id, { resume: value });
@@ -268,7 +268,7 @@ export function Tutor({
 
       {pending && !ended && <p className="muted small">Sending something else skips this card.</p>}
       {pending?.kind === "session_start" && <SessionStartCard value={pending as SessionStartInterrupt} busy={busy} onChoose={resume} />}
-      {pending?.kind === "quiz" && <QuizCard key={(pending as QuizInterrupt).skill_id} value={pending as QuizInterrupt} busy={busy} onSubmit={resume} />}
+      {pending?.kind === "quiz" && <QuizCard key={`${(pending as QuizInterrupt).skill_id}:${(pending as QuizInterrupt).questions.map((q) => q.id).join(",")}`} value={pending as QuizInterrupt} busy={busy} onSubmit={resume} />}
       {pending?.kind === "approval" && <ApprovalCard key={(pending as ApprovalInterrupt).id} value={pending as ApprovalInterrupt} busy={busy} onRule={resume} />}
 
       {ended ? (
