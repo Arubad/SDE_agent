@@ -190,6 +190,8 @@ export function reduce(state: ChatState, ev: ChatEvent): ChatState {
         pending: state.interrupted ? state.pending : null,
         interrupted: false,
       };
+    case "reset":
+      return initial; // a different session: nothing of the old one (timeline, created roadmap, error) carries over
     case "loaded": {
       const s = ev.session as ServerState;
       return {
@@ -314,6 +316,11 @@ export async function runTurn(
   );
   if (!finished && !signal.aborted) dispatch({ type: "error", message: DID_NOT_FINISH });
   return finished;
+}
+
+/** Turn controls are disabled only while a turn runs: a pending card never blocks free text or an action (R5). */
+export function controlsLocked(busy: boolean, _pending: Interrupt | null): boolean {
+  return busy;
 }
 
 export function turnErrorText(err: unknown): string {

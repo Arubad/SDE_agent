@@ -3,6 +3,7 @@ import { ApiError } from "../api";
 import {
   type ChatState,
   cacheHitRate,
+  controlsLocked,
   initial,
   lanes,
   messagesFromServer,
@@ -165,5 +166,22 @@ describe("runTurn", () => {
     const ok = await runTurn("/p", { action: "continue" }, (ev) => seen.push(ev), new AbortController().signal, stream);
     expect(ok).toBe(false);
     expect(seen.at(-1)).toEqual({ type: "error", message: "The turn didn't finish. Your session is saved; try again." });
+  });
+});
+
+describe("reset and controls", () => {
+  it("reset clears the old session's timeline, created roadmap, error and card", () => {
+    let s = reduce(initial, { type: "roadmap_created", slug: "x" });
+    s = reduce(s, { type: "interrupt", value: { kind: "quiz", skill_id: "s", questions: [] } });
+    s = reduce(s, { type: "done", trace: trace() });
+    s = reduce(s, { type: "error", message: "boom" });
+    s = reduce(s, { type: "reset" });
+    expect(s).toEqual(initial);
+  });
+  it("controls stay enabled with a pending card and lock only while busy", () => {
+    const card = { kind: "quiz", skill_id: "s", questions: [] };
+    expect(controlsLocked(false, card)).toBe(false);
+    expect(controlsLocked(true, card)).toBe(true);
+    expect(controlsLocked(true, null)).toBe(true);
   });
 });

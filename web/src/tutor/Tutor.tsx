@@ -13,6 +13,7 @@ import { ApprovalCard } from "./ApprovalCard";
 import {
   type ApprovalInterrupt,
   type ChatMessage,
+  controlsLocked,
   initial,
   type QuizInterrupt,
   reduce,
@@ -133,6 +134,7 @@ export function Tutor({
     let live = true;
     setLoading(true);
     setFatal(null);
+    dispatch({ type: "reset" });
     (async () => {
       try {
         const id = sessionId ?? (await listSessions(slug)).find((s) => s.status === "active")?.id ?? null;
@@ -223,7 +225,7 @@ export function Tutor({
 
   const ended = session.status === "ended";
   const qa = session.mode === "qa";
-  const locked = busy || chat.pending !== null;
+  const locked = controlsLocked(busy, chat.pending);
   const pending = ended ? null : chat.pending;
   const act = (action: string) => void send(session.id, { action });
   const resume = (value: unknown) => void send(session.id, { resume: value });
@@ -264,12 +266,22 @@ export function Tutor({
         </p>
       )}
 
+      {pending && !ended && <p className="muted small">Sending something else skips this card.</p>}
       {pending?.kind === "session_start" && <SessionStartCard value={pending as SessionStartInterrupt} busy={busy} onChoose={resume} />}
       {pending?.kind === "quiz" && <QuizCard key={(pending as QuizInterrupt).skill_id} value={pending as QuizInterrupt} busy={busy} onSubmit={resume} />}
       {pending?.kind === "approval" && <ApprovalCard key={(pending as ApprovalInterrupt).id} value={pending as ApprovalInterrupt} busy={busy} onRule={resume} />}
 
       {ended ? (
-        <button type="button" onClick={onNewSession}>
+        <button
+          type="button"
+          onClick={() => {
+            abort.current?.abort();
+            dispatch({ type: "reset" });
+            setSession(null);
+            setFatal(null);
+            onNewSession();
+          }}
+        >
           Start a new session
         </button>
       ) : (
