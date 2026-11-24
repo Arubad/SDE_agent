@@ -10,3 +10,5 @@ trafilatura>=2.0
 beautifulsoup4>=4.12
 pypdf>=5.0
 yt-dlp>=2026.10.0
+pgvector>=0.3
+uv>=0.5

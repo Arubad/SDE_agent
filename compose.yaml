@@ -1,5 +1,5 @@
 # Local roadmap-tutor stack. Every published port binds to 127.0.0.1 only.
-#   docker compose up -d --wait                          api + postgres + qdrant
+#   docker compose up -d --wait                          api + postgres + qdrant + searxng + playwright-mcp
 #   docker compose --profile observability up -d --wait  adds Phoenix at http://127.0.0.1:6006
 # SEARXNG_SECRET must be set (export it or put it in a root .env); compose refuses to start without it.
 # See docs/platform/running-locally.md.
@@ -25,8 +25,13 @@ services:
       PORT: "8000"
       WEB_DIST: /app/web/dist
       SEARXNG_URL: http://searxng:8080
+      PLAYWRIGHT_MCP_URL: http://playwright-mcp:8931/mcp
     ports:
       - "127.0.0.1:8000:8000"
+    # `default` reaches postgres, qdrant, searxng and phoenix; `browser` reaches only playwright-mcp
+    networks:
+      - default
+      - browser
     depends_on:
       postgres:
         condition: service_healthy
@@ -69,6 +74,53 @@ services:
       - "127.0.0.1:8888:8080"
     restart: unless-stopped
 
+  playwright-mcp:
+    # Playwright MCP (headless Chromium) over streamable HTTP at /mcp. It sits alone on the `browser` network, which
+    # removes name resolution of postgres, qdrant, searxng and phoenix; the API joins `browser` to reach it.
+    # --blocked-origins (port wildcards) covers the ports the stack publishes on the host, reached through
+    # host.docker.internal / gateway.docker.internal and the loopback names, and the API by its `api` name. The API
+    # stays reachable by its browser-network IP, and LAN addresses are not listed: only the gateway's URL policy
+    # (the address check before navigating, and the final `Page URL:` check) covers those.
+    # Flags checked against `docker run --rm mcr.microsoft.com/playwright/mcp:v0.0.86 --help`:
+    #   --allowed-hosts <hosts...>   comma-separated Host header values the server accepts. It replaces the default
+    #                                (localhost/loopback) and compares host:port exactly, so the API's
+    #                                `playwright-mcp:8931` and the host-side `127.0.0.1:8931` / `localhost:8931`
+    #                                are all listed.
+    #   --blocked-origins <origins>  semicolon-separated origins the browser may not request. Each entry becomes
+    #                                `<origin>/**`, so `http://localhost` alone would block port 80 only; the
+    #                                image accepts a port wildcard (`http://host:*`), used for every entry here.
+    #                                Playwright says this is not a security boundary (redirects are not covered).
+    # The image's entrypoint already passes --headless --browser chromium --no-sandbox; they are repeated here
+    # so the whole command line is visible.
+    image: mcr.microsoft.com/playwright/mcp:v0.0.86
+    command:
+      - --headless
+      - --browser
+      - chromium
+      - --no-sandbox
+      - --isolated
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8931"
+      - --allowed-hosts
+      - playwright-mcp:8931,127.0.0.1:8931,localhost:8931
+      - --blocked-origins
+      - "http://api:*;https://api:*;http://host.docker.internal:*;https://host.docker.internal:*;\
+        http://gateway.docker.internal:*;https://gateway.docker.internal:*;http://localhost:*;https://localhost:*;\
+        http://127.0.0.1:*;https://127.0.0.1:*"
+    networks:
+      - browser
+    ports:
+      - "127.0.0.1:8931:8931"
+    # A TCP connect to the MCP port (node is in the image); `up --wait` waits for it.
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('net').connect(8931, '127.0.0.1').on('connect', () => process.exit(0)).on('error', () => process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
   phoenix:
     image: arizephoenix/phoenix:version-21.2.1
     profiles: ["observability"]
@@ -81,6 +133,9 @@ services:
     ports:
       - "127.0.0.1:6006:6006"
     restart: unless-stopped
+
+networks:
+  browser:
 
 volumes:
   pgdata:

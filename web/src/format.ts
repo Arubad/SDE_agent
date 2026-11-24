@@ -7,7 +7,7 @@ const REASONS: Record<string, string> = {
   login_wall: "Behind a login",
   paywall: "Behind a paywall",
   bot_protection: "Blocked by the site's bot protection",
-  needs_browser: "Needs a browser to render; browser support arrives with Phase 3",
+  needs_browser: "Needs a browser to render, and the browser could not render it",
   too_large: "Too large to ingest",
   unsupported_type: "Unsupported file type",
   private_address: "Points at a private network address",
@@ -28,6 +28,11 @@ const REASONS: Record<string, string> = {
 export function reasonText(code: string | null | undefined): string {
   if (!code) return "";
   return REASONS[code] ?? code;
+}
+
+/** A resource's page count, with how many of those pages the browser rendered when any were. */
+export function pagesText(pages: number, rendered: number | null | undefined): string {
+  return rendered && rendered > 0 ? `${pages} (${rendered} rendered)` : String(pages);
 }
 
 /** The URL of a skipped item, or a placeholder when the report has none (a dead job whose document is gone). */
@@ -68,4 +73,16 @@ const STATUS_LABELS: Record<string, string> = {
 
 export function statusText(status: string): string {
   return STATUS_LABELS[status] ?? status;
+}
+
+/** The badge text for an MCP server's state. A missing-env server names the variables its error lists
+ * ("missing env: A, B"); the payload carries no values, so that is all there is to show. */
+export function serverStateLabel(state: string, error?: string | null): string {
+  if (state === "ok" || state === "down") return state;
+  if (state === "disabled") return "off";
+  if (state === "missing_env") {
+    const names = /^missing env:\s*(.+)$/.exec(error ?? "")?.[1]?.trim();
+    return names ? `needs ${names}` : "needs a key";
+  }
+  return state;
 }

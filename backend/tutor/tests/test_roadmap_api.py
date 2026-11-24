@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from backend.agent import access
@@ -12,6 +11,7 @@ from backend.tutor import api
 from backend.tutor.api import create_app
 from backend.tutor.db import session_scope
 from backend.tutor.settings import Settings
+from backend.tutor.tests.clients import local_client
 
 FIXTURES = Path(__file__).parent / "fixtures"
 K8S = (FIXTURES / "roadmaps" / "kubernetes.txt").read_text()
@@ -36,7 +36,7 @@ def _settings(tmp_path, **kw):
 def client(engine, tmp_path):
     with session_scope(engine) as s:
         s.execute(text("DELETE FROM roadmaps"))
-    with TestClient(create_app(_settings(tmp_path), engine=engine)) as c:
+    with local_client(create_app(_settings(tmp_path), engine=engine)) as c:
         yield c
 
 
@@ -83,7 +83,7 @@ def test_parse_then_approve_flow(client):
 def test_approve_with_agent_enqueues_one_plan_job(engine, tmp_path):
     with session_scope(engine) as s:
         s.execute(text("DELETE FROM roadmaps"))
-    with TestClient(create_app(_settings(tmp_path, ingest_agent=True), engine=engine)) as client:
+    with local_client(create_app(_settings(tmp_path, ingest_agent=True), engine=engine)) as client:
         slug = _create(client)
         parsed = _parse(client, slug)
         r = client.post(f"/api/roadmaps/{slug}/approve", json={"spec": parsed["spec"], "choices": _choices(parsed)})
@@ -216,7 +216,7 @@ def test_events_require_passcode(engine, tmp_path, monkeypatch):
     with session_scope(engine) as s:
         create_roadmap(s, slug="k8s", title="K8s", source_text=K8S)
     _set_status(engine, "k8s", "ready")
-    with TestClient(create_app(_settings(tmp_path, public_mode=True), engine=engine)) as c:
+    with local_client(create_app(_settings(tmp_path, public_mode=True), engine=engine)) as c:
         assert c.get("/api/roadmaps/k8s/events").status_code == 401
         with c.stream("GET", "/api/roadmaps/k8s/events", headers={"X-Access-Code": "pw"}) as r:
             assert r.status_code == 200
@@ -243,9 +243,9 @@ def test_workers_start_only_with_handlers(engine, tmp_path):
 
     base = len(workers())
     s = Settings(web_dist=tmp_path / "x", net_fixtures_dir=FIXTURES / "net", ingest_workers=1)
-    with TestClient(create_app(s, engine=engine)):
+    with local_client(create_app(s, engine=engine)):
         assert len(workers()) == base
-    with TestClient(create_app(s, engine=engine, handlers={"noop": lambda ctx, job: None})):
+    with local_client(create_app(s, engine=engine, handlers={"noop": lambda ctx, job: None})):
         assert len(workers()) == base + 1
     assert len(workers()) == base
 
@@ -314,7 +314,7 @@ def test_served_app_ingests_to_terminal_status(engine, db_url, tmp_path, monkeyp
                         ingest_workers=2, embedder="hash", qdrant_url=":memory:")
     app = build_app(settings)
     try:
-        with TestClient(app) as c:
+        with local_client(app) as c:
             slug = _create(c, "served")
             parsed = _parse(c, slug)
             choices = _choices(parsed)

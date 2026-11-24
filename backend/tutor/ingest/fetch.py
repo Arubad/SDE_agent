@@ -196,6 +196,11 @@ class Fetcher:
         self._robots: dict[str, RobotFileParser | None] = {}  # origin -> rules; None = everything allowed
         self._robots_locks: dict[str, threading.Lock] = {}
 
+    @property
+    def resolver(self) -> Resolver:
+        """The DNS every hop is checked with (the browser renderer's URL policy uses the same)."""
+        return self._resolver
+
     # -- politeness -----------------------------------------------------------------------------
     def _lock_for(self, table: dict[str, threading.Lock], key: str) -> threading.Lock:
         with self._guard:

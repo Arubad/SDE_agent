@@ -189,6 +189,8 @@ export interface ReportResource {
   pages: number;
   videos: number;
   chunks: number;
+  /** Pages rendered by the gateway's browser; present only when some were. */
+  rendered_by_browser?: number;
 }
 
 export interface AgentRun {
@@ -221,6 +223,8 @@ export interface Report {
   videos: { total: number; segments: Record<string, number>; transcripts: Record<string, unknown> };
   /** `url` is null when the report could not tie a failure to a URL (e.g. a dead job whose document is gone). */
   skipped: { url: string | null; reason: string }[];
+  /** Pages rendered by the gateway's browser, over the whole roadmap (absent from older servers). */
+  rendered_by_browser?: number;
   summary: string;
   agent?: { runs: AgentRun[]; actions: AgentAction[] };
   proposals?: Proposal[];
@@ -267,4 +271,34 @@ export function approveProposal(slug: string, id: string): Promise<ProposalResul
 
 export function dismissProposal(slug: string, id: string): Promise<ProposalResult> {
   return post<ProposalResult>(roadmapPath(slug, `/resources/${encodeURIComponent(id)}/dismiss`));
+}
+
+// --- MCP servers (shapes from backend/tutor/mcp/gateway.py:ServerHealth; never carries secrets) ----------
+
+export interface ServerHealth {
+  name: string;
+  namespace: string;
+  transport: string;
+  enabled: boolean;
+  state: "ok" | "down" | "disabled" | "missing_env";
+  tools: number;
+  latency_ms: number | null;
+  error: string | null;
+  checked_at: string | null;
+  note: string;
+}
+
+export function listServers(): Promise<ServerHealth[]> {
+  return request<ServerHealth[]>("/api/mcp/servers");
+}
+
+export function checkServer(name: string): Promise<ServerHealth> {
+  return request<ServerHealth>(`/api/mcp/servers/${encodeURIComponent(name)}/check`, { method: "POST" });
+}
+
+export function setServerEnabled(name: string, enabled: boolean): Promise<ServerHealth> {
+  return request<ServerHealth>(`/api/mcp/servers/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    body: JSON.stringify({ enabled }),
+  });
 }

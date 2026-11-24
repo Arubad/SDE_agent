@@ -100,3 +100,17 @@ def test_blank_cookies_browser_counts_as_unset():
     assert load_settings({"YTDLP_COOKIES_BROWSER": "   "}).ytdlp_cookies_browser is None
     with pytest.raises(SettingsError):
         load_settings({"TRANSCRIPT_ROUTES": "ytdlp_cookies", "YTDLP_COOKIES_BROWSER": "  "})
+
+
+def test_mcp_registry_setting():
+    default = Path(__file__).resolve().parents[1] / "mcp" / "servers.json"
+    assert load_settings({}).mcp_registry == default
+    assert load_settings({"MCP_REGISTRY": "/x/s.json"}).mcp_registry == Path("/x/s.json")
+
+
+def test_browser_render_parse():
+    assert load_settings({}).browser_render is True
+    assert load_settings({"BROWSER_RENDER": " "}).browser_render is True
+    assert load_settings({"BROWSER_RENDER": "off"}).browser_render is False
+    with pytest.raises(SettingsError, match="BROWSER_RENDER"):
+        load_settings({"BROWSER_RENDER": "maybe"})

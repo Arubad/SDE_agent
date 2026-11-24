@@ -1,16 +1,18 @@
-"""Platform HTTP API: health, roadmaps, public-mode passcode guard, tracing and the SPA."""
+"""Platform HTTP API: health, roadmaps, public-mode passcode guard, tracing, the own MCP servers (/mcp/<name>/),
+the MCP gateway and the SPA."""
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-from contextlib import asynccontextmanager
+from dataclasses import asdict
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 from sqlalchemy import Engine, select, text
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
@@ -25,6 +27,9 @@ from backend.tutor.ingest.embed import make_embedder
 from backend.tutor.ingest.index import make_index
 from backend.tutor.ingest.net import make_net
 from backend.tutor.jobs.worker import JobContext, WorkerPool, maybe_settle
+from backend.tutor.mcp.build import OWN_SERVERS, build_gateway, build_own_servers
+from backend.tutor.mcp.http import LOOPBACK_HOSTS, host_name, loopback_origin, mount_mcp
+from backend.tutor.mcp.registry import set_enabled
 from backend.tutor.repo import DuplicateRoadmap, create_roadmap, get_roadmap_by_slug, list_roadmaps
 from backend.tutor.roadmap.parse import normalize_spec
 from backend.tutor.settings import Settings
@@ -43,6 +48,10 @@ class RoadmapIn(BaseModel):
 
 class SpecIn(BaseModel):
     spec: dict
+
+
+class ServerEnabledIn(BaseModel):
+    enabled: StrictBool
 
 
 class ApproveIn(BaseModel):
@@ -110,32 +119,37 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         settings.validate()
-        owns_engine = engine is None
-        if owns_engine:
-            migrate(settings.database_url)
-            app.state.engine = make_engine(settings.database_url)
-        else:
-            app.state.engine = engine
-        app.state.tracer_provider = setup_tracing(settings.otel_endpoint)
-        app.state.net = make_net(settings, app.state.engine)
-        pool = None
-        if handlers and settings.ingest_workers > 0:
-            # Built only when workers run; the embedder loads its models lazily, on first use.
-            index = make_index(settings, make_embedder(settings))
-            ctx = JobContext(engine=app.state.engine, net=app.state.net, settings=settings, index=index)
-            pool = WorkerPool(ctx, handlers, settings.ingest_workers, on_settled=on_settled,
-                              tracer_provider=app.state.tracer_provider)
-            pool.start()
-        try:
-            yield
-        finally:
-            if pool is not None:
-                pool.stop()
-            provider = app.state.tracer_provider
-            if provider is not None:
-                provider.shutdown()
+        async with AsyncExitStack() as stack:  # unwinds in reverse: MCP apps, workers, gateway, tracing, engine
+            owns_engine = engine is None
             if owns_engine:
-                app.state.engine.dispose()
+                migrate(settings.database_url)
+                app.state.engine = make_engine(settings.database_url)
+                stack.callback(app.state.engine.dispose)
+            else:
+                app.state.engine = engine
+            app.state.tracer_provider = setup_tracing(settings.otel_endpoint)
+            if app.state.tracer_provider is not None:
+                stack.callback(app.state.tracer_provider.shutdown)
+            app.state.net = make_net(settings, app.state.engine)
+            # The embedder loads its models lazily, on first use; the index makes no request until then either.
+            embedder = make_embedder(settings)
+            index = make_index(settings, embedder)
+            # Two sets from the same (thread-safe) dependencies: a FastMCP instance is never shared between event
+            # loops. One is served over HTTP on this (uvicorn's) loop, the other runs inproc on the gateway's loop.
+            deps = (app.state.engine, app.state.net, index, embedder, settings, on_settled)
+            http_servers, app.state.gateway = build_own_servers(*deps), build_gateway(*deps)
+            app.state.gateway.start()  # a loop thread only: no server is contacted before its first use
+            stack.callback(app.state.gateway.stop)
+            app.state.worker_pool = None
+            if handlers and settings.ingest_workers > 0:
+                ctx = JobContext(engine=app.state.engine, net=app.state.net, settings=settings, index=index,
+                                 gateway=app.state.gateway)
+                app.state.worker_pool = WorkerPool(ctx, handlers, settings.ingest_workers, on_settled=on_settled,
+                                                   tracer_provider=app.state.tracer_provider)
+                app.state.worker_pool.start()
+                stack.callback(app.state.worker_pool.stop)
+            await stack.enter_async_context(serve_mcp(http_servers))
+            yield
 
     app = FastAPI(title="Roadmap Tutor", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -152,6 +166,16 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
             # must never reach an API that has no passcode guard. The edge always adds these headers.
             if any(h in request.headers for h in _TUNNEL_HEADERS):
                 return _error(403, "This server is not in public mode; tunnel traffic is refused.")
+            # No passcode guard here, so /api/* takes McpGuard's rules: a loopback Host (DNS rebinding; a page in
+            # the gateway's browser reaching the API by its browser-network IP) and no cross-site Origin. The SPA's
+            # static files and the health check (container healthcheck) stay open.
+            path = request.url.path
+            if path.startswith("/api/") and path != "/api/health":
+                if host_name(request.headers.get("host")) not in LOOPBACK_HOSTS:
+                    return _error(403, "This API accepts only a loopback Host header.")
+                origin = request.headers.get("origin")
+                if origin is not None and not loopback_origin(origin):
+                    return _error(403, "Cross-site requests to this API are refused.")
             return await call_next(request)
 
     else:
@@ -168,6 +192,8 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
                     return _error(401, "Passcode required")
             return await call_next(request)
 
+    serve_mcp = mount_mcp(app, OWN_SERVERS, settings, lockout_key=_lockout_key)  # before the SPA catch-all
+
     @app.get("/api/health")
     def health(request: Request):
         body = {"llm_provider": config.LLM_PROVIDER, "public_mode": settings.public_mode}
@@ -177,6 +203,28 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
         except SQLAlchemyError:
             return JSONResponse({"status": "degraded", "db": "down", **body}, status_code=503)
         return {"status": "ok", "db": "ok", **body}
+
+    @app.get("/api/mcp/servers")
+    async def get_mcp_servers(request: Request):
+        return [asdict(h) for h in await request.app.state.gateway.health()]
+
+    def _known_server(request: Request, name: str) -> bool:
+        return any(s.name == name for s in request.app.state.gateway.registry.servers)
+
+    @app.post("/api/mcp/servers/{name}/check")
+    async def check_mcp_server(request: Request, name: str):
+        if not _known_server(request, name):
+            return _error(404, f"No MCP server '{name}'")
+        return asdict(await request.app.state.gateway.check(name))
+
+    @app.put("/api/mcp/servers/{name}")
+    async def put_mcp_server(request: Request, name: str, body: ServerEnabledIn):
+        if not _known_server(request, name):
+            return _error(404, f"No MCP server '{name}'")
+        gateway = request.app.state.gateway
+        await run_in_threadpool(set_enabled, request.app.state.engine, name, body.enabled)
+        await gateway.reset(name)  # drop the connection and the cached tools and health
+        return asdict(await gateway.check(name))
 
     @app.get("/api/roadmaps")
     def get_roadmaps(request: Request):
@@ -330,7 +378,7 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
 
         @app.get("/{full_path:path}", include_in_schema=False)
         def spa(full_path: str):
-            if full_path == "api" or full_path.startswith("api/"):
+            if full_path.split("/", 1)[0] in ("api", "mcp"):
                 return JSONResponse({"detail": "Not Found"}, status_code=404)
             candidate = (dist / full_path).resolve()
             if full_path and candidate.is_file() and candidate.is_relative_to(dist):

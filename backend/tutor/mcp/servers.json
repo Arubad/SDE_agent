@@ -1,0 +1,43 @@
+{
+  "servers": [
+    {"name": "kb", "namespace": "kb", "transport": "inproc", "target": "knowledge", "enabled": true,
+     "note": "Search the indexed roadmap material."},
+    {"name": "learner", "namespace": "learner", "transport": "inproc", "target": "learner",
+     "enabled": true, "note": "The learner's progress and notes."},
+    {"name": "ingest", "namespace": "ingest", "transport": "inproc", "target": "ingestion",
+     "enabled": true, "note": "Roadmap ingestion tools."},
+    {"name": "web", "namespace": "web", "transport": "inproc", "target": "web", "enabled": true,
+     "note": "Web search and page fetch."},
+    {"name": "playwright", "namespace": "browser", "transport": "http",
+     "url": "${PLAYWRIGHT_MCP_URL:-http://127.0.0.1:8931/mcp}", "strip_prefix": "browser_", "timeout_s": 45,
+     "enabled": true, "note": "Headless Chromium (Playwright MCP container) for pages that need a browser."},
+    {"name": "deepwiki", "namespace": "repo.deepwiki", "transport": "http", "url": "https://mcp.deepwiki.com/mcp",
+     "enabled": true, "note": "DeepWiki: generated docs for public GitHub repositories (remote, no auth)."},
+    {"name": "mslearn", "namespace": "docs.mslearn", "transport": "http", "url": "https://learn.microsoft.com/api/mcp",
+     "enabled": true, "note": "Microsoft Learn documentation search (remote, no auth)."},
+    {"name": "arxiv", "namespace": "papers.arxiv", "transport": "stdio", "command": "uvx",
+     "args": ["arxiv-mcp-server==0.8.2", "--storage-path", "${ARXIV_STORAGE_PATH:-/tmp/roadmap-tutor/arxiv}"],
+     "enabled": true, "note": "arXiv paper search and reading."},
+    {"name": "wikipedia", "namespace": "ref.wikipedia", "transport": "stdio", "command": "uvx",
+     "args": ["wikipedia-mcp==2.0.1"], "enabled": true, "note": "Wikipedia articles and summaries."},
+    {"name": "context7", "namespace": "docs.context7", "transport": "http", "url": "https://mcp.context7.com/mcp",
+     "headers": {"CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}"}, "requires_env": ["CONTEXT7_API_KEY"],
+     "enabled": true, "note": "Context7: current library documentation (needs CONTEXT7_API_KEY)."},
+    {"name": "github", "namespace": "repo.github", "transport": "http", "url": "https://api.githubcopilot.com/mcp/",
+     "headers": {"Authorization": "Bearer ${GITHUB_TOKEN}", "X-MCP-Readonly": "true"},
+     "requires_env": ["GITHUB_TOKEN"], "enabled": true,
+     "note": "GitHub (read-only tool set; needs GITHUB_TOKEN)."},
+    {"name": "fetch", "namespace": "fetch", "transport": "stdio", "command": "uvx",
+     "args": ["mcp-server-fetch==2026.11.18"], "enabled": false,
+     "note": "follows redirects without the private-address check; web.fetch is used instead"}
+  ],
+  "agents": {
+    "teacher": ["kb.*", "web.search", "web.fetch", "browser.navigate", "browser.snapshot", "browser.navigate_back",
+                "docs.*", "repo.*", "papers.*", "ref.*", "learner.recall", "learner.get_progress"],
+    "researcher": ["kb.search", "web.search", "web.fetch", "browser.navigate", "browser.snapshot", "docs.*",
+                   "repo.*", "papers.*", "ref.*"],
+    "crawler": ["browser.navigate", "browser.evaluate", "browser.close"]
+  },
+  "rules": {"deny": ["ref.wikipedia.wikipedia_*"],
+            "ask": ["ingest.create_roadmap", "ingest.approve_roadmap", "learner.forget"]}
+}

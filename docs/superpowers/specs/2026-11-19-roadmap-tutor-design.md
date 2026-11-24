@@ -464,3 +464,57 @@ only, with no URLs, and its line breaks were lost when pasted. That is realistic
 
   It has its own eval: gap-fix rate, plan and proposal precision, restraint on a healthy roadmap, and injection
   resistance with defenses on vs off.
+
+## Phase 3 amendments (owner's architecture checklist, 2026-11-24)
+These are taken only where they fit the planned work; the rest was declined.
+- **Phase 3 additions:**
+  - **Allow/deny/ask gate in the MCP gateway.** Registry rules, with deny beating ask and ask beating allow. An `ask`
+    tool runs only after an approver has seen the raw JSON payload (tool, server, agent, arguments). By default
+    `ask` covers the ingestion server's write tools and the learner's `forget`. `remember` and `set_mastery` stay
+    allowed, because the tutor calls them on every turn.
+  - **Idempotency keys on MCP write tools.** On the ingestion server's `create_roadmap` and `approve_roadmap`, a
+    repeated key replays the stored result, and a key reused with different arguments is an error.
+- **Later phases:**
+  - **Phase 4:** the tutor's approval interrupts (big replans, researcher proposals, `ask` tools) show the raw action
+    payload next to the human-readable summary.
+  - **Phase 6:** the red-team suite is organised by the OWASP agentic-AI threat categories, and the README reports a
+    pass rate per category. The tutor and ingestion evals add fault-injected trajectory scenarios: tool HTTP 500s,
+    malformed tool JSON, a worker crash mid-run and an MCP server outage. The README reports the completion rate.
+- **Declined:**
+  - OAuth 2.1 scoped MCP auth: the `mcp` 1.x pin, and one local user;
+  - SKILL.md runbooks;
+  - Langfuse: Phoenix stays;
+  - Temporal: the Postgres job queue stays.
+
+
+## Phase 3 follow-ups for Phase 4 (from the Phase 3 reviews, 2026-11-24)
+Phase 3 shipped the gateway with no model-facing caller. Phase 4's plan opens with a **gateway readiness** task that
+does these before any tutor agent calls a tool:
+- **Timeouts:**
+  - give the own servers realistic `timeout_s` values, or per-tool timeouts: `ingest.wait_for_ingestion`,
+    `ingest.create_roadmap` and the first `kb.search` (lazy model load) exceed 20 s;
+  - a plain call timeout should not drop a whole in-process connection.
+- **Search URLs:** treat Microsoft Learn search results as allowed URLs, or exempt its server-side fetch tool.
+- **Caps:** measure the cap with `ensure_ascii=True`, as the loop sends JSON (CJK text inflates up to 6×).
+- **Gateway loop:**
+  - bound DNS lookups with a timeout;
+  - stop running the synchronous `effective_enabled` query on the gateway loop;
+  - stop `tool_defs` from stalling on a slow stdio server;
+  - trace refused calls;
+  - retry the `about:blank` reset once.
+- **Browser isolation:** one Playwright browser and tab is shared by every agent, so give each agent its own browser
+  context, or use a gateway-level lease.
+- **Approvers:** run them sync or loop-agnostic, never bound to the FastAPI loop. Approval UIs show the raw payload.
+- **Untrusted passages:** `kb` passages reach the model as citation blocks without the untrusted fence. The tutor's
+  prompt must treat them as untrusted, and the red-team eval must cover a poisoned ingested page.
+- **Ingestion writes:**
+  - give idempotency claims a token, so a stale re-claim cannot release a live one;
+  - stop `approve_roadmap` searching while it holds the row lock;
+  - return early from `wait_for_ingestion` on a roadmap that is still only parsed.
+- **Learner:** decide whether revoking consent hides or purges stored facts; cap the length of `remember`.
+- **Re-check:** recheck still reports rendered (JS-only) resources as dead.
+- **Known limits (documented in `docs/platform/mcp.md`):**
+  - blocked origins don't cover redirects;
+  - the API is reachable by its browser-network IP, though `/api/*` now needs a loopback Host;
+  - sub-resource requests aren't seen by the gateway;
+  - stdio servers run as the API's user (a supply-chain risk).

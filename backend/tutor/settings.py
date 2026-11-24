@@ -30,6 +30,7 @@ class Settings:
     public_mode: bool = False
     otel_endpoint: str | None = None
     web_dist: Path = REPO_ROOT / "web" / "dist"
+    mcp_registry: Path = REPO_ROOT / "backend" / "tutor" / "mcp" / "servers.json"
     host: str = "127.0.0.1"
     port: int = 8000
     searxng_url: str | None = "http://127.0.0.1:8888"
@@ -49,6 +50,7 @@ class Settings:
     ingest_agent_max_steps: int = 12
     ingest_agent_recovery_rounds: int = 2
     min_chunks_per_skill: int = 5  # a skill with fewer indexed chunks is a gap the recoverer looks at
+    browser_render: bool = True  # BROWSER_RENDER: render `needs_browser` pages in the gateway's browser
 
     def validate(self) -> None:
         if self.public_mode and not config.PREMIUM_PASSCODE:
@@ -113,6 +115,7 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
         public_mode=_parse_bool("PUBLIC_MODE", env.get("PUBLIC_MODE")),
         otel_endpoint=env.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") or None,
         web_dist=Path(env["WEB_DIST"]) if env.get("WEB_DIST") else d.web_dist,
+        mcp_registry=Path(env["MCP_REGISTRY"]) if env.get("MCP_REGISTRY") else d.mcp_registry,
         host=env.get("HOST") or d.host,
         port=_parse_int("PORT", env.get("PORT"), d.port, 1),
         searxng_url=(env["SEARXNG_URL"].strip() or None) if "SEARXNG_URL" in env else d.searxng_url,
@@ -133,4 +136,6 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
         github_token=(env.get("GITHUB_TOKEN") or "").strip() or None,
         ingest_agent=(_parse_bool("INGEST_AGENT", env.get("INGEST_AGENT"))
                       if (env.get("INGEST_AGENT") or "").strip() else d.ingest_agent),
+        browser_render=(_parse_bool("BROWSER_RENDER", env.get("BROWSER_RENDER"))
+                        if (env.get("BROWSER_RENDER") or "").strip() else d.browser_render),
     )

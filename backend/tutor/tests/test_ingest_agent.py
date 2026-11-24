@@ -7,7 +7,6 @@ from datetime import timedelta
 from decimal import Decimal
 
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
@@ -28,6 +27,7 @@ from backend.tutor.models import AgentAction, Document, Job, Resource, Roadmap
 from backend.tutor.repo import create_roadmap
 from backend.tutor.roadmap.spec import ResourceSpec, RoadmapSpec, SkillSpec, StageSpec
 from backend.tutor.settings import Settings, load_settings
+from backend.tutor.tests.clients import local_client
 from backend.tutor.tests.test_ingestion_flow import _ctx as _flow_ctx
 from backend.tutor.tests.test_ingestion_flow import _e2e_site, _page, _prose, _site
 
@@ -450,7 +450,7 @@ def test_proposal_routes(engine, tmp_path):
                            url=url, status="proposed", proposed_by="agent", proposal_reason="r"))
     settings = Settings(web_dist=tmp_path / "no-dist", net_fixtures_dir=ctx.settings.net_fixtures_dir,
                         ingest_workers=0)
-    with TestClient(create_app(settings, engine=engine)) as c:
+    with local_client(create_app(settings, engine=engine)) as c:
         assert c.post("/api/roadmaps/routes/resources/p-ok/approve").status_code == 200
         assert c.post("/api/roadmaps/routes/resources/p-bad/approve").status_code == 422
         assert c.post("/api/roadmaps/routes/resources/p-no/dismiss").status_code == 200

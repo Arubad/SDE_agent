@@ -30,7 +30,10 @@ RUN useradd --create-home --uid 10001 tutor
 USER tutor
 
 # Secrets arrive only through the container environment (compose env_file); never read backend/.env here.
-ENV SKIP_DOTENV=1 HOST=0.0.0.0 PORT=8000 WEB_DIST=/app/web/dist
+# `uv` (requirements-platform.txt) provides the `uvx` the stdio MCP servers run with; it downloads each pinned
+# package on first use into the runtime user's cache. The gateway starts stdio servers with a minimal environment
+# (HOME, PATH, ...), where uv's default cache is the same $HOME/.cache/uv.
+ENV SKIP_DOTENV=1 HOST=0.0.0.0 PORT=8000 WEB_DIST=/app/web/dist UV_CACHE_DIR=/home/tutor/.cache/uv
 EXPOSE 8000
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=6 \
   CMD ["python", "-c", "import os, urllib.request; urllib.request.urlopen(f\"http://127.0.0.1:{os.environ.get('PORT', '8000')}/api/health\", timeout=4)"]

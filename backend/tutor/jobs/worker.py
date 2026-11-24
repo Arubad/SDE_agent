@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
@@ -18,6 +18,9 @@ from backend.core.trace import start_trace
 from backend.tutor.jobs import queue
 from backend.tutor.jobs.queue import PermanentError, RetryableError  # noqa: F401  (re-exported for handlers)
 from backend.tutor.models import Job
+
+if TYPE_CHECKING:
+    from backend.tutor.mcp.gateway import Gateway
 
 log = logging.getLogger(__name__)
 
@@ -42,7 +45,8 @@ class JobContext:
     engine: Engine
     net: Any = None
     settings: Any = None
-    index: Any = None  # built in a later task
+    index: Any = None
+    gateway: Gateway | None = None  # the MCP gateway the API started (None: no gateway runs)
 
     def enqueue(self, type: str, payload: dict, key_parts: tuple | list = (), parent_id: int | None = None,
                 *, roadmap_id: uuid.UUID, max_attempts: int = 5) -> Job:
