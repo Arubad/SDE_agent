@@ -4,6 +4,7 @@ Import the fixtures into a test module (`from backend.tutor.tests.tutor_helpers 
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import uuid
 from datetime import datetime, timezone
@@ -48,11 +49,22 @@ class FakeGateway:
     calls: list[tuple[str, dict, Any]] = field(default_factory=list)  # (name, args, ctx)
     released: list[str] = field(default_factory=list)
     url_sources: tuple[str, ...] = ("web.search", "web__search")
+    # Tools the real gateway puts to `ctx.approve` first (servers.json `rules.ask`): the approver gets
+    # `{"tool", "server", "agent", "args"}` in a worker thread, only a literal True lets the call through, and every
+    # answer is recorded in `approvals` as `(name, payload, answer)`.
+    ask: tuple[str, ...] = ()
+    approvals: list[tuple[str, dict, Any]] = field(default_factory=list)
 
     async def tool_defs(self, agent: str) -> list[dict]:
         return list(self.defs.get(agent, []))
 
     async def call(self, name: str, args: dict, ctx) -> dict:
+        if name in self.ask:
+            payload = {"tool": name, "server": name.split(".")[0], "agent": ctx.agent, "args": copy.deepcopy(args)}
+            answer = await asyncio.to_thread(ctx.approve, payload) if ctx.approve is not None else False
+            self.approvals.append((name, payload, answer))
+            if answer is not True:
+                return {"error": f"{name} was not approved"}
         self.calls.append((name, args, ctx))
         result = self.results.get(name, {"error": f"unknown tool {name}"})
         out = copy.deepcopy(result(args) if callable(result) else result)

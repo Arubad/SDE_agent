@@ -43,9 +43,10 @@ def instant_retries(monkeypatch):
     monkeypatch.setattr(budget, "RETRY_DELAYS", (0.0, 0.0))
 
 
-# Routing tests: a teacher and an assessor that reply PLACEHOLDER_TEXT with no model call (the real ones:
-# test_tutor_teacher.py, test_tutor_assessor.py).
-STUB_TEACHER = {"teacher": _placeholder("teacher"), "assessor": _placeholder("assessor")}
+# Routing tests: a teacher, an assessor and a researcher that reply PLACEHOLDER_TEXT with no model call (the real
+# ones: test_tutor_teacher.py, test_tutor_assessor.py, test_tutor_researcher.py).
+STUB_TEACHER = {"teacher": _placeholder("teacher"), "assessor": _placeholder("assessor"),
+                "researcher": _placeholder("researcher")}
 
 
 @pytest.fixture

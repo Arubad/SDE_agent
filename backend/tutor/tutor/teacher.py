@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import re
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -46,16 +45,23 @@ from backend.agent.loop import default_model_turn, run_tool_loop
 from backend.core.llm import LLMUnavailable, haiku_json
 from backend.core.trace import current_trace
 from backend.tutor.db import session_scope
-from backend.tutor.ingest.fetch import system_resolver
 from backend.tutor.learner.store import get_progress
 from backend.tutor.mcp.gateway import CallContext
-from backend.tutor.mcp.policy import UrlPolicy, search_result_urls, text_urls
+from backend.tutor.mcp.policy import text_urls
 from backend.tutor.models import Resource
 from backend.tutor.repo import get_roadmap_by_slug
 from backend.tutor.tutor.budget import Budget, BudgetExceeded, with_llm_retry
 from backend.tutor.tutor.compaction import compact
 from backend.tutor.tutor.graph import Group, node
 from backend.tutor.tutor.state import TutorState, reply_event
+from backend.tutor.tutor.toolloop import (
+    WEB_NAMESPACES,
+    Seen,
+    budgeted_model_turn,
+    namespace,
+    seeded_policy,
+    url_key,
+)
 from backend.tutor.untrusted import unwrap, wrap
 
 if TYPE_CHECKING:
@@ -63,13 +69,10 @@ if TYPE_CHECKING:
 
 CONTINUE_TEXT = "Continue the lesson on today's skill."
 SESSION_OPENING = "(The session starts.)"  # sent first when the stored history opens with the tutor
-WEB_NAMESPACES = frozenset({"web", "browser", "docs", "repo", "papers", "ref"})  # D11's web tool results
 MAX_ALLOWED_URLS = 500
 MAX_PROGRESS_LINES = 12
 EXCERPT_CHARS = 1500
 CONTRADICTION_INPUTS = 3
-_CITATION = re.compile(r"\[\d+\]")
-_EXCERPT_KEYS = ("snippet", "markdown", "content", "text", "summary", "description")
 
 TEACHER_SYSTEM = """You are a patient tutor. You teach one learner from their own study roadmap.
 
@@ -169,72 +172,6 @@ def _wire_messages(history: list[dict], summary: str, turn: str) -> list[dict]:
     return out
 
 
-# --- what this turn's tools returned ------------------------------------------------------------------------
-
-def _key(url: str) -> str:
-    return url.rstrip("/")
-
-
-def _namespace(name: str) -> str:
-    """`kb` of `kb__search` / `kb.search`, `docs` of `docs_mslearn__x` / `docs.mslearn.x`."""
-    return re.split(r"[._]", name, maxsplit=1)[0]
-
-
-def _strings(obj) -> list[str]:
-    if isinstance(obj, str):
-        return [obj]
-    items = obj.values() if isinstance(obj, dict) else obj if isinstance(obj, list) else ()
-    return [s for v in items for s in _strings(v)]
-
-
-def _dicts(obj) -> list[dict]:
-    items = obj.values() if isinstance(obj, dict) else obj if isinstance(obj, list) else ()
-    return ([obj] if isinstance(obj, dict) else []) + [d for v in items for d in _dicts(v)]
-
-
-class _Seen:
-    """URLs in this turn's web-namespace tool results: every URL (first seen first), the search-result URLs, and
-    per URL a title (from a search result) and an excerpt (the text that came with it)."""
-
-    def __init__(self) -> None:
-        self.urls: dict[str, str] = {}  # _key -> URL
-        self.search: list[str] = []
-        self.titles: dict[str, str] = {}
-        self.excerpts: dict[str, str] = {}
-
-    def _add(self, url: str) -> None:
-        self.urls.setdefault(_key(url), url)
-
-    def add(self, data: Any) -> None:
-        for url in search_result_urls(data):
-            self.search.append(unwrap(url))
-        for d in _dicts(data):
-            url = next((unwrap(d[k]) for k in ("url", "final_url") if isinstance(d.get(k), str)), None)
-            if not url:
-                continue
-            if isinstance(d.get("title"), str):
-                self.titles.setdefault(_key(url), unwrap(d["title"]))
-            text = next((unwrap(d[k]) for k in _EXCERPT_KEYS if isinstance(d.get(k), str) and d[k]), None)
-            if text:
-                self.excerpts.setdefault(_key(url), text)
-        for s in map(unwrap, _strings(data)):
-            for url in text_urls(s):
-                self._add(url)
-                if s.strip() != url:  # a bare URL leaf is no excerpt
-                    self.excerpts.setdefault(_key(url), s)
-
-    def web_sources(self, answer: str) -> list[dict]:
-        """The seen URLs the answer mentions, in first-mention order, deduplicated. Citation markers are dropped
-        first: `render_citations` appends `[n]` straight after a block's text, URL included."""
-        out, done = [], set()
-        for url in text_urls(_CITATION.sub(" ", answer)):
-            k = _key(url)
-            if k in self.urls and k not in done:
-                done.add(k)
-                out.append({"url": url, "title": self.titles.get(k) or url})
-        return out
-
-
 # --- resource proposals ---------------------------------------------------------------------------------------
 
 def _kind(url: str) -> str:
@@ -288,11 +225,11 @@ def _load(engine, slug: str) -> tuple[list[dict] | None, list[str]]:
     return snapshot, urls
 
 
-async def _contradiction(sources: list[dict], seen: _Seen, web: list[dict], budget: Budget, trace) -> str | None:
+async def _contradiction(sources: list[dict], seen: Seen, web: list[dict], budget: Budget, trace) -> str | None:
     """The contradiction notice, or None. It never fails the turn (R9): with no web excerpt there is nothing to
     compare, and a breached budget or an outage after the retries leaves the finished answer without a notice."""
     roadmap = [wrap(p["text"][:EXCERPT_CHARS]) for p in sources[:CONTRADICTION_INPUTS]]
-    excerpts = [seen.excerpts[_key(w["url"])] for w in web if _key(w["url"]) in seen.excerpts]
+    excerpts = [seen.excerpts[url_key(w["url"])] for w in web if url_key(w["url"]) in seen.excerpts]
     web_texts = [wrap(e[:EXCERPT_CHARS]) for e in excerpts[:CONTRADICTION_INPUTS]]
     if not roadmap or not web_texts:
         return None
@@ -333,14 +270,13 @@ async def _turn(deps: TutorDeps, state: TutorState, writer: Callable[[dict], Non
     turn = context_block(state.get("today"), snapshot, mode, roadmap=slug) + "\n\n" + text
     user_urls = _user_urls([*history, {"role": "user", "content": text}])
 
-    policy = UrlPolicy(resolver=deps.url_resolver or system_resolver)
     seed = list(dict.fromkeys([*(state.get("allowed_urls") or []), *user_urls, *resource_urls]))
     # Hosts only, no DNS (up to MAX_ALLOWED_URLS + the roadmap's URLs every turn); `refusal` resolves at use time.
-    policy.allow_hosts(seed)
+    policy = seeded_policy(deps, seed)
 
     trace = current_trace()
     ctx = CallContext(agent="teacher", policy=policy, trace=trace, lease=session_id)
-    seen = _Seen()
+    seen = Seen()
     settings = deps.settings
     budget = Budget(settings.tutor_max_steps, settings.tutor_max_tokens, settings.tutor_max_usd)
 
@@ -351,13 +287,13 @@ async def _turn(deps: TutorDeps, state: TutorState, writer: Callable[[dict], Non
         if name == PROPOSE_TOOL["name"]:
             return await propose(args)
         out = await deps.gateway.call(name, args, ctx)
-        if _namespace(name) in WEB_NAMESPACES and "data" in out:
+        if namespace(name) in WEB_NAMESPACES and "data" in out:
             seen.add(out["data"])
         return out
 
     async def propose(args: dict) -> dict:
         url, skill_ids = unwrap(args.get("url")), args.get("skill_ids")
-        if not isinstance(url, str) or _key(url) not in seen.urls:
+        if not isinstance(url, str) or url_key(url) not in seen.urls:
             return {"error": "propose only a URL that appeared in a web tool result this turn"}
         if (why := await asyncio.to_thread(policy.refusal, url)) is not None:
             return {"error": f"that URL cannot be proposed: {why}"}
@@ -369,18 +305,7 @@ async def _turn(deps: TutorDeps, state: TutorState, writer: Callable[[dict], Non
     tool_defs = [*await deps.gateway.tool_defs("teacher"), PROPOSE_TOOL]
     step = default_model_turn(system=TEACHER_SYSTEM, tool_defs=tool_defs, trace=trace, emit=emit)
 
-    async def model_turn(messages: list[dict], allow_tools: bool):
-        budget.check(trace)
-        attempts = 0
-
-        async def once():
-            nonlocal attempts
-            if attempts:
-                await emit({"type": "reply_delta", "delta": "", "reset": True})  # drop the partial text
-            attempts += 1
-            return await step(messages, allow_tools)
-
-        return await with_llm_retry(once)
+    model_turn = budgeted_model_turn(step, budget, trace, emit)
 
     result = await run_tool_loop(
         _wire_messages(history, state.get("summary") or "", turn), system=TEACHER_SYSTEM,

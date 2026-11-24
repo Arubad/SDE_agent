@@ -36,7 +36,8 @@
     "teacher": ["kb.*", "web.search", "web.fetch", "browser.navigate", "browser.snapshot", "browser.navigate_back",
                 "docs.*", "repo.*", "papers.*", "ref.*", "learner.recall", "learner.get_progress"],
     "researcher": ["kb.search", "web.search", "web.fetch", "browser.navigate", "browser.snapshot", "docs.*",
-                   "repo.*", "papers.*", "ref.*"],
+                   "repo.*", "papers.*", "ref.*", "ingest.create_roadmap", "ingest.approve_roadmap",
+                   "ingest.ingestion_status"],
     "assessor": ["kb.search"],
     "crawler": ["browser.navigate", "browser.evaluate", "browser.close"]
   },

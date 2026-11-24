@@ -167,12 +167,18 @@ def add_teacher(builder: StateGraph, deps: TutorDeps) -> Group:
     return add(builder, deps)
 
 
+def add_researcher(builder: StateGraph, deps: TutorDeps) -> Group:
+    from backend.tutor.tutor.researcher import add_researcher as add  # researcher imports this module
+
+    return add(builder, deps)
+
+
 GROUPS: dict[str, Adder] = {
     "session_start": add_session_start,
     "planner": add_planner,
     "teacher": add_teacher,
     "assessor": add_assessor,
-    "researcher": _placeholder("researcher"),
+    "researcher": add_researcher,
     "exercise_stub": add_exercise_stub,
 }
 
