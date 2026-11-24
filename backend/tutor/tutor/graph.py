@@ -148,9 +148,15 @@ def add_session_start(builder: StateGraph, deps: TutorDeps) -> Group:
     return add(builder, deps)
 
 
+def add_planner(builder: StateGraph, deps: TutorDeps) -> Group:
+    from backend.tutor.tutor.planner import add_planner as add  # planner imports this module
+
+    return add(builder, deps)
+
+
 GROUPS: dict[str, Adder] = {
     "session_start": add_session_start,
-    "planner": _placeholder("planner"),
+    "planner": add_planner,
     "teacher": _placeholder("teacher"),
     "assessor": _placeholder("assessor"),
     "researcher": _placeholder("researcher"),

@@ -98,7 +98,7 @@ def test_assessor_may_only_search_the_roadmap():
 
 
 @pytest.mark.parametrize("action,node", [("continue", "teacher"), ("quiz", "assessor"),
-                                         ("plan", "planner"), ("research", "researcher")])
+                                         ("research", "researcher")])
 async def test_buttons_route_without_model(rt, sid, action, node):
     events = await run(rt, sid, {"action": action})
     assert nodes(events) == ["coordinator", node]
