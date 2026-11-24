@@ -34,7 +34,7 @@ from backend.tutor.mcp.registry import set_enabled
 from backend.tutor.repo import DuplicateRoadmap, create_roadmap, get_roadmap_by_slug, list_roadmaps
 from backend.tutor.roadmap.parse import normalize_spec
 from backend.tutor.settings import Settings
-from backend.tutor import tutor_api
+from backend.tutor import memory_api, tutor_api
 from backend.tutor.tutor import retention
 from backend.tutor.tutor.checkpoint import open_saver
 from backend.tutor.tutor.graph import TutorDeps, build_tutor_graph
@@ -148,7 +148,7 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
                 stack.callback(app.state.tracer_provider.shutdown)
             app.state.net = make_net(settings, app.state.engine)
             # The embedder loads its models lazily, on first use; the index makes no request until then either.
-            embedder = make_embedder(settings)
+            embedder = app.state.embedder = make_embedder(settings)
             index = make_index(settings, embedder)
             # Two sets from the same (thread-safe) dependencies: a FastMCP instance is never shared between event
             # loops. One is served over HTTP on this (uvicorn's) loop, the other runs inproc on the gateway's loop.
@@ -411,6 +411,7 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
 
     app.add_exception_handler(tutor_api.TutorUnavailable, tutor_api.unavailable_handler)
     app.include_router(tutor_api.router)  # before the SPA catch-all
+    app.include_router(memory_api.router)
 
     dist = Path(settings.web_dist).resolve()
     index = dist / "index.html"
