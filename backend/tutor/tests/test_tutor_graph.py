@@ -157,6 +157,20 @@ async def test_qa_mode_sends_routes_to_teacher(engine, rt, route, node):
     assert nodes(events) == ["coordinator", node]
 
 
+@pytest.mark.parametrize("action,expected", [("start", ["coordinator"]), ("research", ["coordinator", "researcher"]),
+                                             ("continue", ["coordinator", "teacher"]),
+                                             ("quiz", ["coordinator", "teacher"]),
+                                             ("recap", ["coordinator", "teacher"]),
+                                             ("plan", ["coordinator", "teacher"])])
+async def test_qa_mode_actions(engine, rt, action, expected):
+    """R6: in qa mode `start` ends the turn with no reply, `research` keeps its target, the rest go to the teacher."""
+    events = await run(rt, new_session(engine, mode="qa"), {"action": action})
+    assert nodes(events) == expected
+    assert route_requests(fake_llm.requests) == []
+    if action == "start":
+        assert [e["type"] for e in events] == ["node", "done"]
+
+
 async def test_graph_input_carries_the_session(engine, clear_memo):  # noqa: F811
     seen = {}
 
@@ -235,6 +249,9 @@ async def test_interrupt_event_and_resume(engine, clear_memo, monkeypatch):  # n
     events = await run(rt, sid, {"action": "continue"})
     assert [e["type"] for e in events] == ["node", "node", "interrupt", "done"]
     assert interrupts(events) == [{"kind": "pick", "summary": "pick one"}]
+    [paused] = [s for s in events[-1]["trace"]["spans"] if s["name"] == "node:teacher"]
+    assert paused["status"] == "interrupted" and "error" not in paused  # a pause is not a failure
+    assert "pick one" not in json.dumps(events[-1]["trace"])  # nor is its value copied into the trace
     assert await rt.pending(sid) == {"kind": "pick", "summary": "pick one"}
     assert (await rt.state(sid))["pending"] == {"kind": "pick", "summary": "pick one"}
 
@@ -246,6 +263,23 @@ async def test_interrupt_event_and_resume(engine, clear_memo, monkeypatch):  # n
     assert nodes(events) == ["teacher"] and replies(events) == ["you said skip"]
     assert await rt.pending(sid) is None
     assert (await rt.state(sid))["messages"] == [{"role": "assistant", "content": "answered"}]
+    resumed = [s for s in events[-1]["trace"]["spans"] if s["name"] == "node:teacher"]
+    assert [s["status"] for s in resumed] == ["ok"]
+
+
+async def test_secret_in_a_resume_value_never_reaches_the_checkpoint(engine, clear_memo, monkeypatch):  # noqa: F811
+    monkeypatch.setitem(RESUME_SHAPES, "pick", lambda v: isinstance(v, dict) and isinstance(v.get("choice"), str))
+    rt = make_runtime(engine, {"teacher": _asking_teacher()})
+    sid = new_session(engine)
+    await run(rt, sid, {"action": "continue"})
+    secret = "sk-ant-abcdefghijklmnop"
+    events = await run(rt, sid, {"resume": {"choice": f"my key is {secret}"}})
+    assert replies(events) and secret not in json.dumps(events)
+    assert secret not in replies(events)[0] and replies(events)[0].startswith("you said my key is")
+    cfg = {"configurable": {"thread_id": sid}}
+    saved = [(c.checkpoint, c.pending_writes, c.metadata) async for c in rt.deps.saver.alist(cfg)]
+    assert saved and secret not in json.dumps(saved, default=repr)
+    assert secret not in json.dumps(await rt.state(sid))
 
 
 async def test_resume_of_a_kind_without_validator_is_bad(engine, clear_memo):  # noqa: F811

@@ -6,7 +6,8 @@
   `SessionEnded`.
 - Turns: `{"text": str}` (redacted before it enters graph state), `{"action": Action}` (plus `"topic"` with
   `research`), or `{"resume": value}`, which needs a pending interrupt whose `kind` has a validator in RESUME_SHAPES
-  that accepts `value`; otherwise `BadResume`, before the graph runs, so state is unchanged.
+  that accepts `value`; otherwise `BadResume`, before the graph runs, so state is unchanged. The value is then
+  `redact_obj`ed (its strings; dict keys are not learner text) before the graph sees it.
 - A text or action turn while an interrupt is pending abandons it (R5): the new input starts a fresh run from
   START; the state before the interrupt is kept, and `pending()` is None afterwards. LangGraph does exactly this
   when a thread with pending tasks gets new (non-Command) input, so no state surgery is needed; a test pins it.
@@ -99,7 +100,8 @@ class TutorRuntime:
                 if set(turn) != {"resume"}:
                     raise ValueError(f"not a tutor turn: {sorted(turn)}")
                 await self._check_resume(cfg, turn["resume"])
-                graph_input: Any = Command(resume=turn["resume"])
+                # Learner text in a resume (e.g. quiz answers) is redacted before it reaches the checkpoint.
+                graph_input: Any = Command(resume=redact_obj(turn["resume"]))
             else:
                 graph_input = {"roadmap": row["roadmap"], "session_id": session_id, "mode": row["mode"],
                                "input": _input(turn)}

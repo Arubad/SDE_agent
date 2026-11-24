@@ -3,7 +3,8 @@ every model call goes through `backend/core/llm.py`.
 
 Shape: START -> coordinator -> <group> ... -> END.
 - Buttons (`input.action`) route by ACTION_MAP with no model call; free text (`input.text`) is classified by
-  `coordinator.classify` and routes by ROUTE_MAP. In `qa` mode every route but `new_topic` goes to the teacher.
+  `coordinator.classify` and routes by ROUTE_MAP. In `qa` mode every route but `new_topic` goes to the teacher,
+  and actions follow QA_ACTIONS (`start` ends the turn, `research` -> researcher, the rest -> teacher).
 - Targets are *groups*, not nodes. A group is a sequence of nodes added by one adder function,
   `add_<group>(builder, deps) -> Group`, registered in GROUPS. The adder adds its nodes (each wrapped with `node`)
   and its internal edges, and returns its entry node and its exit node. `build_tutor_graph` points the routes at
@@ -24,6 +25,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from langgraph.config import get_stream_writer
+from langgraph.errors import GraphBubbleUp
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
@@ -39,6 +41,8 @@ ROUTE_MAP = {"continue_lesson": "teacher", "question": "teacher", "quiz_me": "as
 ACTION_MAP = {"start": "session_start", "continue": "teacher", "quiz": "assessor", "recap": "session_start",
               "plan": "planner", "research": "researcher"}
 QA_ROUTES = {"new_topic"}  # in qa mode, the routes that keep their target; the rest go to the teacher
+# In qa mode (R6): `start` ends the turn (no reply), `research` keeps its target, every other action -> teacher.
+QA_ACTIONS = {"start": END, "research": "researcher"}
 FOLLOWS = {"exercise_stub": "teacher"}  # a group's exit continues into another group (default END)
 
 
@@ -69,12 +73,19 @@ def emit(event: TurnEvent) -> None:
 
 
 def node(name: str, fn: NodeFn) -> NodeFn:
-    """`fn` wrapped: a `node` event, then `fn` inside the `node:<name>` span."""
+    """`fn` wrapped: a `node` event, then `fn` inside the `node:<name>` span. LangGraph's control flow (an
+    `interrupt()`, a `Command` to a parent: `GraphBubbleUp`) is not a failure: the span ends with status
+    `interrupted` and no error text (an interrupt's value may hold learner data), then it propagates."""
 
     async def run(state: TutorState) -> dict | None:
         emit({"type": "node", "name": name})
-        with current_trace().span(f"node:{name}", kind="node"):
-            return await fn(state)
+        with current_trace().span(f"node:{name}", kind="node") as span:
+            try:
+                return await fn(state)
+            except GraphBubbleUp as e:
+                span.status = "interrupted"
+                paused = e
+        raise paused
 
     run.__name__ = name
     return run
@@ -87,11 +98,11 @@ def single(builder: StateGraph, name: str, fn: NodeFn) -> Group:
 
 def route_target(state: TutorState) -> str:
     """The group the coordinator's decision leads to."""
-    inp = state.get("input") or {}
+    inp, qa = state.get("input") or {}, state.get("mode") == "qa"
     if "action" in inp:
-        return ACTION_MAP[inp["action"]]
+        return QA_ACTIONS.get(inp["action"], "teacher") if qa else ACTION_MAP[inp["action"]]
     route = state["route"]
-    if state.get("mode") == "qa" and route not in QA_ROUTES:
+    if qa and route not in QA_ROUTES:
         return "teacher"
     return ROUTE_MAP[route]
 
@@ -147,7 +158,7 @@ def build_tutor_graph(deps: TutorDeps, groups: Mapping[str, Adder] | None = None
         entries[name], exits[name] = group.entry, group.exit
     builder.add_edge(START, coordinator.entry)
     targets = set(ROUTE_MAP.values()) | set(ACTION_MAP.values())
-    builder.add_conditional_edges(coordinator.exit, route_target, {t: entries[t] for t in targets})
+    builder.add_conditional_edges(coordinator.exit, route_target, {END: END, **{t: entries[t] for t in targets}})
     for name, exit_node in exits.items():
         if exit_node is not None:
             builder.add_edge(exit_node, entries[FOLLOWS[name]] if name in FOLLOWS else END)
