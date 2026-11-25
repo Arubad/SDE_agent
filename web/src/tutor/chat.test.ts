@@ -169,6 +169,20 @@ describe("runTurn", () => {
   });
 });
 
+describe("runTurn after a server error frame (M2)", () => {
+  it("keeps the server's error message instead of the generic one", async () => {
+    const seen: { type: string; message?: unknown }[] = [];
+    const stream = async (_p: string, on: (n: string, d: unknown) => void) => {
+      on("error", { type: "error", message: "Something went wrong; your session is saved." });
+    };
+    const ok = await runTurn("/p", { action: "continue" }, (ev) => seen.push(ev), new AbortController().signal, stream);
+    expect(ok).toBe(false);
+    expect(seen.filter((e) => e.type === "error")).toEqual([
+      { type: "error", message: "Something went wrong; your session is saved." },
+    ]);
+  });
+});
+
 describe("reset and controls", () => {
   it("reset clears the old session's timeline, created roadmap, error and card", () => {
     let s = reduce(initial, { type: "roadmap_created", slug: "x" });

@@ -103,8 +103,8 @@ def _net(search=None):
     return Net(fetcher=base.fetcher, search=search or RecordingSearch(), youtube=base.youtube)
 
 
-def _rt(engine, gw, net=None):
-    return make_runtime(engine, gateway=gw, url_resolver=public_resolver, net=net or _net())
+def _rt(engine, gw, net=None, **kw):
+    return make_runtime(engine, gateway=gw, url_resolver=public_resolver, net=net or _net(), **kw)
 
 
 def _research(md=MD):
@@ -406,3 +406,15 @@ async def test_a_link_found_only_in_a_fetched_body_is_dropped(engine, clear_memo
         (card,) = interrupts(await run(rt, sid, {"action": "research", "topic": "probes"}))
     src = card["payload"]["args"]["source_text"]
     assert GOOD + "/body" not in src and "Body" in src and GOOD in src
+
+
+@pytest.mark.parametrize("stop,notice", [("budget", "I reached this turn's step limit; the answer may be incomplete."),
+                                         ("truncated", "The answer was cut off at the length limit.")])
+async def test_an_incomplete_research_answer_says_so_on_the_card(engine, clear_memo, stop, notice):  # noqa: F811
+    from backend.tutor.settings import Settings
+
+    rt, sid = _rt(engine, _gateway(engine), settings=Settings(tutor_max_steps=2)), new_session(engine)
+    last = FakeReply(text=MD, stop_reason="max_tokens" if stop == "truncated" else None)
+    with fake_llm.script([FakeReply(tool_uses=[("web__search", {"query": "probes"})]), last]):
+        (card,) = interrupts(await run(rt, sid, {"action": "research", "topic": "probes"}))
+    assert card["summary"] == f"New roadmap 'K8s Ops': 2 skills, 2 resources. {notice}"

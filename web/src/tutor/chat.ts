@@ -292,7 +292,8 @@ type Streamer = (
 
 /**
  * POST one turn and feed its events to `dispatch`. Resolves true when the stream ended with `done`; false when
- * it ended without one (an `error` event is dispatched, and the caller reloads the session). HTTP errors throw
+ * it ended without one (the caller reloads the session): then an `error` event is dispatched, unless the server
+ * already sent one (its message is the more specific one). HTTP errors throw
  * `ApiError`; show them with `turnErrorText`.
  */
 export async function runTurn(
@@ -303,18 +304,20 @@ export async function runTurn(
   stream: Streamer = streamEvents,
 ): Promise<boolean> {
   let finished = false;
+  let errored = false;
   dispatch({ type: "turn_start" });
   await stream(
     path,
     (name, data) => {
       if (name === "done") finished = true;
+      if (name === "error") errored = true;
       const fields = data && typeof data === "object" ? (data as object) : {};
       dispatch({ ...fields, type: name });
     },
     signal,
     { method: "POST", body },
   );
-  if (!finished && !signal.aborted) dispatch({ type: "error", message: DID_NOT_FINISH });
+  if (!finished && !errored && !signal.aborted) dispatch({ type: "error", message: DID_NOT_FINISH });
   return finished;
 }
 

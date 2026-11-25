@@ -448,3 +448,25 @@ async def test_retention_loop_ends_idle_sessions_only_with_a_runtime(monkeypatch
         await asyncio.sleep(0.05)
         task.cancel()
     assert seen == ["rt"]
+
+
+
+# --- canonical session ids (M3) -------------------------------------------------------------------------------
+
+async def test_an_upper_case_id_shares_the_lock_and_the_thread(engine, clear_memo):  # noqa: F811
+    enq = Enqueued()
+    rt, sid, release, turn = await _running_turn(engine, enq)
+    with pytest.raises(Busy):  # the same session, spelt differently, is the same lock
+        await asyncio.wait_for(run(rt, sid.upper(), {"action": "continue"}), 5)
+    release.set()
+    await turn
+    other = new_session(engine)
+    rt2 = make_runtime(engine, enqueue=enq)
+    with fake_llm.script([FakeReply(json={"route": "question"}), FakeReply(text="hello")]):
+        await run(rt2, other.upper(), {"text": "hi"})
+    assert [m["role"] for m in (await rt2.state(other))["messages"]] == ["user", "assistant"]
+    assert (await rt2.state(other.upper()))["messages"] == (await rt2.state(other))["messages"]
+    assert await rt2.pending(other.upper()) is None
+    for call in (rt2.state("not-a-uuid"), rt2.pending("not-a-uuid"), run(rt2, "not-a-uuid", {"text": "x"})):
+        with pytest.raises(LookupError):
+            await call

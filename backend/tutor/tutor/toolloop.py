@@ -13,6 +13,9 @@ from backend.tutor.mcp.registry import DEFAULT_URL_SOURCES
 from backend.tutor.tutor.budget import Budget, with_llm_retry
 from backend.tutor.untrusted import unwrap
 
+# `run_tool_loop`'s stop reasons a reply must own up to (M11); "answered" and "refusal" need no notice.
+STOP_NOTICES = {"budget": "I reached this turn's step limit; the answer may be incomplete.",
+                "truncated": "The answer was cut off at the length limit."}
 FETCH_TOOLS = frozenset({"web.fetch", wire_name("web.fetch")})
 BLANK = "about:blank"
 _CITATION = re.compile(r"\[\d+\]")
@@ -44,6 +47,12 @@ def budgeted_model_turn(step, budget: Budget, trace, emit: Callable) -> Callable
         return await with_llm_retry(once)
 
     return model_turn
+
+
+def stop_notice(stop: str, extra: str | None = None) -> str | None:
+    """The notice for a loop that stopped at its step limit or was cut off, with `extra` (e.g. a contradiction
+    notice) appended; `extra` alone otherwise."""
+    return " ".join(n for n in (STOP_NOTICES.get(stop), extra) if n) or None
 
 
 def url_source_names(gateway) -> frozenset[str]:

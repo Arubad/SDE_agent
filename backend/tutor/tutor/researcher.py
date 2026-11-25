@@ -10,7 +10,8 @@ found, an error, a decline) by clearing `state.proposal`; the edges after `resea
   history-free. Its answer is a Markdown roadmap; every link whose URL is not a source URL of this turn's tool
   results (`toolloop.Seen`, R21: search results, fetch final_urls, Page URL lines; never page bodies) (or fails the
   URL policy) is reduced to its title (links are rebuilt without title attributes), bare disallowed URLs are removed, and
-  URLs beyond MAX_RESOURCES are neutralised. `state.proposal` = `{"slug", "title", "source_text", "key", "id", "allowed"}`.
+  URLs beyond MAX_RESOURCES are neutralised. `state.proposal` = `{"slug", "title", "source_text", "key", "id", "allowed",
+  "notice"}`; `notice` (a loop stopped at its step limit or cut off, M11) is appended to the first card's summary.
 - Both approval nodes call `interrupt()` first (D8) with a card built from `state.proposal`. The gateway's `ask`
   tools get sync approvers built from the args the learner approved: `lambda p: p["args"] == approved_args`.
 - `research_create` calls `ingest.create_roadmap` (it parses; the ingest server returns no spec to the gateway's
@@ -53,6 +54,7 @@ from backend.tutor.tutor.toolloop import (
     budgeted_model_turn,
     namespace,
     seeded_policy,
+    stop_notice,
     url_key,
     url_source_names,
 )
@@ -178,9 +180,10 @@ def _request(state: TutorState) -> str:
     return f"Research this topic and build the roadmap: {_topic(state)}"
 
 
-def _done(state: TutorState, text: str, **extra) -> dict:
-    """Reply `text`, store the request and the reply as the turn's messages, and clear the proposal."""
-    emit(reply_event(text))
+def _done(state: TutorState, text: str, notice: str | None = None, **extra) -> dict:
+    """Reply `text` (with `notice`), store the request and the reply as the turn's messages, and clear the
+    proposal."""
+    emit(reply_event(text, notice=notice))
     history = list(state.get("messages") or [])
     inp = state.get("input") or {}
     if "text" in inp and history and history[-1] == {"role": "user", "content": inp["text"]}:
@@ -254,19 +257,21 @@ async def research(deps: TutorDeps, state: TutorState) -> dict:
     if not topic:
         return _done(state, NO_TOPIC_TEXT)
     try:
-        markdown = await _research_markdown(deps, state, topic)
+        markdown, notice = await _research_markdown(deps, state, topic)
     finally:
         await deps.gateway.release(state["session_id"])
     if not count_skills(markdown):
-        return _done(state, NOTHING_FOUND_TEXT)
+        return _done(state, NOTHING_FOUND_TEXT, notice)
     title = title_of(markdown, topic)
     slug = await asyncio.to_thread(slug_for, title, deps.engine)
     return {"proposal": {"slug": slug, "title": title, "source_text": markdown, "key": uuid.uuid4().hex,
-                         "id": uuid.uuid4().hex, "allowed": extract_urls(markdown)}}  # `id`: the card's id (R10), made before its interrupt node
+                         "id": uuid.uuid4().hex, "allowed": extract_urls(markdown),  # `id`: the card's id (R10),
+                         "notice": notice}}  # made before its interrupt node
 
 
-async def _research_markdown(deps: TutorDeps, state: TutorState, topic: str) -> str:
-    """The researcher's roadmap text with every unseen or refused link stripped."""
+async def _research_markdown(deps: TutorDeps, state: TutorState, topic: str) -> tuple[str, str | None]:
+    """The researcher's roadmap text with every unseen or refused link stripped, and the notice of a loop that
+    stopped at its step limit or was cut off (M11), else None."""
     settings, trace = deps.settings, current_trace()
     policy = seeded_policy(deps, text_urls(topic))
     ctx = CallContext(agent="researcher", policy=policy, trace=trace, lease=state["session_id"])
@@ -289,7 +294,7 @@ async def _research_markdown(deps: TutorDeps, state: TutorState, topic: str) -> 
         [{"role": "user", "content": _request(state)}], system=RESEARCH_SYSTEM, tool_defs=tool_defs,
         call_tool=call_tool, check_call=lambda name, args, seen_ids: None, trace=trace, emit=swallow,
         max_steps=settings.tutor_max_steps, model_turn=budgeted_model_turn(step, budget, trace, swallow))
-    return await strip_links(result.text, set(seen.urls), policy)
+    return await strip_links(result.text, set(seen.urls), policy), stop_notice(result.stop)
 
 
 def add_researcher(builder: StateGraph, deps: TutorDeps) -> Group:
@@ -303,7 +308,7 @@ def add_researcher(builder: StateGraph, deps: TutorDeps) -> Group:
         answer = interrupt(_approval(
             p["id"], "create_roadmap",
             f"New roadmap '{p['title']}': {count_skills(p['source_text'])} skills, "
-            f"{count_resources(p['source_text'])} resources",
+            f"{count_resources(p['source_text'])} resources" + (f". {p['notice']}" if p.get("notice") else ""),
             {"tool": "ingest.create_roadmap", "args": _create_args(p)}))  # first statement (D8)
         return None if answer["approved"] else _done(state, DECLINED_CREATE_TEXT)
 

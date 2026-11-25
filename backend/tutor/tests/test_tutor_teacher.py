@@ -372,6 +372,21 @@ async def test_policy_seeded_and_allowed_urls_stored(engine, rt, sid, gw):
     assert "https://old0.example/" not in stored and "https://old1.example/" not in stored  # oldest dropped
 
 
+async def test_policy_seeds_no_proposed_or_dismissed_resource(engine, rt, sid, gw):
+    """M4: only resources the learner kept (not proposed, not dismissed) seed the URL policy."""
+    rm_id = _roadmap_id(engine, sid)
+    with session_scope(engine) as s:
+        for key, status in (("k", "pending"), ("p", "proposed"), ("d", "dismissed")):
+            s.add(Resource(roadmap_id=rm_id, key=key, stage_id="s1", title=key, kind="article", status=status,
+                           url=f"https://{status}.example/a"))
+    with fake_llm.script([FakeReply(tool_uses=[("kb__search", {"query": "q"})]), FakeReply(text="ok")]):
+        await run(rt, sid, {"action": "continue"})
+    policy = gw.calls[0][2].policy
+    assert policy.refusal("https://pending.example/b") is None
+    assert policy.refusal("https://proposed.example/b") is not None
+    assert policy.refusal("https://dismissed.example/b") is not None
+
+
 async def test_seeding_resolves_nothing(engine, clear_memo, gw, sid):  # noqa: F811
     calls = []
 
@@ -444,6 +459,31 @@ async def test_only_url_source_tools_give_web_sources(rt, sid, gw):
 
 
 # --- budgets, outages, the lease ----------------------------------------------------------------------------
+
+async def test_a_step_limited_answer_says_so(engine, clear_memo, gw, sid):  # noqa: F811
+    """M11: the loop's forced last answer (stop "budget") carries a notice."""
+    rt = _runtime(engine, gw, Settings(tutor_max_steps=2))
+    with fake_llm.script([FakeReply(tool_uses=[("web__search", {"query": "p"})]), FakeReply(text="Partial.")]):
+        events = await run(rt, sid, {"action": "continue"})
+    assert _reply(events)["notice"] == "I reached this turn's step limit; the answer may be incomplete."
+    assert (await _values(rt, sid))["notice"] == _reply(events)["notice"]
+
+
+async def test_a_truncated_answer_says_so(rt, sid):
+    with fake_llm.script([FakeReply(text="Pods are", stop_reason="max_tokens")]):
+        events = await run(rt, sid, {"action": "continue"})
+    assert _reply(events)["notice"] == "The answer was cut off at the length limit."
+
+
+async def test_the_stop_notice_comes_before_a_contradiction(engine, clear_memo, gw, sid):  # noqa: F811
+    rt = _runtime(engine, gw, Settings(tutor_max_steps=2))
+    with fake_llm.script([FakeReply(tool_uses=[("kb__search", {"query": "pods"}), ("web__search", {"query": "p"})]),
+                          FakeReply(text=f"Pods. See {K8S}", citations=[0]),
+                          FakeReply(json={"contradicts": True, "note": "The web says otherwise."})]):
+        events = await run(rt, sid, {"action": "continue"})
+    assert _reply(events)["notice"] == ("I reached this turn's step limit; the answer may be incomplete. "
+                                        "The web says otherwise.")
+
 
 async def test_teacher_budget_stops_turn(engine, clear_memo, gw, sid, monkeypatch):  # noqa: F811
     monkeypatch.setattr(config, "PRICE_TABLE_JSON", '{"fake": {"input": 100.0, "output": 100.0}}')

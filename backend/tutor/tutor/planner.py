@@ -10,6 +10,8 @@ Plan shape: `{"sessions": [{"index", "date", "skills": [id], "minutes"}], "skipp
 """
 from __future__ import annotations
 
+import asyncio
+
 import math
 import uuid
 from collections.abc import Iterator
@@ -98,8 +100,9 @@ def _clean_field(field: str, value: Any) -> Any:
         raise ValueError("deadline must be an ISO date (YYYY-MM-DD) or null") from None
 
 
-def put_study_settings(engine: Engine, slug: str, **fields: Any) -> dict:
-    """Set the given fields (others keep their value), creating the row with the defaults if needed."""
+def put_study_settings(engine: Engine, slug: str, /, **fields: Any) -> dict:
+    """Set the given fields (others keep their value), creating the row with the defaults if needed. `engine` and
+    `slug` are positional-only, so a field of that name is an unknown field (ValueError), never a TypeError (M10)."""
     unknown = sorted(set(fields) - set(_FIELDS))
     if unknown:
         raise ValueError(f"Unknown settings field(s): {', '.join(unknown)}")
@@ -284,33 +287,45 @@ def _roadmap_spec(engine: Engine, slug: str) -> dict:
 def add_planner(builder: StateGraph, deps: TutorDeps) -> Group:
     engine = deps.engine
 
-    def finish(slug: str, plan: dict, version: int) -> dict:
-        card = today_card(engine, slug, plan)
+    # The database work runs in a thread (M5): the nodes run on uvicorn's loop.
+    async def finish(slug: str, plan: dict, version: int) -> dict:
+        card = await asyncio.to_thread(today_card, engine, slug, plan)
         emit({"type": "plan", "today": card, "version": version})
         return {"today": card, "proposal": None}
 
-    async def planner(state: TutorState) -> dict:
-        slug = state["roadmap"]
+    def replan(slug: str) -> tuple[dict | None, dict, int | None]:
+        """(the approval card of a big change, or None; the new plan; the active version)."""
         new = build_plan(_roadmap_spec(engine, slug), get_progress(engine, slug),
                          get_study_settings(engine, slug), today_date())
         old, version = active_plan(engine, slug), active_version(engine, slug)
         if old is not None and is_big_change(old, new):
             proposed = save_plan(engine, slug, new, "proposed")
             n = replaced_count(old, new)
-            return {"proposal": {
+            return {
                 "kind": "approval", "id": uuid.uuid4().hex, "action": "replace_plan",
                 "summary": f"Your plan changed: {n} skills differ in the next {HORIZON} sessions. Use the new plan?",
-                "payload": {"old": _next_skills(old), "new": _next_skills(new), "version": proposed}}}
+                "payload": {"old": _next_skills(old), "new": _next_skills(new), "version": proposed}}, new, version
         if old is None or _sequence(old) != _sequence(new):
             version = save_plan(engine, slug, new, "active")
-        return finish(slug, new, version)
+        return None, new, version
+
+    def resolve(slug: str, version: int, approved: bool) -> tuple[dict, int | None]:
+        resolve_proposed(engine, slug, version, approved)
+        return active_plan(engine, slug), active_version(engine, slug)
+
+    async def planner(state: TutorState) -> dict:
+        slug = state["roadmap"]
+        card, new, version = await asyncio.to_thread(replan, slug)
+        if card is not None:
+            return {"proposal": card}
+        return await finish(slug, new, version)
 
     async def approve(state: TutorState) -> dict:
         card = state["proposal"]
         answer = interrupt(card)  # first statement (D8)
         slug = state["roadmap"]
-        resolve_proposed(engine, slug, card["payload"]["version"], answer["approved"])
-        return finish(slug, active_plan(engine, slug), active_version(engine, slug))
+        plan, version = await asyncio.to_thread(resolve, slug, card["payload"]["version"], answer["approved"])
+        return await finish(slug, plan, version)
 
     builder.add_node("planner", node("planner", planner))
     builder.add_node("planner_approve", node("planner_approve", approve))

@@ -5,7 +5,8 @@
 - One turn at a time per session: a per-session `asyncio.Lock` is held for the whole turn; a second turn raises
   `Busy` on its first `__anext__`, before anything else happens.
 - The session row gives the graph its `roadmap` (slug), `session_id` and `mode`. Unknown -> `LookupError`; ended ->
-  `SessionEnded`.
+  `SessionEnded`. Every entry point canonicalises the id first (`canonical_id`, M3; not a UUID -> `LookupError`),
+  so the lock and the checkpoint thread have one key per session.
 - Turns: `{"text": str}` (redacted before it enters graph state), `{"action": Action}` (plus `"topic"` with
   `research`), or `{"resume": value}`, which needs a pending interrupt whose `kind` has a validator in RESUME_SHAPES
   that accepts `value` (a validator may take `(value, pending)`); otherwise `BadResume`, before the graph runs, so state is unchanged. The value is then
@@ -85,6 +86,15 @@ class SessionEnded(Exception):
     """The session has ended; it takes no more turns."""
 
 
+def canonical_id(session_id: str) -> str:
+    """The session id as one spelling (M3): the turn lock and the checkpoint thread are keyed on it, so an upper-case
+    or braced id is the same session. Not a UUID -> `LookupError`."""
+    try:
+        return str(uuid.UUID(str(session_id)))
+    except ValueError:
+        raise LookupError(session_id) from None
+
+
 def _config(session_id: str) -> dict:
     return {"configurable": {"thread_id": session_id}}
 
@@ -152,6 +162,7 @@ class TutorRuntime:
             active, lambda: sessions.create_session(self.deps.engine, slug, mode, enqueue=self.deps.enqueue))
 
     async def run_turn(self, session_id: str, turn: dict) -> AsyncIterator[TurnEvent]:
+        session_id = canonical_id(session_id)
         lock = self._lock(session_id)
         if lock.locked():
             raise Busy(session_id)
@@ -235,10 +246,10 @@ class TutorRuntime:
                          .values(cost_usd=TutorSession.cost_usd + cost, last_turn_at=func.now()))
 
     async def pending(self, session_id: str) -> dict | None:
-        return _first_interrupt(await self.graph.aget_state(_config(session_id)))
+        return _first_interrupt(await self.graph.aget_state(_config(canonical_id(session_id))))
 
     async def state(self, session_id: str) -> dict:
-        snapshot = await self.graph.aget_state(_config(session_id))
+        snapshot = await self.graph.aget_state(_config(canonical_id(session_id)))
         values = snapshot.values or {}
         return {"messages": values.get("messages", []), "summary": values.get("summary", ""),
                 "today": values.get("today"), "pending": _first_interrupt(snapshot)}

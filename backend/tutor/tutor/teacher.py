@@ -13,7 +13,8 @@ One turn:
 - Tools: the gateway's `teacher` tools plus the local PROPOSE_TOOL. Every other call goes to `Gateway.call` with
   `CallContext(agent="teacher", policy, trace, lease=session_id)`; the gateway enforces the URL policy, so the
   loop's `check_call` refuses nothing. The policy is seeded, by host and without DNS (`allow_hosts`), with
-  `state.allowed_urls`, every user message's URLs and the roadmap's resource URLs; `refusal` still resolves at use
+  `state.allowed_urls`, every user message's URLs and the roadmap's resource URLs (not proposed or dismissed
+  ones, M4); `refusal` still resolves at use
   time. The policy is never stored in state.
 - Model steps: `Budget.check` before each step, then the step under `with_llm_retry`; a retry first emits a reset
   `reply_delta` so the UI drops partial text.
@@ -22,8 +23,9 @@ One turn:
   `final_url`, browser `Page URL:` lines; never URLs inside a fetched page or snapshot) that the answer mentions,
   in first-mention order, titled by their search result. Links in the answer are sanitised to roadmap and web
   source URLs and the learner's own URLs.
-- With roadmap and web sources both present (and a web excerpt to compare), one low-effort WebContradiction call;
-  a contradiction becomes the reply's `notice` (and `state.notice`). Its failure (budget, outage) only drops the
+- A loop that stopped at its step limit or was cut off says so in the reply's `notice` (`toolloop.STOP_NOTICES`,
+  M11). With roadmap and web sources both present (and a web excerpt to compare), one low-effort WebContradiction
+  call; a contradiction is appended to the reply's `notice` (and `state.notice`). Its failure (budget, outage) only drops the
   notice: the answer is kept (R9).
 - `allowed_urls` grows by this turn's search-result URLs and the learner's URLs (deduplicated, newest kept,
   at most MAX_ALLOWED_URLS).
@@ -60,6 +62,7 @@ from backend.tutor.tutor.toolloop import (
     Seen,
     budgeted_model_turn,
     seeded_policy,
+    stop_notice,
     url_key,
     url_source_names,
 )
@@ -215,14 +218,16 @@ def _dedupe_newest(urls: list[str], cap: int) -> list[str]:
 
 
 def _load(engine, slug: str) -> tuple[list[dict] | None, list[str]]:
-    """The learner snapshot (None without an approved spec) and the roadmap's resource URLs."""
+    """The learner snapshot (None without an approved spec) and the URLs of the roadmap's kept resources."""
     try:
         snapshot = get_progress(engine, slug)
     except ValueError:
         snapshot = None
     with session_scope(engine) as s:
         rm = get_roadmap_by_slug(s, slug)
-        urls = list(s.scalars(select(Resource.url).where(Resource.roadmap_id == rm.id, Resource.url.is_not(None))))
+        # Proposed and dismissed resources were never accepted by the learner: they seed nothing (M4).
+        urls = list(s.scalars(select(Resource.url).where(Resource.roadmap_id == rm.id, Resource.url.is_not(None),
+                                                         Resource.status.not_in(("proposed", "dismissed")))))
     return snapshot, urls
 
 
@@ -316,7 +321,8 @@ async def _turn(deps: TutorDeps, state: TutorState, writer: Callable[[dict], Non
     web = seen.web_sources(result.text)
     allowed = {s["url"] for s in result.sources if s.get("url")} | {w["url"] for w in web} | set(user_urls)
     answer = sanitize_links(result.text, allowed)
-    notice = await _contradiction(result.sources, seen, web, budget, trace) if result.sources and web else None
+    contradiction = await _contradiction(result.sources, seen, web, budget, trace) if result.sources and web else None
+    notice = stop_notice(result.stop, contradiction)
     writer(reply_event(answer, roadmap_sources=result.sources, web_sources=web, notice=notice))
     return {"messages": [*history, {"role": "user", "content": turn}, {"role": "assistant", "content": answer}],
             "allowed_urls": _dedupe_newest([*(state.get("allowed_urls") or []), *seen.search,

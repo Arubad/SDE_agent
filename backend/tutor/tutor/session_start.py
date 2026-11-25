@@ -7,6 +7,8 @@ The trigger is read from `state.input`, never from `state.route`.
 """
 from __future__ import annotations
 
+import asyncio
+
 from typing import Any
 
 from langgraph.graph import END, StateGraph
@@ -56,7 +58,7 @@ def add_session_start(builder: StateGraph, deps: TutorDeps) -> Group:
         is_start = (state.get("input") or {}).get("action") == "start"
         if is_start and state.get("started"):  # a reload re-sent `start`
             return {"proposal": None, "session_next": None}
-        sessions = ended_sessions(deps.engine, state["roadmap"], EARLIER_LIMIT + 1)
+        sessions = await asyncio.to_thread(ended_sessions, deps.engine, state["roadmap"], EARLIER_LIMIT + 1)
         if not sessions:
             if is_start:
                 return {"started": True, "proposal": None, "session_next": "planner"}
@@ -77,7 +79,7 @@ def add_session_start(builder: StateGraph, deps: TutorDeps) -> Group:
         if choice == "recap_last":
             summary = card["last"]["summary"]
         else:
-            summary = _session_summary(deps, state["roadmap"], answer["session_id"])
+            summary = await asyncio.to_thread(_session_summary, deps, state["roadmap"], answer["session_id"])
         text = summary or NO_SUMMARY_TEXT
         emit(reply_event(text))
         messages = [*(state.get("messages") or []), {"role": "assistant", "content": text}]

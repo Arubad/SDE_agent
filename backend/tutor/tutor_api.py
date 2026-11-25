@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from typing import get_args
@@ -55,6 +56,9 @@ def _require_runtime(request: Request) -> None:
 async def unavailable_handler(request: Request, exc: TutorUnavailable) -> JSONResponse:
     return _error(503, UNAVAILABLE)
 
+
+log = logging.getLogger(__name__)
+STREAM_FAILED = "Something went wrong; your session is saved."
 
 router = APIRouter(prefix="/api", dependencies=[Depends(_require_runtime)])
 
@@ -174,6 +178,10 @@ def _frame(event: TurnEvent) -> str:
 
 
 async def _frames(events: AsyncIterator[TurnEvent], first: TurnEvent) -> AsyncIterator[str]:
+    """The turn's events as SSE frames. An exception after the first event (headers are sent) is logged and ends
+    the stream with an `error` frame (M2). No `done` follows: its trace summary died with the turn (the runtime
+    still records the cost and exports the trace), and the client treats a stream without `done` as unfinished
+    and reloads the saved session."""
     async with aclosing(events):
         event = first
         while True:
@@ -183,6 +191,10 @@ async def _frames(events: AsyncIterator[TurnEvent], first: TurnEvent) -> AsyncIt
             try:
                 event = await anext(events)
             except StopAsyncIteration:
+                return
+            except Exception:
+                log.exception("tutor turn failed mid-stream")
+                yield _frame({"type": "error", "message": STREAM_FAILED})
                 return
 
 

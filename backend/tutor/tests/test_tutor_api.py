@@ -437,6 +437,8 @@ def test_study_settings_roundtrip_and_validation(client, engine):
     for bad, message in (({"session_minutes": 5}, "session_minutes must be a whole number from 15 to 240"),
                          ({"deadline": "soon"}, "deadline must be an ISO date (YYYY-MM-DD) or null"),
                          ({"pace": 2}, "Unknown settings field(s): pace"),
+                         ({"slug": "x"}, "Unknown settings field(s): slug"),  # M10: was a TypeError (500)
+                         ({"engine": 1, "weekly_hours": 2}, "Unknown settings field(s): engine"),
                          ([1], "The body must be a JSON object.")):
         r = client.put("/api/roadmaps/rm/study-settings", json=bad)
         assert r.status_code == 422 and r.json() == {"error": message}
@@ -457,3 +459,22 @@ def test_plan_reads_only(client, engine):
     assert body["today"]["session"] == body["plan"]["sessions"][0]
     assert body["today"]["skills"][0]["id"] == "cache-basics"
     assert client.get("/api/roadmaps/nope/plan").status_code == 404
+
+
+def test_a_mid_stream_exception_ends_with_an_error_frame(engine, tmp_path, caplog):
+    """M2: after the first event an exception becomes a terminal `error` frame (logged), not a cut stream."""
+    _roadmap(engine)
+    with local_client(_app(engine, tmp_path)) as c:
+        sid = _start(c)
+        rt = c.app.state.tutor_runtime
+
+        async def broken(session_id, turn):
+            yield {"type": "node", "name": "coordinator"}
+            raise RuntimeError("boom")
+
+        rt.run_turn = broken
+        with caplog.at_level("ERROR"):
+            events = _sse(_turn(c, sid, {"action": "continue"}))
+    assert events == [("node", {"type": "node", "name": "coordinator"}),
+                      ("error", {"type": "error", "message": "Something went wrong; your session is saved."})]
+    assert any("boom" in (r.exc_text or "") or "boom" in str(r.exc_info) for r in caplog.records)
