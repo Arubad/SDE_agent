@@ -16,8 +16,8 @@
   when a thread with pending tasks gets new (non-Command) input, so no state surgery is needed; a test pins it.
 - `BudgetExceeded` and `LLMUnavailable` (after the nodes' own retries) end the turn with an `error` event. Either
   way, and always last, `done` carries the redacted trace summary; the session's `cost_usd` grows by the turn's
-  cost, its `last_turn_at` is stamped, and the trace is exported. Other exceptions propagate (cost and export still happen, shielded, so also when
-  the consumer is cancelled, e.g. by a client disconnect). The checkpointer keeps the state of the last completed
+  cost, its `last_turn_at` is stamped, and the trace is exported. Other exceptions propagate (cost and export still
+  happen, shielded, so also when the consumer is cancelled, e.g. by a client disconnect). The checkpointer keeps the state of the last completed
   super-step, so the next turn starts from there.
 """
 from __future__ import annotations
