@@ -276,7 +276,8 @@ class McpIdempotency(Base):
 
 class TutorSession(Base):
     """A tutor conversation. `mode`: tutor|qa. `status`: active|ended. `curated_at` is set once memory curation
-    has run; `raw_kept` says the raw messages were kept (consent)."""
+    has run; `raw_kept` says the raw messages were kept (consent). `last_turn_at`: when the last turn finished (the
+    retention loop ends sessions idle since then, or since `started_at`, R19)."""
 
     __tablename__ = "tutor_sessions"
     __table_args__ = (
@@ -293,6 +294,7 @@ class TutorSession(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_turn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     curated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

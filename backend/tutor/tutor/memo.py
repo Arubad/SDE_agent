@@ -1,4 +1,7 @@
-"""A memo for deterministic model calls: the same inputs are answered from the `llm_memo` table."""
+"""A memo for deterministic model calls: the same inputs are answered from the `llm_memo` table.
+
+`llm_memo` holds only coordinator routes (`TutorRoute`) and quiz grades (`Grade`). Nothing personal may be memoised:
+the table is outside consent, export and purge, so the curator calls `haiku_json` directly (R17)."""
 from __future__ import annotations
 
 import hashlib

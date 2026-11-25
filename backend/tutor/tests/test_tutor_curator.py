@@ -21,7 +21,8 @@ from backend.tutor.settings import Settings
 from backend.tutor.tests.tutor_helpers import Enqueued, clear_memo, new_session  # noqa: F401 (fixture)
 from backend.tutor.tutor import curator, retention
 from backend.tutor.tutor.checkpoint import open_saver
-from backend.tutor.tutor.curator import CURATE_SCHEMA, curate_session
+from backend.tutor.tutor.curator import CURATE_SCHEMA, CURATE_SCHEMA_NO_FACTS, curate_session
+from backend.tutor.untrusted import wrap
 from backend.tutor.tutor.state import TutorState
 
 pytestmark = pytest.mark.anyio
@@ -113,9 +114,55 @@ def _reply(title="Pods", summary="Day 1: pods", facts=(), resolved=()):
 
 def test_schema_is_strict_and_titled():
     assert CURATE_SCHEMA["title"] == "SessionCurate"
+    assert CURATE_SCHEMA_NO_FACTS["title"] == "SessionCurateNoFacts"
+    assert "facts" not in CURATE_SCHEMA_NO_FACTS["properties"]
     for node in (CURATE_SCHEMA, CURATE_SCHEMA["properties"]["facts"]["items"],
-                 CURATE_SCHEMA["properties"]["resolved_weak_spots"]["items"]):
+                 CURATE_SCHEMA["properties"]["resolved_weak_spots"]["items"], CURATE_SCHEMA_NO_FACTS):
         assert node["additionalProperties"] is False and node["required"] == list(node["properties"])
+
+
+def _request_schema(req: dict) -> dict:
+    return req["output_config"]["format"]["schema"]
+
+
+def _memo_rows(engine) -> int:
+    with session_scope(engine) as s:
+        return s.execute(text("SELECT count(*) FROM llm_memo")).scalar()
+
+
+@pytest.mark.parametrize("personal", [None, False])
+def test_without_consent_asks_for_no_facts_and_memoises_nothing(engine, db_url, clear_memo, personal):
+    _consent(engine, personal, False)
+    sid = _ended(engine)
+    _seed(db_url, sid)
+    with fake_llm.script([FakeReply(json={"title": "Pods", "summary": "Day 1", "resolved_weak_spots": []})]):
+        curate_session(_ctx(engine, db_url), _job(sid))
+    req = fake_llm.requests[-1]
+    schema = _request_schema(req)
+    assert schema["title"] == "SessionCurateNoFacts" and "facts" not in schema["properties"]
+    assert "facts" not in str(req["system"]).lower()
+    assert _memo_rows(engine) == 0 and _row(engine, sid).summary == "Day 1"
+
+
+def test_with_consent_asks_for_facts_and_memoises_nothing(engine, db_url, clear_memo):
+    _consent(engine, True, False)
+    sid = _ended(engine)
+    _seed(db_url, sid)
+    with fake_llm.script([_reply(facts=[{"kind": "fact", "text": "likes go", "replaces": None}])]):
+        curate_session(_ctx(engine, db_url), _job(sid))
+    assert _request_schema(fake_llm.requests[-1])["title"] == "SessionCurate"
+    assert _memo_rows(engine) == 0 and len(_facts(engine)) == 1
+
+
+def test_an_echoed_fenced_concept_clears_the_weak_spot(engine, db_url, clear_memo):
+    sid = _ended(engine)
+    slug = _slug(engine, sid)
+    store.set_mastery(engine, slug, "cache-basics", 0.6, ["a<b ordering", "keys"])
+    _seed(db_url, sid, mastery_log=[{"skill_id": "cache-basics", "before": 0.4, "after": 0.6}])
+    resolved = [{"skill_id": "cache-basics", "concept": wrap("a<b ordering")}]
+    with fake_llm.script([_reply(resolved=resolved)]):
+        curate_session(_ctx(engine, db_url), _job(sid))
+    assert {p["skill_id"]: p for p in store.get_progress(engine, slug)}["cache-basics"]["weak_spots"] == ["keys"]
 
 
 def test_without_consent_keeps_summary_drops_raw_and_facts(engine, db_url, clear_memo):
@@ -228,7 +275,7 @@ def test_errors(engine, db_url, clear_memo, monkeypatch):
     def down(*a, **k):
         raise LLMUnavailable("down")
 
-    monkeypatch.setattr(curator, "haiku_json_memo", down)
+    monkeypatch.setattr(curator, "haiku_json", down)
     with pytest.raises(RetryableError):
         curate_session(ctx, _job(sid))
     assert _row(engine, sid).curated_at is None and _has_thread(db_url, sid)  # nothing lost; the retry redoes it

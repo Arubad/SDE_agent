@@ -229,6 +229,31 @@ def test_migration_0009_one_active_session(fresh_db_url):
         eng.dispose()
 
 
+def test_migration_0010_memo_cleanup_and_last_turn_at(fresh_db_url):
+    from sqlalchemy import create_engine
+
+    eng = create_engine(fresh_db_url)
+    cols = lambda: {c["name"] for c in inspect(eng).get_columns("tutor_sessions")}  # noqa: E731
+    try:
+        migrate(fresh_db_url, "0009")
+        with eng.begin() as c:
+            c.execute(text("INSERT INTO llm_memo (key, response) VALUES "
+                           "('curator', CAST(:a AS jsonb)), ('route', CAST(:b AS jsonb))"),
+                      {"a": '{"title": "t", "summary": "s", "facts": [{"text": "x"}], "resolved_weak_spots": []}',
+                       "b": '{"route": "teach", "topic": null}'})
+        assert "last_turn_at" not in cols()
+        migrate(fresh_db_url)
+        with eng.connect() as c:
+            assert c.execute(text("SELECT key FROM llm_memo")).scalars().all() == ["route"]
+        assert "last_turn_at" in cols()
+        downgrade(fresh_db_url, "0009")
+        assert "last_turn_at" not in cols()
+        migrate(fresh_db_url)
+        assert "last_turn_at" in cols()
+    finally:
+        eng.dispose()
+
+
 @pytest.fixture
 def fresh_db_url(db_url):
     import uuid

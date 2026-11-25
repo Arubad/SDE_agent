@@ -11,7 +11,8 @@ const roadmapText = readFileSync(path.join(fixtures, "roadmaps/kubernetes.txt"),
 const quiz = JSON.parse(readFileSync(path.join(fixtures, "llm_replies/Quiz.json"), "utf-8")) as {
   questions: { prompt: string; answer: string }[];
 };
-const curated = JSON.parse(readFileSync(path.join(fixtures, "llm_replies/SessionCurate.json"), "utf-8")) as {
+// The spec declines consent, so the curator asks for no facts (R17) and its reply comes from SessionCurateNoFacts.json.
+const curated = JSON.parse(readFileSync(path.join(fixtures, "llm_replies/SessionCurateNoFacts.json"), "utf-8")) as {
   title: string;
   summary: string;
 };
