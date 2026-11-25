@@ -35,12 +35,20 @@ def test_budget_token_message():
     assert str(e.value) == e.value.message
 
 
-def test_budget_counts_all_token_kinds_and_is_strict():
-    t = _trace(input_tokens=10, output_tokens=20, cache_read_tokens=30, cache_write_tokens=40)
-    Budget(6, 100, 1.0).check(t)  # exactly at the limit is fine
+def test_budget_counts_cache_reads_at_a_tenth_and_is_strict():
+    t = _trace(input_tokens=10, output_tokens=20, cache_read_tokens=300, cache_write_tokens=40)
+    Budget(6, 100, 1.0).check(t)  # 10 + 20 + 40 + 0.1 * 300 = 100: exactly at the limit is fine
     with pytest.raises(BudgetExceeded) as e:
         Budget(6, 99, 1.0).check(t)
     assert "(100 of 99)" in e.value.message
+
+
+def test_budget_cache_reads_alone_do_not_breach_the_default():
+    """R20: a prompt re-read from cache on every step is cheap; 100k cache-read tokens weigh 10k."""
+    Budget(6, 60_000, 1.0).check(_trace(input_tokens=500, output_tokens=800, cache_read_tokens=100_000,
+                                        cache_write_tokens=2_000))
+    with pytest.raises(BudgetExceeded, match=r"\(60001 of 60000\)"):
+        Budget(6, 60_000, 1.0).check(_trace(input_tokens=50_001, cache_read_tokens=100_000))
 
 
 def test_budget_cost_message():

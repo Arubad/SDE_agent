@@ -52,7 +52,7 @@ class Settings:
     min_chunks_per_skill: int = 5  # a skill with fewer indexed chunks is a gap the recoverer looks at
     browser_render: bool = True  # BROWSER_RENDER: render `needs_browser` pages in the gateway's browser
     tutor_max_steps: int = 6  # model turns in one tutor tool loop
-    tutor_max_tokens: int = 60_000  # input + output + cache tokens over one turn
+    tutor_max_tokens: int = 60_000  # input + output + cache writes + 0.1 x cache reads over one turn (R20)
     tutor_max_usd: float = 0.02  # per turn
     working_memory_tokens: int = 12_000  # the tutor's working-memory window
     ingest_summaries: bool = True  # INGEST_SUMMARIES: summarise sections after ingestion
