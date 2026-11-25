@@ -377,3 +377,74 @@ def test_unique_index_refuses_a_second_active_row(engine):
     first = create_session(engine, slug, "tutor", enqueue=Enqueued())
     with pytest.raises(IntegrityError), session_scope(engine) as s:
         s.add(TutorSession(roadmap_id=first.roadmap_id, mode="tutor", status="active"))
+
+
+# --- idle sessions are ended by the retention loop (R19) ------------------------------------------------------
+
+def _age(engine, sid, **ago_s):
+    """Move a session's `started_at` / `last_turn_at` (seconds ago; None clears it) into the past."""
+    now = datetime.now(timezone.utc)
+    with session_scope(engine) as s:
+        row = s.get(TutorSession, uuid.UUID(sid))
+        for col, secs in ago_s.items():
+            setattr(row, col, None if secs is None else now - timedelta(seconds=secs))
+
+
+async def test_idle_active_sessions_are_ended_and_curated(engine, clear_memo):  # noqa: F811
+    from backend.tutor.tutor import retention
+
+    enq = Enqueued()
+    rt = make_runtime(engine, enqueue=enq)
+    long_ago = retention.IDLE_END_S + 600
+    idle = str(create_session(engine, _roadmap(engine), "tutor", enqueue=enq).id)
+    never = str(create_session(engine, _roadmap(engine), "tutor", enqueue=enq).id)
+    recent = str(create_session(engine, _roadmap(engine), "tutor", enqueue=enq).id)
+    _age(engine, idle, started_at=long_ago + 600, last_turn_at=long_ago)
+    _age(engine, never, started_at=long_ago, last_turn_at=None)  # no turn yet: measured from started_at
+    _age(engine, recent, started_at=long_ago, last_turn_at=60)  # an old session, used an hour ago
+    assert await retention.end_idle_sessions(engine, rt) >= 2
+    assert _row(engine, idle).status == "ended" and _row(engine, never).status == "ended"
+    assert _row(engine, recent).status == "active"
+    assert {k for t, _, k, _ in enq if t == "curate_session"} >= {(idle,), (never,)}
+    assert (recent,) not in {k for _, _, k, _ in enq}
+
+
+async def test_a_busy_idle_session_is_skipped_then_ended_next_pass(engine, clear_memo, monkeypatch):  # noqa: F811
+    from backend.tutor.tutor import retention
+
+    monkeypatch.setattr(retention, "IDLE_LOCK_WAIT_S", 0.05)
+    enq = Enqueued()
+    rt, sid, release, turn = await _running_turn(engine, enq)
+    _age(engine, sid, started_at=retention.IDLE_END_S + 600)
+    await retention.end_idle_sessions(engine, rt)  # the turn holds the lock: skipped, no error
+    assert _row(engine, sid).status == "active" and enq == []
+    release.set()
+    assert (await turn)[-1]["type"] == "done"
+    assert _row(engine, sid).last_turn_at is not None  # the turn's finish step stamps it
+    await retention.end_idle_sessions(engine, rt)  # it was just used: no longer idle
+    assert _row(engine, sid).status == "active"
+    _age(engine, sid, last_turn_at=retention.IDLE_END_S + 60)
+    await retention.end_idle_sessions(engine, rt)
+    assert _row(engine, sid).status == "ended" and [k for _, _, k, _ in enq] == [(sid,)]
+
+
+async def test_retention_loop_ends_idle_sessions_only_with_a_runtime(monkeypatch):
+    from backend.tutor.tutor import retention
+
+    seen = []
+
+    async def fake_end(engine, runtime):
+        seen.append(runtime)
+        return 0
+
+    async def zero(*a, **k):
+        return 0
+
+    monkeypatch.setattr(retention, "end_idle_sessions", fake_end)
+    for name in ("reenqueue_uncurated", "drop_stale_threads", "sweep", "sweep_revoked"):
+        monkeypatch.setattr(retention, name, zero)
+    for runtime in (None, "rt"):
+        task = asyncio.create_task(retention.run_forever(None, None, None, every_s=3600, runtime=runtime))
+        await asyncio.sleep(0.05)
+        task.cancel()
+    assert seen == ["rt"]

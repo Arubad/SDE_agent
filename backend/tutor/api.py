@@ -175,9 +175,10 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
                                        tracer_provider=app.state.tracer_provider,
                                        url_resolver=app.state.net.fetcher.resolver)
                 app.state.tutor_runtime = TutorRuntime(tutor_deps, build_tutor_graph(tutor_deps, tutor_groups))
-                # Startup and every RETENTION_EVERY_S: queue curation of ended sessions that missed it, then drop
-                # the raw threads past retention.
-                task = asyncio.create_task(retention.run_forever(app.state.engine, app.state.saver, enqueue))
+                # Startup and every RETENTION_EVERY_S: end idle sessions (R19), queue curation of ended sessions
+                # that missed it, then drop the raw threads past retention.
+                task = asyncio.create_task(retention.run_forever(app.state.engine, app.state.saver, enqueue,
+                                                                 runtime=app.state.tutor_runtime))
 
                 async def _stop_retention() -> None:
                     task.cancel()

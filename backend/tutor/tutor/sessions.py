@@ -71,15 +71,19 @@ def active_session_ids(engine: Engine, slug: str) -> list[uuid.UUID]:
                               .order_by(TutorSession.id)))
 
 
-def end_session(engine: Engine, session_id: uuid.UUID | str, enqueue: Callable[..., Any]) -> TutorSession:
-    """Idempotent: an ended session is returned as it is, and nothing is enqueued. Callers coordinate with a
-    running turn through `TutorRuntime.end_session`."""
+def end_session(engine: Engine, session_id: uuid.UUID | str, enqueue: Callable[..., Any], *,
+                idle_before: datetime | None = None) -> TutorSession:
+    """Idempotent: an ended session is returned as it is, and nothing is enqueued. With `idle_before`, a session
+    whose last turn (or start, before any turn) is not older than that is returned active, untouched (R19: it was
+    used since it was found idle). Callers coordinate with a running turn through `TutorRuntime.end_session`."""
     sid = session_id if isinstance(session_id, uuid.UUID) else parse_id(session_id)
     with session_scope(engine) as s:
         row = s.get(TutorSession, sid, with_for_update=True)
         if row is None:
             raise LookupError(str(session_id))
         if row.status == "ended":
+            return row
+        if idle_before is not None and (row.last_turn_at or row.started_at) >= idle_before:
             return row
         row.status, row.ended_at = "ended", datetime.now(timezone.utc)
     # After the commit, so the curation job sees an ended session. The job key makes a retry harmless.

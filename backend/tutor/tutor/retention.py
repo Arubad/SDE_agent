@@ -1,4 +1,5 @@
-"""Retention: the raw-message threads of old sessions, and the startup/periodic maintenance task (D3, D6)."""
+"""Retention: the raw-message threads of old sessions, idle sessions, and the startup/periodic maintenance task
+(D3, D6, R19)."""
 from __future__ import annotations
 
 import asyncio
@@ -7,7 +8,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 
 from backend.tutor.db import session_scope
@@ -21,6 +22,34 @@ log = logging.getLogger(__name__)
 RETENTION_EVERY_S = 21600
 DEFAULT_RETENTION_DAYS = 90
 UNCURATED_GRACE_S = 86400  # curation had a day to run; after that an uncurated session's raw thread is dropped
+IDLE_END_S = 21600  # an active session idle this long (since its last turn, else its start) is ended (R19)
+IDLE_LOCK_WAIT_S = 1.0  # a running turn holds the session's lock: skip it after this, the next pass retries
+
+
+def _idle(engine: Engine, cutoff: datetime) -> list:
+    with session_scope(engine) as s:
+        return list(s.scalars(select(TutorSession.id).where(
+            TutorSession.status == "active",
+            func.coalesce(TutorSession.last_turn_at, TutorSession.started_at) < cutoff)))
+
+
+async def end_idle_sessions(engine: Engine, runtime: Any) -> int:
+    """End every active session idle for over IDLE_END_S through `runtime.end_session` (its turn lock, curation
+    and D3 apply). A session with a running turn is skipped (`Busy`) and retried on the next pass; one used since it
+    was found idle is left active. Returns how many were ended."""
+    from backend.tutor.tutor.runtime import Busy
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=IDLE_END_S)
+    n = 0
+    for sid in await asyncio.to_thread(_idle, engine, cutoff):
+        try:
+            row = await runtime.end_session(str(sid), wait_s=IDLE_LOCK_WAIT_S, idle_before=cutoff)
+            n += row.status == "ended"
+        except Busy:
+            log.info("retention: idle session %s is busy; retried next pass", sid)
+        except Exception as exc:
+            log.warning("retention: idle session %s not ended: %s", sid, type(exc).__name__)
+    return n
 
 
 def _due(engine: Engine) -> list:
@@ -123,10 +152,13 @@ async def sweep_revoked(engine: Engine, saver: Any) -> int:
 
 
 async def run_forever(engine: Engine, saver: Any, enqueue: Callable[..., Any],
-                      every_s: float = RETENTION_EVERY_S) -> None:
-    """Re-enqueue, then sweep, now and every `every_s`. Failures are logged; cancel the task to stop it."""
+                      every_s: float = RETENTION_EVERY_S, runtime: Any = None) -> None:
+    """End idle sessions (only with a `runtime`), re-enqueue, then sweep, now and every `every_s`. Failures are
+    logged; cancel the task to stop it."""
     while True:
-        for name, step in (("re-enqueue", lambda: reenqueue_uncurated(engine, enqueue)),
+        steps = [("end-idle", lambda: end_idle_sessions(engine, runtime))] if runtime is not None else []
+        for name, step in (*steps,
+                           ("re-enqueue", lambda: reenqueue_uncurated(engine, enqueue)),
                            ("drop-stale", lambda: drop_stale_threads(engine, saver)),
                            ("sweep", lambda: sweep(engine, saver)),
                            ("revoked", lambda: sweep_revoked(engine, saver))):

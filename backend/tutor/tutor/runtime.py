@@ -15,7 +15,7 @@
   when a thread with pending tasks gets new (non-Command) input, so no state surgery is needed; a test pins it.
 - `BudgetExceeded` and `LLMUnavailable` (after the nodes' own retries) end the turn with an `error` event. Either
   way, and always last, `done` carries the redacted trace summary; the session's `cost_usd` grows by the turn's
-  cost and the trace is exported. Other exceptions propagate (cost and export still happen, shielded, so also when
+  cost, its `last_turn_at` is stamped, and the trace is exported. Other exceptions propagate (cost and export still happen, shielded, so also when
   the consumer is cancelled, e.g. by a client disconnect). The checkpointer keeps the state of the last completed
   super-step, so the next turn starts from there.
 """
@@ -26,6 +26,7 @@ import inspect
 import uuid
 import weakref
 from contextlib import AsyncExitStack
+from datetime import datetime
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
 from typing import Any, get_args
@@ -33,7 +34,7 @@ from typing import Any, get_args
 import anyio
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from backend.core.llm import LLMUnavailable
 from backend.core.redact import redact, redact_obj
@@ -119,24 +120,30 @@ class TutorRuntime:
             lock = self._locks[session_id] = asyncio.Lock()
         return lock
 
-    async def _end_locked(self, session_ids: list[uuid.UUID], work: Callable[[], Any]) -> Any:
+    async def _end_locked(self, session_ids: list[uuid.UUID], work: Callable[[], Any],
+                          wait_s: float | None = None) -> Any:
         """Run sync `work` in a thread once no turn of any of `session_ids` is running (each turn lock is held
-        meanwhile, so a turn arriving now gets `Busy`, then `SessionEnded`). Waits at most END_WAIT_S per lock."""
+        meanwhile, so a turn arriving now gets `Busy`, then `SessionEnded`). Waits at most `wait_s` (default
+        END_WAIT_S) per lock."""
         async with AsyncExitStack() as stack:
             for sid in sorted(session_ids):
                 lock = self._lock(str(sid))
                 try:
-                    await asyncio.wait_for(lock.acquire(), END_WAIT_S)
+                    await asyncio.wait_for(lock.acquire(), END_WAIT_S if wait_s is None else wait_s)
                 except TimeoutError:
                     raise Busy(str(sid)) from None
                 stack.callback(lock.release)
             return await asyncio.to_thread(work)
 
-    async def end_session(self, session_id: str) -> TutorSession:
-        """End a session after its running turn (if any) finishes, and queue its curation."""
+    async def end_session(self, session_id: str, *, wait_s: float | None = None,
+                          idle_before: datetime | None = None) -> TutorSession:
+        """End a session after its running turn (if any) finishes, and queue its curation. `wait_s` bounds the wait
+        for that turn (default END_WAIT_S, else `Busy`); with `idle_before` the session is ended only if it is still
+        idle since before then, checked under the lock (the retention loop's idle end, R19)."""
         sid = sessions.parse_id(session_id)
         return await self._end_locked(
-            [sid], lambda: sessions.end_session(self.deps.engine, sid, self.deps.enqueue))
+            [sid], lambda: sessions.end_session(self.deps.engine, sid, self.deps.enqueue, idle_before=idle_before),
+            wait_s)
 
     async def create_session(self, slug: str, mode: str) -> TutorSession:
         """A new session; the roadmap's active session is ended first, after its running turn finishes."""
@@ -202,7 +209,7 @@ class TutorRuntime:
             raise BadResume(f"that answer does not fit the pending {kind!r} question")
 
     async def _finish(self, session_id: str, trace: Trace) -> None:
-        await asyncio.to_thread(self._add_cost, session_id, trace.summary()["cost_usd"])
+        await asyncio.to_thread(self._record_turn, session_id, trace.summary()["cost_usd"])
         export_trace(trace, self.deps.tracer_provider)
 
     def _session(self, session_id: str) -> dict:
@@ -221,10 +228,11 @@ class TutorRuntime:
             raise SessionEnded(session_id)
         return {"mode": row.mode, "roadmap": row.slug}
 
-    def _add_cost(self, session_id: str, cost: float) -> None:
+    def _record_turn(self, session_id: str, cost: float) -> None:
+        """The turn's cost, and `last_turn_at` (the retention loop ends sessions idle since then, R19)."""
         with self.deps.engine.begin() as conn:
             conn.execute(update(TutorSession).where(TutorSession.id == uuid.UUID(session_id))
-                         .values(cost_usd=TutorSession.cost_usd + cost))
+                         .values(cost_usd=TutorSession.cost_usd + cost, last_turn_at=func.now()))
 
     async def pending(self, session_id: str) -> dict | None:
         return _first_interrupt(await self.graph.aget_state(_config(session_id)))
