@@ -1,11 +1,12 @@
 {
   "servers": [
     {"name": "kb", "namespace": "kb", "transport": "inproc", "target": "knowledge", "enabled": true,
-     "note": "Search the indexed roadmap material."},
+     "timeout_s": 60, "note": "Search the indexed roadmap material."},
     {"name": "learner", "namespace": "learner", "transport": "inproc", "target": "learner",
      "enabled": true, "note": "The learner's progress and notes."},
     {"name": "ingest", "namespace": "ingest", "transport": "inproc", "target": "ingestion",
-     "enabled": true, "note": "Roadmap ingestion tools."},
+     "enabled": true, "timeout_s": 30, "tool_timeouts": {"create_roadmap": 120, "wait_for_ingestion": 900},
+     "note": "Roadmap ingestion tools."},
     {"name": "web", "namespace": "web", "transport": "inproc", "target": "web", "enabled": true,
      "note": "Web search and page fetch."},
     {"name": "playwright", "namespace": "browser", "transport": "http",
@@ -35,9 +36,12 @@
     "teacher": ["kb.*", "web.search", "web.fetch", "browser.navigate", "browser.snapshot", "browser.navigate_back",
                 "docs.*", "repo.*", "papers.*", "ref.*", "learner.recall", "learner.get_progress"],
     "researcher": ["kb.search", "web.search", "web.fetch", "browser.navigate", "browser.snapshot", "docs.*",
-                   "repo.*", "papers.*", "ref.*"],
+                   "repo.*", "papers.*", "ref.*", "ingest.create_roadmap", "ingest.approve_roadmap",
+                   "ingest.ingestion_status"],
+    "assessor": ["kb.search"],
     "crawler": ["browser.navigate", "browser.evaluate", "browser.close"]
   },
   "rules": {"deny": ["ref.wikipedia.wikipedia_*"],
-            "ask": ["ingest.create_roadmap", "ingest.approve_roadmap", "learner.forget"]}
+            "ask": ["ingest.create_roadmap", "ingest.approve_roadmap", "learner.forget"]},
+  "url_sources": ["web.search", "docs.mslearn.microsoft_docs_search"]
 }

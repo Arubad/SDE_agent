@@ -1,6 +1,9 @@
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { ApiError, createRoadmap, getHealth, type Health, isAuthError, listRoadmaps, type Roadmap } from "./api";
 import { statusText } from "./format";
+import { ConsentDialog } from "./ConsentDialog";
+import { getLearnerSettings } from "./memoryApi";
+import { Memory } from "./Memory";
 import { RoadmapDetail } from "./RoadmapDetail";
 import { Settings } from "./Settings";
 
@@ -149,6 +152,8 @@ function CreateRoadmapForm({
 
 // The open roadmap lives in the URL hash (#/roadmaps/<slug>), so reloads and the back button work without a router.
 const SETTINGS_HASH = "#/settings";
+const MEMORY_HASH = "#/memory";
+const isMemoryHash = (h: string) => h === MEMORY_HASH || h === "#memory";
 const ROUTE = /^#\/roadmaps\/([^/]+)$/;
 
 function slugFromHash(): string | null {
@@ -206,8 +211,14 @@ export function App() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selected, select] = useSelectedSlug();
   const [onSettings, setOnSettings] = useState(() => window.location.hash === SETTINGS_HASH);
+  const [onMemory, setOnMemory] = useState(() => isMemoryHash(window.location.hash));
+  const [askConsent, setAskConsent] = useState(false);
+  const unlocked = roadmaps !== null && lock === null;
   useEffect(() => {
-    const onHash = () => setOnSettings(window.location.hash === SETTINGS_HASH);
+    const onHash = () => {
+      setOnSettings(window.location.hash === SETTINGS_HASH);
+      setOnMemory(isMemoryHash(window.location.hash));
+    };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
@@ -219,13 +230,23 @@ export function App() {
   const load = useCallback(async () => {
     setLoadError(null);
     try {
+      // A late success must not clear a passcode screen another request already raised; unlocking goes through
+      // the passcode form's own handler.
       setRoadmaps(await listRoadmaps());
-      setLock(null);
     } catch (err) {
       if (isAuthError(err)) showPasscode(err);
       else setLoadError(messageOf(err));
     }
   }, [showPasscode]);
+
+  // First run: ask once either consent is still unanswered. Only after unlock, since the API needs the passcode.
+  useEffect(() => {
+    if (!unlocked) return;
+    getLearnerSettings().then(
+      (s) => setAskConsent(s.consent_personal === null || s.consent_raw_messages === null),
+      () => undefined,
+    );
+  }, [unlocked]);
 
   useEffect(() => {
     getHealth().then(setHealth, () => setHealth("down"));
@@ -241,6 +262,7 @@ export function App() {
         </div>
         <nav className="topnav" aria-label="Main">
           <a href="#">Roadmaps</a>
+          <a href={MEMORY_HASH}>Memory &amp; privacy</a>
           <a href={SETTINGS_HASH}>Settings</a>
           <HealthBadge health={health} />
         </nav>
@@ -255,6 +277,13 @@ export function App() {
               setLock(null);
             }}
           />
+        ) : onMemory ? (
+          <Memory
+            onUnauthorized={showPasscode}
+            onBack={() => {
+              window.location.hash = "";
+            }}
+          />
         ) : onSettings ? (
           <Settings
             onUnauthorized={showPasscode}
@@ -267,6 +296,7 @@ export function App() {
             key={selected}
             slug={selected}
             onUnauthorized={showPasscode}
+            onOpenRoadmap={select}
             onBack={() => {
               select(null);
               void load(); // statuses may have moved on
@@ -292,6 +322,7 @@ export function App() {
           </>
         )}
       </main>
+      {askConsent && unlocked && <ConsentDialog onSaved={() => setAskConsent(false)} onUnauthorized={showPasscode} />}
     </>
   );
 }

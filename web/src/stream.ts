@@ -53,16 +53,27 @@ function isAbort(err: unknown, signal: AbortSignal): boolean {
 /**
  * Stream `path`'s events into `onEvent(name, data)` (data is parsed JSON, or the raw text) until the server
  * closes the stream. Resolves quietly when `signal` aborts; the response body is always released.
- * A 401 clears the stored code and throws `Unauthorized`; any other HTTP error throws `ApiError`.
+ * `init` makes it a POST with a JSON body (the tutor's turns). A 401 clears the stored code and throws `Unauthorized`; any other HTTP error throws `ApiError`.
  */
-export async function streamEvents(path: string, onEvent: EventHandler, signal: AbortSignal): Promise<void> {
+export async function streamEvents(
+  path: string,
+  onEvent: EventHandler,
+  signal: AbortSignal,
+  init?: { method: "POST"; body: unknown },
+): Promise<void> {
   const headers = new Headers({ Accept: "text/event-stream" });
   const code = getCode();
   if (code) headers.set("X-Access-Code", code);
+  const post: RequestInit = {};
+  if (init) {
+    headers.set("Content-Type", "application/json");
+    post.method = init.method;
+    post.body = JSON.stringify(init.body);
+  }
 
   let res: Response;
   try {
-    res = await fetch(path, { headers, signal, cache: "no-store" });
+    res = await fetch(path, { ...post, headers, signal, cache: "no-store" });
   } catch (err) {
     if (isAbort(err, signal)) return;
     throw err;

@@ -47,6 +47,7 @@ class JobContext:
     settings: Any = None
     index: Any = None
     gateway: Gateway | None = None  # the MCP gateway the API started (None: no gateway runs)
+    embedder: Any = None  # the index's embedder, for handlers that write learner facts (curate_session)
 
     def enqueue(self, type: str, payload: dict, key_parts: tuple | list = (), parent_id: int | None = None,
                 *, roadmap_id: uuid.UUID, max_attempts: int = 5) -> Job:

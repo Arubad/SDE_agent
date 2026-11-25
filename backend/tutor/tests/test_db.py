@@ -202,3 +202,96 @@ def test_migration_0003_round_trip(db_url):
         eng.dispose()
         with admin.connect() as c:
             c.execute(text(f'DROP DATABASE IF EXISTS "{name}"'))
+
+
+def test_migration_0008_schema(engine):
+    tables = set(inspect(engine).get_table_names())
+    assert {"tutor_sessions", "study_settings", "study_plans", "llm_memo"} <= tables
+    assert "summary" in {c["name"] for c in inspect(engine).get_columns("documents")}
+    assert {"summary", "quiz"} <= {c["name"] for c in inspect(engine).get_columns("sections")}
+
+
+def test_migration_0009_one_active_session(fresh_db_url):
+    from sqlalchemy import create_engine
+
+    def index():
+        return {i["name"]: i for i in inspect(eng).get_indexes("tutor_sessions")}.get("uq_tutor_sessions_one_active")
+
+    eng = create_engine(fresh_db_url)
+    try:
+        migrate(fresh_db_url)
+        assert index()["unique"] and index()["column_names"] == ["roadmap_id"]
+        downgrade(fresh_db_url, "0008")
+        assert index() is None
+        migrate(fresh_db_url)
+        assert index() is not None
+    finally:
+        eng.dispose()
+
+
+def test_migration_0010_memo_cleanup_and_last_turn_at(fresh_db_url):
+    from sqlalchemy import create_engine
+
+    eng = create_engine(fresh_db_url)
+    cols = lambda: {c["name"] for c in inspect(eng).get_columns("tutor_sessions")}  # noqa: E731
+    try:
+        migrate(fresh_db_url, "0009")
+        with eng.begin() as c:
+            c.execute(text("INSERT INTO llm_memo (key, response) VALUES "
+                           "('curator', CAST(:a AS jsonb)), ('route', CAST(:b AS jsonb))"),
+                      {"a": '{"title": "t", "summary": "s", "facts": [{"text": "x"}], "resolved_weak_spots": []}',
+                       "b": '{"route": "teach", "topic": null}'})
+        assert "last_turn_at" not in cols()
+        migrate(fresh_db_url)
+        with eng.connect() as c:
+            assert c.execute(text("SELECT key FROM llm_memo")).scalars().all() == ["route"]
+        assert "last_turn_at" in cols()
+        downgrade(fresh_db_url, "0009")
+        assert "last_turn_at" not in cols()
+        migrate(fresh_db_url)
+        assert "last_turn_at" in cols()
+    finally:
+        eng.dispose()
+
+
+@pytest.fixture
+def fresh_db_url(db_url):
+    import uuid
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+
+    name = f"tutor_down_{uuid.uuid4().hex[:8]}"
+    admin = create_engine(make_url(db_url).set(database="postgres"), isolation_level="AUTOCOMMIT")
+    with admin.connect() as c:
+        c.execute(text(f'CREATE DATABASE "{name}"'))
+    try:
+        yield make_url(db_url).set(database=name).render_as_string(hide_password=False)
+    finally:
+        with admin.connect() as c:
+            c.execute(text("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = :n"), {"n": name})
+            c.execute(text(f'DROP DATABASE IF EXISTS "{name}"'))
+        admin.dispose()
+
+
+def test_downgrade_drops_checkpoint_tables(fresh_db_url):
+    import asyncio
+
+    from sqlalchemy import create_engine
+
+    from backend.tutor.tutor.checkpoint import open_saver
+
+    async def setup_saver():
+        async with open_saver(fresh_db_url):
+            pass
+
+    checkpoint = {"checkpoints", "checkpoint_blobs", "checkpoint_writes", "checkpoint_migrations"}
+    eng = create_engine(fresh_db_url)
+    try:
+        migrate(fresh_db_url)
+        asyncio.run(setup_saver())
+        assert checkpoint <= set(inspect(eng).get_table_names())
+        downgrade(fresh_db_url, "base")
+        assert set(inspect(eng).get_table_names()) == {"alembic_version"}
+    finally:
+        eng.dispose()

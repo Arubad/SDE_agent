@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -20,6 +21,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -131,6 +133,7 @@ class Document(Base):
     meta: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     status: Mapped[str] = mapped_column(Text, nullable=False, default="ok", server_default="ok")
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)  # a card summary (videos)
 
 
 class Section(Base):
@@ -151,6 +154,8 @@ class Section(Base):
     start_s: Mapped[float | None] = mapped_column(Float, nullable=True)
     end_s: Mapped[float | None] = mapped_column(Float, nullable=True)
     ord: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quiz: Mapped[list | None] = mapped_column(JSONB, nullable=True)  # starter questions
 
 
 class HttpCache(Base):
@@ -254,14 +259,90 @@ class LearnerFact(Base):
 
 
 class McpIdempotency(Base):
-    """A claimed MCP write. `result` is null while the call runs; a failed call deletes its claim."""
+    """A claimed MCP write. `result` is null while the call runs; a failed call deletes its claim. `claim_token`
+    names the current holder: only that holder may store a result or release the claim."""
 
     __tablename__ = "mcp_idempotency"
 
     tool: Mapped[str] = mapped_column(Text, primary_key=True)
     key: Mapped[str] = mapped_column(Text, primary_key=True)
     args_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    claim_token: Mapped[str] = mapped_column(Text, nullable=False)
     result: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class TutorSession(Base):
+    """A tutor conversation. `mode`: tutor|qa. `status`: active|ended. `curated_at` is set once memory curation
+    has run; `raw_kept` says the raw messages were kept (consent). `last_turn_at`: when the last turn finished (the
+    retention loop ends sessions idle since then, or since `started_at`, R19)."""
+
+    __tablename__ = "tutor_sessions"
+    __table_args__ = (
+        CheckConstraint("mode IN ('tutor', 'qa')", name="ck_tutor_sessions_mode"),
+        CheckConstraint("status IN ('active', 'ended')", name="ck_tutor_sessions_status"),
+        Index("uq_tutor_sessions_one_active", "roadmap_id", unique=True, postgresql_where=text("status = 'active'")),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    roadmap_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), _roadmap_fk(), nullable=False, index=True)
+    mode: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="active", server_default="active")
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_turn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    curated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    raw_kept: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    cost_usd: Mapped[float] = mapped_column(Numeric(12, 6), nullable=False, default=0, server_default="0")
+
+
+class StudySettings(Base):
+    """Per-roadmap study preferences. `weekly_hours` null means the spec's value, else 5. `study_days` are
+    weekday numbers, Monday = 0."""
+
+    __tablename__ = "study_settings"
+
+    roadmap_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), _roadmap_fk(), primary_key=True)
+    weekly_hours: Mapped[float | None] = mapped_column(Float, nullable=True)
+    session_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=45, server_default="45")
+    study_days: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=lambda: [0, 1, 2, 3, 4], server_default="[0,1,2,3,4]"
+    )
+    deadline: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+
+class StudyPlan(Base):
+    """A versioned study plan. `status`: active|proposed|superseded."""
+
+    __tablename__ = "study_plans"
+    __table_args__ = (
+        UniqueConstraint("roadmap_id", "version"),
+        CheckConstraint("status IN ('active', 'proposed', 'superseded')", name="ck_study_plans_status"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    roadmap_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), _roadmap_fk(), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    plan: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class LlmMemo(Base):
+    """A memoised deterministic model response, keyed by a hash of the model and the inputs."""
+
+    __tablename__ = "llm_memo"
+
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    response: Mapped[dict] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

@@ -44,7 +44,8 @@ def _leaves(obj, out: list) -> list:
 
 
 def _size(obj) -> int:
-    return len(json.dumps(obj, ensure_ascii=False))
+    """JSON length as sent: ASCII-escaped, so a CJK character counts 6 (`\\u6f22`) and an emoji 12."""
+    return len(json.dumps(obj, ensure_ascii=True))
 
 
 def _marker(n: int) -> str:
@@ -52,15 +53,20 @@ def _marker(n: int) -> str:
 
 
 def _cut(text: str, excess: int) -> tuple[str, int] | None:
-    """(kept text, chars cut) so that text + marker is at least `excess` chars shorter than text, or None when
-    cutting the whole text would save less than the marker costs."""
-    cut = excess + len(_marker(excess))
-    cut = excess + len(_marker(cut))  # the marker's own length depends on the number in it
-    if cut > len(text):
-        if len(text) <= len(_marker(len(text))):
-            return None
-        cut = len(text)
-    return text[:len(text) - cut], cut
+    """(kept text, chars cut) so that kept + marker is at least `excess` shorter than text in `_size` terms (the
+    longest such prefix), or None when cutting the whole text would save less than the marker costs."""
+    full = _size(text)
+
+    def saves(keep: int) -> bool:
+        return full - _size(text[:keep]) >= excess + len(_marker(len(text) - keep))
+
+    if not saves(0):
+        return ("", len(text)) if full - _size("") > len(_marker(len(text))) else None
+    lo, hi = 0, len(text)  # saves(lo) holds; saves(hi) does not (excess > 0)
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        lo, hi = (mid, hi) if saves(mid) else (lo, mid)
+    return text[:lo], len(text) - lo
 
 
 # Passages feed backend/agent/citations.py, which indexes these keys directly.

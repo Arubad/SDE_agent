@@ -56,7 +56,7 @@ export function errorMessage(status: number, body: unknown): string {
 
 // `candidateCode` is sent instead of the stored code and is saved only if the request succeeds,
 // so a mistyped passcode is never kept or re-sent. Any 401 clears the stored code.
-async function request<T>(path: string, init: RequestInit = {}, candidateCode?: string): Promise<T> {
+export async function request<T>(path: string, init: RequestInit = {}, candidateCode?: string): Promise<T> {
   const headers = new Headers(init.headers);
   const code = candidateCode ?? getCode();
   if (code) headers.set("X-Access-Code", code);

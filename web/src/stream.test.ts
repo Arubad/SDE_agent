@@ -233,3 +233,54 @@ describe("followEvents", () => {
     }
   });
 });
+
+describe("streamEvents POST", () => {
+  it("sends a JSON body with the access code and streams the events", async () => {
+    const { setCode, streamEvents } = await load();
+    setCode("secret-2");
+    const { res } = sseResponse(['event: reply\ndata: {"text": "hi"}\n\nevent: done\ndata: {}\n\n']);
+    fetchMock.mockResolvedValue(res);
+    const events: string[] = [];
+
+    await streamEvents("/api/sessions/s1/turn", (name) => events.push(name), new AbortController().signal, {
+      method: "POST",
+      body: { text: "hello" },
+    });
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(init.method).toBe("POST");
+    expect(init.body).toBe('{"text":"hello"}');
+    const headers = new Headers(init.headers);
+    expect(headers.get("Content-Type")).toBe("application/json");
+    expect(headers.get("X-Access-Code")).toBe("secret-2");
+    expect(events).toEqual(["reply", "done"]);
+  });
+
+  it("a non-2xx JSON error throws ApiError with the server message", async () => {
+    const { ApiError, streamEvents } = await load();
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ error: "Another turn is running for this session." }), {
+        status: 409,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    const err = await streamEvents("/api/sessions/s1/turn", () => {}, new AbortController().signal, {
+      method: "POST",
+      body: { action: "continue" },
+    }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as InstanceType<typeof ApiError>).status).toBe(409);
+    expect((err as Error).message).toBe("Another turn is running for this session.");
+  });
+
+  it("a GET sends no method or body", async () => {
+    const { streamEvents } = await load();
+    fetchMock.mockResolvedValue(sseResponse([]).res);
+    await streamEvents("/api/x", () => {}, new AbortController().signal);
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(init.method).toBeUndefined();
+    expect(init.body).toBeUndefined();
+  });
+});

@@ -3,27 +3,32 @@
 
 `render_page` is the only place that builds the crawler's `CallContext` (`agent="crawler"`, `raw=True`: no
 untrusted fence, the 5 MB `RAW_CAP`), always with a URL policy whose only source is the page itself, so the
-policy's same-host rule is the crawler's same-site rule. The steps:
+policy's same-host rule is the crawler's same-site rule, and a browser lease of its own (`crawler:<hex>`). The
+steps:
 1. `browser.navigate {"url": url}`; the final URL is the result's `Page URL:` line (the gateway already refused,
    and reset the tab to about:blank, when that line is off-policy);
 2. the final URL's host must be `scope_host` (the resource's crawl scope), else `"left the site"`;
 3. `browser.evaluate` of `EVALUATE_FUNCTION`; Playwright MCP answers `### Result\\n<JSON value>`;
-4. `browser.close`, always (its errors are ignored).
+4. `browser.close`, always (its errors are ignored), then the lease is released, always.
 
 The result is a `RenderResult`, or a short reason string; nothing here raises for a render that failed.
-Renders are serialized: the browser has one tab, and evaluate reads whatever page it shows."""
+The browser has one tab and evaluate reads whatever page it shows, so the lease keeps every other session (another
+render, a tutor turn) out of it for the whole render. A render that finds it held waits up to the browser call's
+timeout, then gets the gateway's BROWSER_BUSY, reported as `BUSY` (`is_busy`): the crawler retries that one later
+instead of skipping the page. Each navigate/evaluate is given `2 * timeout_s + 5` s from here (the lease wait,
+then the call), so a busy browser reads as `BUSY`, not as a timeout."""
 from __future__ import annotations
 
 import json
 import re
-import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from backend.core.redact import redact
 from backend.tutor.ingest.fetch import Resolver, system_resolver
-from backend.tutor.mcp.gateway import RAW_AGENT, CallContext
+from backend.tutor.mcp.gateway import BROWSER_BUSY, RAW_AGENT, CallContext
 from backend.tutor.mcp.policy import UrlPolicy, page_urls
 from backend.tutor.mcp.results import RAW_CAP, _leaves
 
@@ -39,7 +44,6 @@ NO_HTML = "no html"
 _LEFT_PREFIX = "navigation left the allowed sites"
 _RESULT = re.compile(r"^### Result[ \t]*\n(.*?)(?=^###|\Z)", re.M | re.S)
 _TRUNCATED = re.compile(r" \[truncated \d+ chars\]$")
-_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -58,6 +62,14 @@ def _text(out: dict) -> str:
 
 def _unavailable(error: str) -> str:
     return f"browser unavailable: {redact(' '.join(str(error).split()))[:REASON_CHARS]}"
+
+
+BUSY = _unavailable(BROWSER_BUSY)  # another session held the browser for the whole wait: worth retrying
+
+
+def is_busy(reason: object) -> bool:
+    """Whether a `render_page` reason is `BUSY` (the browser was in use, not broken)."""
+    return reason == BUSY
 
 
 def _host(url: str) -> str:
@@ -85,20 +97,24 @@ def render_page(gateway: Gateway, url: str, *, scope_host: str, timeout_s: float
     crawler passes its fetcher's)."""
     policy = UrlPolicy(resolver=resolver)
     policy.allow_sources([url])
-    ctx = CallContext(agent=RAW_AGENT, policy=policy, raw=True)
-    with _LOCK:
+    ctx = CallContext(agent=RAW_AGENT, policy=policy, raw=True, lease=f"crawler:{uuid4().hex}")
+    try:
+        return _render(gateway, url, ctx, scope_host.lower().rstrip("."), timeout_s)
+    except Exception as e:  # never raise into the crawler: a render failure is a reason
+        return _unavailable(f"{type(e).__name__}: {e}")
+    finally:
         try:
-            return _render(gateway, url, ctx, scope_host.lower().rstrip("."), timeout_s)
-        except Exception as e:  # never raise into the crawler: a render failure is a reason
-            return _unavailable(f"{type(e).__name__}: {e}")
-        finally:
-            try:
-                gateway.call_sync("browser.close", {}, ctx, timeout=CLOSE_TIMEOUT_S)
-            except Exception:
-                pass
+            gateway.call_sync("browser.close", {}, ctx, timeout=CLOSE_TIMEOUT_S)
+        except Exception:
+            pass
+        try:
+            gateway.release_sync(ctx.lease)
+        except Exception:
+            pass
 
 
 def _render(gateway: Gateway, url: str, ctx: CallContext, scope_host: str, timeout_s: float) -> RenderResult | str:
+    timeout_s = 2 * timeout_s + 5  # the gateway's lease wait, then the call itself
     nav = gateway.call_sync("browser.navigate", {"url": url}, ctx, timeout=timeout_s)
     if "error" in nav:
         return LEFT_SITE if str(nav["error"]).startswith(_LEFT_PREFIX) else _unavailable(nav["error"])

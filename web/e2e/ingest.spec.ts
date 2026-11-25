@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
+import { declineConsent } from "./helpers";
 
 // Runs against the main E2E server: fixture net, the Kubernetes parse reply from FAKE_LLM_REPLIES_DIR, and the
 // ingestion agent scripted (e2e/fixtures/agent-script.jsonl) to propose one page in its first recovery round.
@@ -16,6 +17,7 @@ const SETTLE = { timeout: 90_000 };
 // No retries here, even in CI: the agent's FAKE_LLM_SCRIPT is single-use per server process, and Playwright keeps
 // the webServer across retries, so a retried run would find the script spent and get no proposal. To re-run
 // locally, restart the main E2E server (stop any reused one on port 8765).
+test.beforeAll(async ({ request }) => declineConsent(request));
 test.describe.configure({ mode: "serial", retries: 0 });
 
 test("parse, review, approve, then watch ingestion settle into a report", async ({ page }) => {

@@ -16,8 +16,13 @@ from fastmcp.tools import Tool
 from pydantic import Field
 
 from backend.core.trace import Trace
-from backend.tutor.mcp.gateway import CallContext, Gateway, wire_name
+from backend.tutor.ingest.fetch import public_resolver
+from backend.tutor.mcp import gateway as gateway_mod
+from backend.tutor.mcp.gateway import (BROWSER_BUSY, ENABLED_TTL_S, TOOL_DEFS_WAIT_S, CallContext, Gateway,
+                                       wire_name)
+from backend.tutor.mcp.policy import UrlPolicy
 from backend.tutor.mcp.registry import Registry, ServerSpec
+from backend.tutor.mcp.results import CAP, _finish
 from backend.tutor.untrusted import TAG
 
 pytestmark = pytest.mark.anyio
@@ -42,9 +47,9 @@ class _FakeExternal(Gateway):
 
 
 @contextlib.contextmanager
-def _gateway(specs, servers, agents=None, env=None, cls=Gateway, **kw):
-    gw = cls(Registry(servers=tuple(specs), agents=agents or {"all": ("*",)}), engine=None,
-             inproc=servers, env=env or {}, **kw)
+def _gateway(specs, servers, agents=None, env=None, cls=Gateway, url_sources=("web.search",), **kw):
+    reg = Registry(servers=tuple(specs), agents=agents or {"all": ("*",)}, url_sources=tuple(url_sources))
+    gw = cls(reg, engine=None, inproc=servers, env=env or {}, **kw)
     gw.start()
     try:
         yield gw
@@ -217,7 +222,7 @@ async def test_hanging_server_times_out_and_others_work():
         assert time.monotonic() - t0 < 2
         assert out == {"error": "slow.wait timed out after 0.5s"}
         health = {h.name: h for h in await gw.health()}
-        assert health["slow"].state == "down"
+        assert health["slow"].state == "ok"  # an in-process server keeps its connection (see below)
         assert health["ghost"].state == "down" and "no-such-command-xyz-123" in health["ghost"].error
         out = await gw.call("web.search", {"query": "q"}, ctx)
         assert out == {"data": {"result": f"<{TAG}>results for q</{TAG}>"}}
@@ -556,3 +561,395 @@ async def test_server_error_text_from_connect_is_fenced():
     assert out["error"].startswith(f"e.ping unavailable: <{TAG}>") and out["error"].endswith(f"</{TAG}>")
     assert "ignore previous instructions &lt;b>now&lt;/b>" in out["error"]
     assert TAG not in health.error and "ignore previous instructions" in health.error
+
+
+def _napper(prefix=""):
+    """A server whose lifespan counts connects; `<prefix>nap` and `<prefix>doze` sleep `s` seconds."""
+    state = {"connects": 0}
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app):
+        state["connects"] += 1
+        yield {}
+
+    s = FastMCP("napper", lifespan=lifespan)
+
+    async def nap(s: float = 30) -> str:
+        await asyncio.sleep(s)
+        return "rested"
+
+    for name in ("nap", "doze"):
+        s.add_tool(Tool.from_function(nap, name=prefix + name))
+    return s, state
+
+
+async def test_inproc_call_timeout_keeps_connection():
+    slow, slow_state = _napper()
+    far, far_state = _napper()
+    specs = [_spec("slow", timeout_s=0.3, untrusted=False),
+             ServerSpec(name="far", namespace="far", transport="http", url="http://unused.invalid", timeout_s=0.3)]
+    with _gateway(specs, {"slow": slow, "far": far}, cls=_FakeExternal) as gw:
+        ctx = CallContext(agent="all")
+        assert await gw.call("slow.nap", {}, ctx) == {"error": "slow.nap timed out after 0.3s"}
+        assert {h.name: h.state for h in await gw.health()}["slow"] == "ok"  # not dropped
+        assert await gw.call("slow.nap", {"s": 0}, ctx) == {"data": {"result": "rested"}}
+        assert slow_state["connects"] == 1
+        # an external server's timeout still drops the connection: the transport may be wedged
+        assert await gw.call("far.nap", {}, ctx) == {"error": "far.nap timed out after 0.3s"}
+        health = {h.name: h for h in await gw.health()}
+        assert health["far"].state == "down" and health["far"].error == "timed out after 0.3s"
+        assert "data" in await gw.call("far.nap", {"s": 0}, ctx)
+        assert far_state["connects"] == 2
+
+
+async def test_per_tool_timeout_applies():
+    s, _ = _napper(prefix="x_")  # keys are the server's own names, before strip_prefix
+    spec = _spec("slow", timeout_s=0.3, untrusted=False, strip_prefix="x_", tool_timeouts={"x_nap": 3})
+    with _gateway([spec], {"slow": s}) as gw:
+        ctx = CallContext(agent="all")
+        assert await gw.call("slow.nap", {"s": 0.6}, ctx) == {"data": {"result": "rested"}}
+        assert await gw.call("slow.doze", {"s": 0.6}, ctx) == {"error": "slow.doze timed out after 0.3s"}
+
+
+async def test_url_sources_from_text_results():
+    docs = FastMCP("docs")
+
+    @docs.tool
+    def microsoft_docs_search(query: str) -> str:
+        return ("AKS intro: https://learn.microsoft.com/en-us/azure/aks/intro.\n"
+                "Also (https://techcommunity.microsoft.com/blog/x)")
+
+    @docs.tool
+    def microsoft_docs_fetch(url: str) -> str:
+        return "links: https://unlisted.example/page"
+
+    @docs.tool
+    def broken(query: str) -> str:
+        raise ValueError("see https://error.example/")
+
+    spec = ServerSpec(name="mslearn", namespace="docs.mslearn", transport="http", url="http://unused.invalid")
+    sources = ("web.search", "docs.mslearn.microsoft_docs_search", "docs.mslearn.broken")
+    with _gateway([spec], {"mslearn": docs}, cls=_FakeExternal, url_sources=sources) as gw:
+        policy = UrlPolicy(resolver=public_resolver)
+        ctx = CallContext(agent="all", policy=policy)
+        out = await gw.call("docs.mslearn.microsoft_docs_search", {"query": "aks"}, ctx)
+        assert out["data"]["result"].startswith(f"<{TAG}>AKS intro")  # the result itself is unchanged
+        assert policy.refusal("https://learn.microsoft.com/en-us/azure/aks/intro") is None
+        assert policy.refusal("https://techcommunity.microsoft.com/other") is None  # trailing ")" trimmed
+        assert "error" in await gw.call("docs.mslearn.broken", {"query": "x"}, ctx)
+        assert "data" in await gw.call("docs.mslearn.microsoft_docs_fetch",
+                                       {"url": "https://learn.microsoft.com/a"}, ctx)
+        for not_source in ("https://unlisted.example/page", "https://error.example/"):
+            assert policy.refusal(not_source) is not None, not_source  # not a url_sources result
+
+
+def test_cap_measures_ascii_escaped_json():
+    ctx = CallContext(agent="t")
+    out = _finish({"data": {"text": "漢" * 5000}}, _spec("x"), ctx, "x.y")
+    assert len(json.dumps(out, ensure_ascii=True)) <= CAP  # \u6f22 is 6 characters on the wire
+    kept, cut = re.fullmatch(rf"<{TAG}>(漢*)</{TAG}> \[truncated (\d+) chars\]", out["data"]["text"]).groups()
+    assert len(kept) + int(cut) == 5000 and len(kept) > 3000  # cut to fit, not wiped out
+    passages = {"passages": [{"chunk_id": "c", "url": "https://a.example/", "title": "t", "text": "漢" * 5000}]}
+    out = _finish(passages, _spec("kb"), ctx, "kb.search")
+    assert len(json.dumps(out, ensure_ascii=True)) <= CAP
+    assert out["passages"][0]["text"].startswith("漢" * 3000)
+
+
+async def test_enabled_state_not_queried_on_loop(monkeypatch):
+    assert ENABLED_TTL_S == 5.0
+    seen, enabled = [], {"web": True}
+
+    def fake(engine, spec):
+        seen.append((spec.name, threading.current_thread().name))
+        return enabled.get(spec.name, spec.enabled_default)
+
+    monkeypatch.setattr(gateway_mod, "effective_enabled", fake)
+    with _gateway([_spec("web")], {"web": _web()}) as gw:
+        assert [d["name"] for d in await gw.tool_defs("all")] == ["web__search"]
+        assert "data" in await gw.call("web.search", {"query": "q"}, CallContext(agent="all"))
+        await gw.health()
+        assert seen and "mcp-gateway" not in {t for _, t in seen}
+        assert len(seen) == 1  # one refresh within ENABLED_TTL_S
+        enabled["web"] = False  # the Settings switch: set_enabled, then reset
+        await gw.reset("web")
+        out = await gw.call("web.search", {"query": "q"}, CallContext(agent="all"))
+        assert out == {"error": "web.search: server web is disabled"} and len(seen) == 2
+        enabled["web"] = True
+        await gw.reset("web")
+        assert (await gw.check("web")).state == "ok"  # check() refreshes too (the API calls it after reset)
+        assert "mcp-gateway" not in {t for _, t in seen}
+
+
+async def test_enabled_state_refresh_failure_keeps_last_known(monkeypatch):
+    def broken(engine, spec):
+        raise RuntimeError("database is down")
+
+    monkeypatch.setattr(gateway_mod, "effective_enabled", broken)
+    with _gateway([_spec("web"), _spec("off", enabled_default=False)], {"web": _web(), "off": _web()}) as gw:
+        assert [d["name"] for d in await gw.tool_defs("all")] == ["web__search"]  # the registry defaults
+        assert "data" in await gw.call("web.search", {"query": "q"}, CallContext(agent="all"))
+
+
+def _counted_slow_connect(delay):
+    state = {"connects": 0}
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app):
+        state["connects"] += 1
+        await asyncio.sleep(delay)
+        yield {}
+
+    s = FastMCP("stalled", lifespan=lifespan)
+
+    @s.tool
+    def ping() -> str:
+        return "pong"
+
+    return s, state
+
+
+async def test_tool_defs_does_not_wait_for_slow_server(monkeypatch):
+    assert TOOL_DEFS_WAIT_S == 5.0
+    monkeypatch.setattr(gateway_mod, "TOOL_DEFS_WAIT_S", 0.3)  # the same code path, without a 5 s test
+    stalled, stalled_state = _counted_slow_connect(30)
+    late, _ = _counted_slow_connect(0.8)
+    specs = [_spec("kb", untrusted=False),
+             ServerSpec(name="stalled", namespace="stalled", transport="stdio", command="unused"),
+             ServerSpec(name="late", namespace="late", transport="stdio", command="unused")]
+    servers = {"kb": _web(), "stalled": stalled, "late": late}
+    t0 = time.monotonic()
+    with _gateway(specs, servers, cls=_FakeExternal, stdio_connect_s=60) as gw:
+        t0 = time.monotonic()
+        defs = await gw.tool_defs("all")
+        assert time.monotonic() - t0 < 0.3 + 2
+        assert [d["name"] for d in defs] == ["kb__search"]
+        await asyncio.sleep(1.0)  # `late` finishes connecting under its own budget, in the background
+        assert [d["name"] for d in await gw.tool_defs("all")] == ["kb__search", "late__ping"]
+        assert stalled_state["connects"] == 1  # still connecting: not started a second time
+    assert time.monotonic() - t0 < 10  # stop() does not wait for the stalled connect
+
+
+async def test_refused_call_is_traced():
+    trace = Trace("t")
+    agents = {"teacher": ("web.*", "off.*"), "crawler": ("web.*",)}
+    specs = [_spec("web"), _spec("off", enabled_default=False)]
+    with _gateway(specs, {"web": _web(), "off": _web()}, agents=agents) as gw:
+        policy = UrlPolicy(resolver=public_resolver)
+        refusals = [
+            ("kb.search", {}, CallContext(agent="nobody", trace=trace), "kb.search"),
+            ("web.search", {}, CallContext(agent="nobody", trace=trace), "web.search"),
+            ("web.fetch", {"url": "https://unlisted.example/"}, CallContext("teacher", policy, trace), "web.fetch"),
+            ("off.search", {"query": "q"}, CallContext(agent="teacher", trace=trace), "off.search"),
+            ("web.search", {}, CallContext(agent="teacher", trace=trace, raw=True), "web.search"),
+            ("web.nope", {}, CallContext(agent="teacher", trace=trace), "web.nope"),
+        ]
+        for name, args, ctx, canonical in refusals:
+            n = len(trace.spans)
+            out = await gw.call(name, args, ctx)
+            (span,) = trace.spans[n:]
+            assert span.name == f"mcp:{canonical}" and span.kind == "tool", name
+            assert span.attrs["refused"] is True and span.attrs["ok"] is False
+            assert span.attrs["reason"] == out["error"][:200] and span.attrs["tool"] == canonical
+        assert "data" in await gw.call("web.search", {"query": "q"}, CallContext(agent="teacher", trace=trace))
+        assert "refused" not in trace.spans[-1].attrs and trace.spans[-1].attrs["ok"] is True
+        await gw.call("web.search", {}, CallContext(agent="nobody"))  # no trace: nothing to record
+
+
+async def test_reset_during_an_in_flight_refresh_is_not_lost(monkeypatch):
+    """A refresh that read the old state before the switch changed must not stamp the cache fresh after reset."""
+    enabled, entered, release = {"web": True}, threading.Event(), threading.Event()
+    block = {"next": False}
+
+    def fake(engine, spec):
+        value = enabled[spec.name]  # read before the switch changes (the stale value)
+        if block["next"]:
+            block["next"] = False
+            entered.set()
+            release.wait(5)
+        return value
+
+    monkeypatch.setattr(gateway_mod, "effective_enabled", fake)
+    monkeypatch.setattr(gateway_mod, "ENABLED_TTL_S", 0.0)  # every call refreshes
+    with _gateway([_spec("web")], {"web": _web()}) as gw:
+        assert "data" in await gw.call("web.search", {"query": "q"}, CallContext(agent="all"))
+        block["next"] = True
+        in_flight = asyncio.ensure_future(gw.call("web.search", {"query": "q"}, CallContext(agent="all")))
+        assert await asyncio.to_thread(entered.wait, 5)  # its refresh holds the old value
+        monkeypatch.setattr(gateway_mod, "ENABLED_TTL_S", 60.0)  # from here on only an invalidation re-reads
+        enabled["web"] = False  # the Settings switch: set_enabled, then reset, then check
+        await gw.reset("web")
+        release.set()
+        await in_flight
+        assert (await gw.check("web")).state == "disabled"
+        out = await gw.call("web.search", {"query": "q"}, CallContext(agent="all"))
+        assert out == {"error": "web.search: server web is disabled"}
+
+
+# ---- the browser lease -------------------------------------------------------------------------------------------
+def _leased_browser(navigations, load):
+    """Playwright-shaped: `navigate` records its URL, `snapshot` records None; both report the page shown and
+    take a moment, counting how many run at once (`load["max"]`)."""
+    b = FastMCP("browser")
+    page = {"url": "about:blank"}
+
+    @contextlib.asynccontextmanager
+    async def busy():
+        load["now"] += 1
+        load["max"] = max(load["max"], load["now"])
+        try:
+            await asyncio.sleep(0.05)
+            yield
+        finally:
+            load["now"] -= 1
+
+    @b.tool
+    async def browser_navigate(url: str) -> str:
+        async with busy():
+            navigations.append(url)
+            page["url"] = url
+            return f"### Page state\n- Page URL: {url}"
+
+    @b.tool
+    async def browser_snapshot() -> str:
+        async with busy():
+            navigations.append(None)
+            return f"### Page state\n- Page URL: {page['url']}"
+
+    return b
+
+
+def _kb():
+    kb = FastMCP("kb")
+
+    @kb.tool
+    def list_roadmaps() -> str:
+        return "kubernetes"
+
+    return kb
+
+
+@pytest.fixture
+def gw_browser():
+    navigations, load = [], {"now": 0, "max": 0}
+    specs = [_spec("playwright", "browser", strip_prefix="browser_", timeout_s=1), _spec("kb")]
+    with _gateway(specs, {"playwright": _leased_browser(navigations, load), "kb": _kb()},
+                  agents={"t": ("*",), "u": ("*",)}) as gw:
+        gw.fake = type("Fake", (), {"navigations": navigations, "load": load})()
+        yield gw
+
+
+def ctx_with_policy(lease=None, agent="t", trace=None):
+    policy = UrlPolicy(resolver=public_resolver)
+    policy.allow_sources(["https://ok.example/"])
+    return CallContext(agent=agent, policy=policy, trace=trace, lease=lease)
+
+
+async def test_lease_constants():
+    assert gateway_mod.LEASE_IDLE_S == 60.0
+    assert BROWSER_BUSY == "browser busy: another session is using it"
+
+
+async def test_second_lease_waits_then_busy(gw_browser):
+    trace = Trace("t")
+    a, b = ctx_with_policy(lease="A"), ctx_with_policy(lease="B", trace=trace)
+    await gw_browser.call("browser.navigate", {"url": "https://ok.example/"}, a)
+    t0 = time.monotonic()
+    out = await gw_browser.call("browser.snapshot", {}, b)
+    assert out == {"error": BROWSER_BUSY}
+    assert 0.9 <= time.monotonic() - t0 < 5  # waited the call's own timeout (timeout_s=1), then gave up
+    assert gw_browser.fake.navigations == ["https://ok.example/"]  # B never reached the browser
+    (span,) = trace.spans
+    assert span.name == "mcp:browser.snapshot" and span.attrs["refused"] is True and span.attrs["ok"] is False
+    assert span.attrs["reason"] == BROWSER_BUSY
+    assert "data" in await gw_browser.call("browser.snapshot", {}, a)  # A still holds it
+
+
+async def test_same_lease_keeps_the_page(gw_browser):
+    a = ctx_with_policy(lease="A")
+    await gw_browser.call("browser.navigate", {"url": "https://ok.example/"}, a)
+    await gw_browser.call("browser.snapshot", {}, a)
+    assert gw_browser.fake.navigations == ["https://ok.example/", None]  # no reset: first owner, then same owner
+
+
+async def test_release_hands_over_and_resets_page(gw_browser):
+    a, b = ctx_with_policy(lease="A"), ctx_with_policy(lease="B")
+    await gw_browser.call("browser.navigate", {"url": "https://ok.example/"}, a)
+    await gw_browser.release("A")
+    out = await gw_browser.call("browser.snapshot", {}, b)
+    assert gw_browser.fake.navigations[-2:] == ["about:blank", None]     # reset before B's first call
+    assert "about:blank" in out["data"]["result"]  # B never sees A's page
+    await gw_browser.release("A")  # not the owner any more: a no-op
+    await gw_browser.call("browser.snapshot", {}, b)
+    assert gw_browser.fake.navigations[-2:] == [None, None]
+
+
+async def test_calls_under_one_lease_run_one_at_a_time(gw_browser):
+    """A turn's tool calls run in parallel (run_tool_loop gathers them); the shared page sees one at a time, and
+    a pending reset runs once, before the first of them."""
+    a, b = ctx_with_policy(lease="A"), ctx_with_policy(lease="B")
+    await gw_browser.call("browser.navigate", {"url": "https://ok.example/"}, a)
+    await gw_browser.release("A")
+    outs = await asyncio.gather(gw_browser.call("browser.navigate", {"url": "https://ok.example/b"}, b),
+                                gw_browser.call("browser.snapshot", {}, b),
+                                gw_browser.call("browser.snapshot", {}, b))
+    assert all("data" in o for o in outs)
+    assert gw_browser.fake.load["max"] == 1
+    navs = gw_browser.fake.navigations
+    assert navs[:2] == ["https://ok.example/", "about:blank"] and navs.count("about:blank") == 1
+    assert sorted(navs[2:], key=str) == [None, None, "https://ok.example/b"]
+
+
+async def test_waiting_lease_gets_it_on_release(gw_browser):
+    a, b = ctx_with_policy(lease="A"), ctx_with_policy(lease="B")
+    await gw_browser.call("browser.navigate", {"url": "https://ok.example/"}, a)
+    waiting = asyncio.ensure_future(gw_browser.call("browser.snapshot", {}, b))
+    await asyncio.sleep(0.2)
+    assert not waiting.done()
+    await gw_browser.release("A")
+    assert "data" in await asyncio.wait_for(waiting, 5)
+    assert gw_browser.fake.navigations == ["https://ok.example/", "about:blank", None]
+
+
+async def test_reset_waits_for_a_call_that_connects(gw_browser):
+    a, b = ctx_with_policy(lease="A"), ctx_with_policy(lease="B")
+    await gw_browser.call("browser.navigate", {"url": "https://ok.example/"}, a)
+    await gw_browser.release("A")
+    real_open, failures = gw_browser._open, [1]
+
+    async def flaky(conn, canonical):
+        if failures:
+            failures.pop()
+            return {"error": f"{canonical} unavailable: down"}
+        return await real_open(conn, canonical)
+
+    gw_browser._open = flaky
+    assert "unavailable" in (await gw_browser.call("browser.snapshot", {}, b))["error"]
+    await gw_browser.call("browser.snapshot", {}, b)
+    assert gw_browser.fake.navigations == ["https://ok.example/", "about:blank", None]  # reset on the next call
+
+
+async def test_idle_lease_expires(gw_browser, monkeypatch):
+    monkeypatch.setattr(gateway_mod, "LEASE_IDLE_S", 0.1)
+    await gw_browser.call("browser.navigate", {"url": "https://ok.example/"}, ctx_with_policy(lease="A"))
+    await asyncio.sleep(0.2)
+    assert "error" not in await gw_browser.call("browser.snapshot", {}, ctx_with_policy(lease="B"))
+    assert gw_browser.fake.navigations[-2:] == ["about:blank", None]
+
+
+async def test_no_lease_means_one_per_agent(gw_browser):
+    await gw_browser.call("browser.navigate", {"url": "https://ok.example/"}, ctx_with_policy(agent="t"))
+    assert "data" in await gw_browser.call("browser.snapshot", {}, ctx_with_policy(agent="t"))
+    assert await gw_browser.call("browser.snapshot", {}, ctx_with_policy(agent="u")) == {"error": BROWSER_BUSY}
+    await gw_browser.release("anon:t")
+    assert "data" in await gw_browser.call("browser.snapshot", {}, ctx_with_policy(agent="u"))
+
+
+async def test_non_browser_calls_ignore_leases(gw_browser):
+    await gw_browser.call("browser.navigate", {"url": "https://ok.example/"}, ctx_with_policy(lease="A"))
+    assert "error" not in await gw_browser.call("kb.list_roadmaps", {}, CallContext(agent="t", lease="B"))
+
+
+async def test_release_sync_from_worker_thread(gw_browser):
+    await gw_browser.call("browser.navigate", {"url": "https://ok.example/"}, ctx_with_policy(lease="A"))
+    await asyncio.to_thread(gw_browser.release_sync, "A")
+    assert "data" in await gw_browser.call("browser.snapshot", {}, ctx_with_policy(lease="B"))

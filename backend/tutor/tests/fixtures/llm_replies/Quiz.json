@@ -1,0 +1,28 @@
+{
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which statement best describes a Pod?",
+      "options": ["The smallest deployable unit, wrapping one or more containers", "A physical server in the cluster", "A cloud load balancer", "A YAML linter"],
+      "answer": "The smallest deployable unit, wrapping one or more containers",
+      "explanation": "A Pod is the smallest unit Kubernetes schedules; it wraps one or more containers that share networking and storage.",
+      "concept": "pod definition"
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which component stores the cluster state?",
+      "options": ["etcd", "kubelet", "kube-proxy", "the container runtime"],
+      "answer": "etcd",
+      "explanation": "etcd is the consistent key-value store behind the API server.",
+      "concept": "cluster state"
+    },
+    {
+      "type": "mcq",
+      "prompt": "What does kubectl apply -f do?",
+      "options": ["Creates or updates resources from a manifest", "Deletes every Pod", "Restarts the node", "Builds a container image"],
+      "answer": "Creates or updates resources from a manifest",
+      "explanation": "apply reconciles the cluster toward the declared manifest.",
+      "concept": "declarative apply"
+    }
+  ]
+}

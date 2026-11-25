@@ -6,18 +6,22 @@ are always refused, listed or not.
 A URL passes `refusal` when all of these hold:
 - it is an absolute http(s) URL with a host, no userinfo and no backslash (browsers read `\\` as `/`, so
   `https://evil.example\\@good.example/` would reach evil.example while `urlsplit` says good.example);
-- `fetch.address_refusal(host, resolver)` is None;
+- `fetch.address_refusal(host, resolver)` is None, within DNS_TIMEOUT_S (the lookup runs in a worker of a shared
+  pool, so a hung resolver costs one worker, never the caller; a lookup that does not finish is DNS_TIMED_OUT);
 - its host (lowercased, trailing dot dropped) is the host of an allowed URL. That covers the allowed URL itself
   (in any `queue.normalize_url`-equivalent spelling) and same-site navigation; ports and paths are not compared.
 Sources that fail the first two checks are never added, so a refused search result allows nothing.
 
 Refusal reasons are fixed strings: they reach the model, and the URL itself may be page-written text.
+`allow_hosts` never resolves (it trusts the caller's earlier vetting; `refusal` still checks the address).
 `allow_sources`, `allow_text` and `refusal` may resolve DNS (real DNS by default; tests inject a resolver), so
 the gateway calls them off its event loop."""
 from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from urllib.parse import urlsplit
 
 from backend.tutor.ingest.fetch import PRIVATE_ADDRESS, Resolver, address_refusal, system_resolver
@@ -28,6 +32,9 @@ NOT_HTTP = "only absolute http(s) URLs with a host"
 NOT_LISTED = "not from a search result, the user's messages or the roadmap (or the same site as one)"
 PRIVATE = "private, loopback or link-local address"
 NO_DNS = "the host does not resolve"
+DNS_TIMED_OUT = "DNS lookup timed out"
+DNS_TIMEOUT_S = 5.0
+_DNS_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix="url-policy-dns")  # bounds hung lookups too
 _URL_RE = re.compile(r"https?://[^\s<>\"'`]+", re.I)
 _TRAILING = ").,;:!?]}>—'\""
 _PAGE_URL = re.compile(r"^[ \t]*(?:- )?Page URL:[ \t]*(\S+)", re.M)
@@ -110,6 +117,15 @@ class UrlPolicy:
             if host is not None and self._address(host) is None:
                 self._hosts.add(host)
 
+    def allow_hosts(self, urls: Iterable[str]) -> None:
+        """Allow the hosts of these URLs without resolving them: for sources already vetted earlier (a tutor
+        session's stored URLs, the roadmap's resources), so no DNS runs per stored URL. Use-time `refusal()` still
+        resolves the host and refuses private, loopback and link-local addresses. URLs that could never be opened
+        (not absolute http(s), userinfo, backslash) are skipped."""
+        for url in urls:
+            if (host := _host(url)) is not None:
+                self._hosts.add(host)
+
     def allow_text(self, text: str) -> None:
         """The URLs in a user message."""
         self.allow_sources(text_urls(text))
@@ -123,7 +139,12 @@ class UrlPolicy:
         return None if host in self._hosts else NOT_LISTED
 
     def _address(self, host: str) -> str | None:
-        why = address_refusal(host.strip("[]"), self._resolver)
+        lookup = _DNS_POOL.submit(address_refusal, host.strip("[]"), self._resolver)
+        try:
+            why = lookup.result(DNS_TIMEOUT_S)
+        except FutureTimeout:
+            lookup.cancel()  # still queued behind hung lookups: never started
+            return DNS_TIMED_OUT
         if why is None:
             return None
         return PRIVATE if why == PRIVATE_ADDRESS else NO_DNS

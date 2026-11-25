@@ -2,9 +2,10 @@
 
 Every fetched URL ends as a `Document` row whose `status`/`reason` say what happened (`ok`; `skipped` with the
 fetch outcome such as `not_found` or `robots_denied`; `failed` with `error`), so failures are states, not
-exceptions. Handlers raise only `RetryableError` (a transient fetch error before the last attempt) and
-`PermanentError` (the last attempt still failed); anything unexpected is retried by the worker and, once dead,
-reported by `report.finalize_roadmap` from the dead job.
+exceptions. Handlers raise only `RetryableError` (a transient fetch error, or a browser render refused because
+another session held the browser, before the last attempt) and `PermanentError` (the last attempt still failed);
+anything unexpected is retried by the worker and, once dead, reported by `report.finalize_roadmap` from the dead
+job.
 
 Job keys: a resource's own URL is keyed by the resource (`owner=True`: its Document belongs to it even when
 another resource reached the same URL first); everything discovered is keyed roadmap-wide, so a page, video,
@@ -15,6 +16,9 @@ root path (`discover`; when the resource's own page redirected, e.g. apex -> www
 on, kept in `Resource.meta.final_url`), and each page or PDF takes a slot from `Resource.stats.pages`, reserved by one atomic
 `UPDATE ... RETURNING` that fails once `crawl_max_pages` slots are taken (safe with any number of workers;
 `finalize_roadmap` later rewrites `stats.pages` to the number of documents fetched).
+
+`chunk_embed` queues one `summarize_document` job per indexed document (section summaries and starter
+questions, see `summaries.py`); it holds ingestion open until it is done, and never fails the roadmap.
 
 The ingestion agent (`agent_plan`, `agent_recover`; see `agent.py`) only ever adds jobs to this queue or proposes
 resources; with it switched off or its model down the pipeline below runs exactly as without it."""
@@ -34,6 +38,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from backend.tutor.db import session_scope
+from backend.tutor.tutor.curator import curate_session
 from backend.tutor.ingest.discover import _repo as parse_repo
 from backend.tutor.ingest.discover import discover, parse_youtube
 from backend.tutor.ingest.embed import HashEmbedder
@@ -42,10 +47,11 @@ from backend.tutor.ingest.fetch import PRIVATE_ADDRESS, FetchResult
 from backend.tutor.ingest.index import index_document
 from backend.tutor.ingest.report import finalize_roadmap
 from backend.tutor.ingest.segment import choose_segments
+from backend.tutor.ingest.summaries import summarize_document
 from backend.tutor.ingest.video import TranscriptRouter, video_document
 from backend.tutor.jobs import queue, worker
 from backend.tutor.jobs.queue import PermanentError, RetryableError
-from backend.tutor.mcp.browser import RenderResult, render_page
+from backend.tutor.mcp.browser import RenderResult, is_busy, render_page
 from backend.tutor.models import Document, Job, Resource, Roadmap
 
 log = logging.getLogger(__name__)
@@ -221,6 +227,8 @@ def fetch_page(ctx, job: Job) -> dict:
     fr = ctx.net.fetcher.get(url)
     if fr.outcome == "needs_browser":
         rendered = _render(ctx, res, fr.url, own=owner and depth == 0)
+        if is_busy(rendered) and job.attempts < job.max_attempts:
+            raise RetryableError(rendered)  # the browser was in use, not broken: back off and render later
         if isinstance(rendered, RenderResult):
             page = extract_page(rendered.html, rendered.final_url)
             if _has_text(page):
@@ -508,12 +516,19 @@ def chunk_embed(ctx, job: Job) -> dict:
             "UPDATE resources SET stats = jsonb_set(stats, '{chunks}', to_jsonb((SELECT COALESCE(SUM("
             "(meta->>'chunks')::int), 0) FROM documents WHERE resource_id = :rid))) WHERE id = :rid"),
             {"rid": doc.resource_id})
+    if n:  # the setting is checked by the job itself, so a skip shows in job results
+        _enqueue(ctx, job, "summarize_document", {"document_id": str(doc.id)}, ("summarize_document", doc.id))
     return {"chunks": n}
 
 
 def recheck(ctx, job: Job) -> dict:
     """Is the resource still there, and did it change? Records `{status: ok|changed|dead, at}` on the
-    resource's own document (`meta.recheck`) and on `Resource.stats.recheck`."""
+    resource's own document (`meta.recheck`) and on `Resource.stats.recheck`.
+
+    A page that was ingested through the browser (`meta.rendered == "browser"`) still answers `needs_browser`
+    to a plain fetch. That is not a dead link: it is recorded `{status: ok, outcome: needs_browser}`, meaning
+    reachable, with its content not compared (a plain fetch cannot see the rendered text). Any other
+    `needs_browser` outcome is `dead`."""
     res = _resource(ctx.engine, job.payload["resource_id"])
     yt = ctx.net.youtube
     vid, lst = parse_youtube(res.url)
@@ -527,7 +542,13 @@ def recheck(ctx, job: Job) -> dict:
         outcome = fr.outcome
         if fr.outcome == "error" and job.attempts < job.max_attempts:
             raise RetryableError(fr.reason or "fetch error")
-        if fr.outcome != "ok":
+        if fr.outcome == "needs_browser":
+            with Session(ctx.engine) as s:
+                kept = s.execute(select(Document.status, Document.meta).where(
+                    Document.roadmap_id == res.roadmap_id, Document.url == res.url)).first()
+            rendered = kept is not None and kept.status == "ok" and (kept.meta or {}).get("rendered") == "browser"
+            status = "ok" if rendered else "dead"
+        elif fr.outcome != "ok":
             status = "dead"
         else:
             with Session(ctx.engine) as s:
@@ -588,6 +609,7 @@ def agent_recover(ctx, job: Job) -> dict:
 HANDLERS: dict[str, worker.Handler] = {
     "ingest_resource": ingest_resource, "fetch_page": fetch_page, "expand_playlist": expand_playlist,
     "video": video, "pdf": pdf, "github_repo": github_repo, "chunk_embed": chunk_embed, "recheck": recheck,
+    "summarize_document": summarize_document, "curate_session": curate_session,
     "agent_plan": agent_plan, "agent_recover": agent_recover,
 }
 

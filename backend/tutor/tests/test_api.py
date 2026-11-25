@@ -279,3 +279,12 @@ def test_public_mode_skips_the_host_check_and_keeps_the_passcode(guarded):
     assert guarded.post("/api/roadmaps/x/parse", headers=tunnel).status_code == 401
     assert guarded.get("/api/roadmaps", headers={**tunnel, "X-Access-Code": "pw123456"}).status_code == 200
     assert guarded.get("/api/health", headers=tunnel).status_code == 200
+
+
+def test_lifespan_opens_saver_and_degrades_without_db(engine, down_engine, tmp_path):
+    app = create_app(_settings(tmp_path), engine=engine)
+    with local_client(app):
+        assert app.state.saver is not None
+    down = create_app(_settings(tmp_path), engine=down_engine)
+    with local_client(down) as c:
+        assert down.state.saver is None and c.get("/api/health").status_code == 503

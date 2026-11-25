@@ -418,6 +418,25 @@ def test_recheck_marks_dead_and_changed(engine, tmp_path, clock):
     assert H.recheck_roadmap(ctx, rid)["drop"]["status"] == "dead"  # re-runnable
 
 
+def test_recheck_rendered_page_is_ok_not_dead(engine, tmp_path, clock):
+    ctx = _ctx(engine, _site(tmp_path / "net", {"https://flow.test/docs/spa": SPA}))
+    rid = _roadmap(engine, "spa", [("spa", "doc", "https://flow.test/docs/spa")])
+    _drain(ctx, rid, clock)  # no browser here: the page is stored skipped, needs_browser
+    assert [d.status for d in _docs(engine, rid)] == ["skipped"]
+    assert H.recheck_roadmap(ctx, rid)["spa"]["status"] == "dead"  # skipped, never rendered: still dead
+
+    with session_scope(engine) as s:  # as if the crawler had rendered it in the browser
+        s.execute(text("UPDATE documents SET status = 'ok', meta = meta || '{\"rendered\": \"browser\"}' "
+                       "WHERE roadmap_id = :r"), {"r": rid})
+    out = H.recheck_roadmap(ctx, rid)["spa"]
+    assert (out["status"], out["outcome"]) == ("ok", "needs_browser")
+    assert _docs(engine, rid)[0].meta["recheck"]["status"] == "ok"
+
+    with session_scope(engine) as s:  # a failed document is not excused by the meta
+        s.execute(text("UPDATE documents SET status = 'failed' WHERE roadmap_id = :r"), {"r": rid})
+    assert H.recheck_roadmap(ctx, rid)["spa"]["status"] == "dead"
+
+
 def test_reingest_and_empty_roadmap_reach_terminal(engine, tmp_path, clock):
     ctx = _ctx(engine, _site(tmp_path / "net", {"https://flow.test/one": _page("One", _prose("Again"))}))
     rid = _roadmap(engine, "again", [("one", "doc", "https://flow.test/one")])

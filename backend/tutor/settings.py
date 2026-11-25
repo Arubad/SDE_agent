@@ -51,6 +51,12 @@ class Settings:
     ingest_agent_recovery_rounds: int = 2
     min_chunks_per_skill: int = 5  # a skill with fewer indexed chunks is a gap the recoverer looks at
     browser_render: bool = True  # BROWSER_RENDER: render `needs_browser` pages in the gateway's browser
+    tutor_max_steps: int = 6  # model turns in one tutor tool loop
+    tutor_max_tokens: int = 60_000  # input + output + cache writes + 0.1 x cache reads over one turn (R20)
+    tutor_max_usd: float = 0.02  # per turn
+    working_memory_tokens: int = 12_000  # the tutor's working-memory window
+    ingest_summaries: bool = True  # INGEST_SUMMARIES: summarise sections after ingestion
+    ingest_summary_budget_usd: float = 0.50  # per roadmap; past it summary jobs are skipped
 
     def validate(self) -> None:
         if self.public_mode and not config.PREMIUM_PASSCODE:
@@ -86,6 +92,18 @@ def _parse_interval(name: str, raw: str | None, default: float) -> float:
     except ValueError:
         raise SettingsError(f"{name} must be a number (got {raw!r})") from None
     if not math.isfinite(value) or value < 0:  # rejects inf and NaN too
+        raise SettingsError(f"{name} must be a finite number >= 0 (got {raw!r})")
+    return value
+
+
+def _parse_usd(name: str, raw: str | None, default: float) -> float:
+    if not (raw or "").strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise SettingsError(f"{name} must be a number (got {raw!r})") from None
+    if not math.isfinite(value) or value < 0:
         raise SettingsError(f"{name} must be a finite number >= 0 (got {raw!r})")
     return value
 
@@ -138,4 +156,15 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
                       if (env.get("INGEST_AGENT") or "").strip() else d.ingest_agent),
         browser_render=(_parse_bool("BROWSER_RENDER", env.get("BROWSER_RENDER"))
                         if (env.get("BROWSER_RENDER") or "").strip() else d.browser_render),
+        tutor_max_steps=_parse_int("TUTOR_MAX_STEPS", env.get("TUTOR_MAX_STEPS"), d.tutor_max_steps, 1),
+        tutor_max_tokens=_parse_int("TUTOR_MAX_TOKENS", env.get("TUTOR_MAX_TOKENS"), d.tutor_max_tokens, 1),
+        tutor_max_usd=_parse_usd("TUTOR_MAX_USD", env.get("TUTOR_MAX_USD"), d.tutor_max_usd),
+        working_memory_tokens=_parse_int(
+            "WORKING_MEMORY_TOKENS", env.get("WORKING_MEMORY_TOKENS"), d.working_memory_tokens, 1
+        ),
+        ingest_summaries=(_parse_bool("INGEST_SUMMARIES", env.get("INGEST_SUMMARIES"))
+                          if (env.get("INGEST_SUMMARIES") or "").strip() else d.ingest_summaries),
+        ingest_summary_budget_usd=_parse_usd(
+            "INGEST_SUMMARY_BUDGET_USD", env.get("INGEST_SUMMARY_BUDGET_USD"), d.ingest_summary_budget_usd
+        ),
     )

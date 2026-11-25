@@ -3,6 +3,7 @@ the MCP gateway and the SPA."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from dataclasses import asdict
@@ -33,6 +34,11 @@ from backend.tutor.mcp.registry import set_enabled
 from backend.tutor.repo import DuplicateRoadmap, create_roadmap, get_roadmap_by_slug, list_roadmaps
 from backend.tutor.roadmap.parse import normalize_spec
 from backend.tutor.settings import Settings
+from backend.tutor import memory_api, tutor_api
+from backend.tutor.tutor import retention
+from backend.tutor.tutor.checkpoint import open_saver
+from backend.tutor.tutor.graph import TutorDeps, build_tutor_graph
+from backend.tutor.tutor.runtime import TutorRuntime
 from backend.tutor.telemetry import export_trace, setup_tracing
 
 log = logging.getLogger(__name__)
@@ -115,7 +121,8 @@ class _TracingMiddleware:
 
 
 def create_app(settings: Settings, *, engine: Engine | None = None, handlers: dict | None = None,
-               on_settled=None) -> FastAPI:
+               on_settled=None, tutor_groups: dict | None = None) -> FastAPI:
+    """`tutor_groups` overrides tutor graph groups by name (`build_tutor_graph`'s `groups`; tests plug in nodes)."""
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         settings.validate()
@@ -127,12 +134,21 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
                 stack.callback(app.state.engine.dispose)
             else:
                 app.state.engine = engine
+            # The checkpointer needs a live database. If it is down the API still starts (and /api/health reports
+            # it); the tutor routes then have no saver and must answer 503.
+            app.state.saver = None
+            try:
+                url = settings.database_url if owns_engine else app.state.engine.url.render_as_string(
+                    hide_password=False)
+                app.state.saver = await stack.enter_async_context(open_saver(url))
+            except Exception as exc:
+                log.warning("checkpointer unavailable: %s", type(exc).__name__)
             app.state.tracer_provider = setup_tracing(settings.otel_endpoint)
             if app.state.tracer_provider is not None:
                 stack.callback(app.state.tracer_provider.shutdown)
             app.state.net = make_net(settings, app.state.engine)
             # The embedder loads its models lazily, on first use; the index makes no request until then either.
-            embedder = make_embedder(settings)
+            embedder = app.state.embedder = make_embedder(settings)
             index = make_index(settings, embedder)
             # Two sets from the same (thread-safe) dependencies: a FastMCP instance is never shared between event
             # loops. One is served over HTTP on this (uvicorn's) loop, the other runs inproc on the gateway's loop.
@@ -143,11 +159,33 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
             app.state.worker_pool = None
             if handlers and settings.ingest_workers > 0:
                 ctx = JobContext(engine=app.state.engine, net=app.state.net, settings=settings, index=index,
-                                 gateway=app.state.gateway)
+                                 gateway=app.state.gateway, embedder=embedder)
                 app.state.worker_pool = WorkerPool(ctx, handlers, settings.ingest_workers, on_settled=on_settled,
                                                    tracer_provider=app.state.tracer_provider)
                 app.state.worker_pool.start()
                 stack.callback(app.state.worker_pool.stop)
+            app.state.tutor_runtime = None  # None: every tutor route answers 503
+            if app.state.saver is not None:
+                # Enqueueing (curation of ended sessions) needs only the engine; with no workers the jobs wait.
+                enqueue = JobContext(engine=app.state.engine).enqueue
+                # The graph is compiled once, here, on uvicorn's loop (D7). The agents' URL policy checks DNS
+                # with the crawler's resolver.
+                tutor_deps = TutorDeps(engine=app.state.engine, gateway=app.state.gateway, index=index,
+                                       embedder=embedder, settings=settings, saver=app.state.saver, enqueue=enqueue,
+                                       tracer_provider=app.state.tracer_provider,
+                                       url_resolver=app.state.net.fetcher.resolver, net=app.state.net)
+                app.state.tutor_runtime = TutorRuntime(tutor_deps, build_tutor_graph(tutor_deps, tutor_groups))
+                # Startup and every RETENTION_EVERY_S: end idle sessions (R19), queue curation of ended sessions
+                # that missed it, then drop the raw threads past retention.
+                task = asyncio.create_task(retention.run_forever(app.state.engine, app.state.saver, enqueue,
+                                                                 runtime=app.state.tutor_runtime))
+
+                async def _stop_retention() -> None:
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+
+                stack.push_async_callback(_stop_retention)
             await stack.enter_async_context(serve_mcp(http_servers))
             yield
 
@@ -371,6 +409,10 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
                     raise
                 return _error(501, "Report not available yet")
             return build_report(session, r)
+
+    app.add_exception_handler(tutor_api.TutorUnavailable, tutor_api.unavailable_handler)
+    app.include_router(tutor_api.router)  # before the SPA catch-all
+    app.include_router(memory_api.router)
 
     dist = Path(settings.web_dist).resolve()
     index = dist / "index.html"

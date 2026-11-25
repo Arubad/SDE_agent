@@ -12,8 +12,9 @@ import pytest
 from fastmcp import Client, FastMCP
 
 from backend.tutor.ingest.fetch import system_resolver
+from backend.tutor.mcp import policy as policy_mod
 from backend.tutor.mcp.gateway import CallContext, Gateway
-from backend.tutor.mcp.policy import UrlPolicy
+from backend.tutor.mcp.policy import DNS_TIMED_OUT, DNS_TIMEOUT_S, UrlPolicy
 from backend.tutor.mcp.registry import Registry, RegistryError, ServerSpec, load_registry
 from backend.tutor.untrusted import TAG
 
@@ -110,13 +111,17 @@ def _web(fetched):
 
 
 def _browser(navigations, pages, fail_blank=False):
-    """Playwright-shaped fake: `browser_navigate` replies with page text and a `- Page URL:` line."""
+    """Playwright-shaped fake: `browser_navigate` replies with page text and a `- Page URL:` line. `fail_blank`:
+    True fails every `about:blank` navigation, a number fails that many first ones."""
     b = FastMCP("browser")
+    blank_failures = {"left": fail_blank}
 
     @b.tool
     def browser_navigate(url: str) -> str:
         navigations.append(url)
-        if url == "about:blank" and fail_blank:
+        if url == "about:blank" and blank_failures["left"]:
+            if blank_failures["left"] is not True:
+                blank_failures["left"] -= 1
             raise RuntimeError("browser crashed")
         return pages.get(url, f"### Page state\n- Page URL: {url}\n- Page Title: t")
 
@@ -181,6 +186,45 @@ def test_default_resolver_is_real_dns():
     p = UrlPolicy()  # literals never reach the resolver, so this needs no network
     p.allow_sources(["http://127.0.0.1/", "http://169.254.169.254/"])
     assert p.refusal("http://127.0.0.1/") is not None and p.refusal("http://169.254.169.254/") is not None
+
+
+def test_allow_hosts_records_hosts_without_dns():
+    calls = []
+
+    def counting(host):
+        calls.append(host)
+        return PRIVATE_HOSTS.get(host, ["93.184.216.34"])
+
+    p = UrlPolicy(resolver=counting)
+    p.allow_hosts([f"https://h{i % 7}.example/page{i}" for i in range(500)]
+                  + ["https://intranet.example/a", "ftp://files.example/", "https://u:p@creds.example/",
+                     "https://evil.example\\@good.example/"])
+    assert calls == []  # seeding resolves nothing
+    assert p.refusal("https://h3.example/other") is None  # same host as a seeded URL
+    assert p.refusal("https://intranet.example/b") == policy_mod.PRIVATE  # use time still checks the address
+    for url in ("https://files.example/", "https://creds.example/", "https://good.example/"):
+        assert p.refusal(url) == policy_mod.NOT_LISTED, url  # URLs that could never be opened allow nothing
+
+
+def test_dns_lookup_is_bounded(monkeypatch):
+    assert DNS_TIMEOUT_S == 5.0
+    monkeypatch.setattr(policy_mod, "DNS_TIMEOUT_S", 0.3)  # the same code path, without a 5 s test
+    release = threading.Event()
+
+    def hang(host):
+        release.wait(30)
+        return ["93.184.216.34"]
+
+    p = UrlPolicy(resolver=hang)
+    try:
+        t0 = time.monotonic()
+        assert p.refusal("https://slow.example/") == DNS_TIMED_OUT
+        assert time.monotonic() - t0 < 0.3 + 1
+        p.allow_sources(["https://slow.example/"])  # a host that never resolved is never allowed
+        release.set()
+        assert p.refusal("https://slow.example/") == policy_mod.NOT_LISTED
+    finally:
+        release.set()
 
 
 def test_listed_host_resolving_private_refused():
@@ -326,7 +370,19 @@ async def test_browser_reset_bypasses_gate_and_its_failure_still_refuses():
         out = await gw.call("browser.snapshot", {}, ctx)
         assert out["error"].startswith("navigation left the allowed sites: ")
         assert "secret snapshot text" not in json.dumps(out) and "crashed" not in json.dumps(out)
-        assert navs == ["about:blank"]
+        assert navs == ["about:blank", "about:blank"]  # tried twice, then given up
+
+
+async def test_blank_reset_retried_once():
+    navs = []
+    with _gateway([_browser_spec()], {"playwright": _browser(navs, {}, fail_blank=1)}, cls=_FakeExternal) as gw:
+        ctx = CallContext(agent="all", policy=_policy("https://allowed.example/"))
+        out = await gw.call("browser.snapshot", {}, ctx)  # reports http://10.0.0.5/admin: off-policy
+        assert out["error"].startswith("navigation left the allowed sites: ")
+        assert navs == ["about:blank", "about:blank"]  # the first reset failed, the second went through
+        navs.clear()
+        await gw.call("browser.snapshot", {}, ctx)
+        assert navs == ["about:blank"]  # a reset that works is not repeated
 
 
 async def test_browser_result_without_page_url_is_refused():

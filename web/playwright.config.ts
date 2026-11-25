@@ -56,12 +56,18 @@ export default defineConfig({
     server(8765, "tutor_e2e_main", {
       PUBLIC_MODE: "false",
       INGEST_AGENT: "true",
+      // Section summaries make structured SectionNotes calls; with no fixture for them they would fall through
+      // to FAKE_LLM_SCRIPT and eat the agent's scripted tool-use lines.
+      INGEST_SUMMARIES: "false",
       FAKE_LLM_SCRIPT: path.join(webDir, "e2e", "fixtures", "agent-script.jsonl"),
     }),
     // Wrong-passcode lockout lives in the server's memory (5 failures per IP per 15 minutes). A reused
     // public server (reuseExistingServer, local only) keeps that state between runs; passcode.spec.ts
     // makes two wrong attempts per run, so a reused server stays under the limit for two runs only.
     // Stop it (or wait 15 minutes) before a third.
+    // The tutor chat spec: its own database and port, ingestion summaries off so the quiz comes from Quiz.json,
+    // and the agent off. The consent answer is global and persists in the database between runs.
+    server(8767, "tutor_e2e_tutor", { PUBLIC_MODE: "false", INGEST_AGENT: "false", INGEST_SUMMARIES: "false" }),
     server(8766, "tutor_e2e_public", { PUBLIC_MODE: "true", PREMIUM_PASSCODE: "e2e-pass-123", INGEST_AGENT: "false" }),
   ],
 });

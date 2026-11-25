@@ -669,3 +669,349 @@ thead th {
   gap: 12px;
   align-items: center;
 }
+
+/* --- tutor chat --- */
+.tabs {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--line);
+}
+
+.tab {
+  background: transparent;
+  color: var(--muted);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 8px 12px;
+}
+
+.tab-active {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
+}
+
+.tutor h3,
+.sources h4 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.msg {
+  max-width: 100%;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+.msg-user {
+  align-self: flex-end;
+  background: var(--bg);
+  max-width: 90%;
+}
+
+.msg-assistant {
+  background: var(--surface);
+}
+
+.para {
+  margin: 0 0 8px;
+  white-space: pre-wrap;
+}
+
+.para:last-child {
+  margin-bottom: 0;
+}
+
+.notice {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.sources {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+
+.sources ol,
+.sources ul {
+  margin: 4px 0 8px;
+  padding-left: 22px;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.inline-field {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.composer-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.composer-row textarea,
+.composer-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.question,
+.modes {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+
+.question legend {
+  font-weight: 600;
+  padding: 0;
+  margin-bottom: 6px;
+}
+
+.payload {
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 8px;
+  background: var(--bg);
+  border-radius: 8px;
+  font: 0.8rem var(--font-mono);
+}
+
+.today-skill {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.timeline summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  cursor: pointer;
+}
+
+.lane {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  list-style: none;
+  margin: 4px 0;
+  padding: 0;
+}
+
+.sessions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.session-open {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+}
+
+.link-button {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+@media (max-width: 480px) {
+  .composer-row {
+    flex-direction: column;
+  }
+
+  .composer-row button {
+    width: 100%;
+  }
+}
+
+/* --- skill map, memory, consent --- */
+:root {
+  --state-mastered: #2f7a4f;
+  --state-learning: #b7791f;
+  --state-not-started: #6b665d;
+  --state-locked: #a8a399;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --state-mastered: #7cc79a;
+    --state-learning: #e0b45a;
+    --state-not-started: #9d9a91;
+    --state-locked: #5d5a53;
+  }
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  vertical-align: -1px;
+}
+
+.state-mastered { --state: var(--state-mastered); }
+.state-learning { --state: var(--state-learning); }
+.state-not_started { --state: var(--state-not-started); }
+.state-locked { --state: var(--state-locked); }
+
+.swatch,
+.state-chip {
+  background: var(--state);
+}
+
+.state-chip {
+  color: var(--bg);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 0.8rem;
+}
+
+.skillmap-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+}
+
+@media (min-width: 900px) {
+  .skillmap-body:has(.skill-panel) {
+    grid-template-columns: minmax(0, 1fr) 300px;
+  }
+}
+
+.skillmap-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 8px;
+}
+
+.skillmap svg .node {
+  cursor: pointer;
+}
+
+.skillmap svg .node rect {
+  fill: var(--surface);
+  stroke: var(--state);
+  stroke-width: 2;
+}
+
+.skillmap svg .node.state-mastered rect {
+  fill: color-mix(in srgb, var(--state) 22%, var(--surface));
+}
+
+.skillmap svg .node.state-learning rect {
+  fill: color-mix(in srgb, var(--state) 14%, var(--surface));
+}
+
+.skillmap svg .node.state-locked rect {
+  stroke-dasharray: 4 3;
+}
+
+.skillmap svg .node-picked rect {
+  stroke-width: 4;
+}
+
+.skillmap svg text {
+  fill: var(--ink);
+  font-size: 13px;
+  font-family: var(--font-sans);
+  pointer-events: none;
+}
+
+.skillmap svg .stage-label {
+  fill: var(--muted);
+  font-size: 12px;
+}
+
+.skillmap svg .edge {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 2;
+}
+
+.skill-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.list-heading {
+  font-size: 1rem;
+  margin: 0 0 8px;
+}
+
+.study-settings > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.study-settings form {
+  margin-top: 12px;
+}
+
+.days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / 0.5);
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  z-index: 50;
+}
+
+.modal {
+  max-width: 480px;
+  width: 100%;
+  max-height: 100%;
+  overflow: auto;
+}

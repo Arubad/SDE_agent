@@ -319,6 +319,22 @@ ingestion report with a state for every resource and video. An ingestion agent (
 roadmap) plans the crawl and looks for skills with too little material. Its proposals are never ingested until you
 approve them.
 
+**Tutor.** Once a roadmap is ingested, a LangGraph tutor (Claude Haiku) teaches from it. What works today:
+- the teacher answers from the roadmap first and uses the web tools only for gaps, with labelled roadmap and web
+  sources;
+- a session-start card recaps your last sessions;
+- a deterministic study plan sized to your weekly hours, which asks before a big replan;
+- three-question quizzes that update per-skill mastery, weak spots and review dates, shown on a skill map;
+- "teach me X" researches a topic into a mini roadmap that you approve twice, once to create it and once to
+  ingest it;
+- memory with consent: session summaries, remembered facts and progress, plus a Memory & privacy page to edit,
+  export and delete them;
+- per-turn budgets of 6 steps, 60,000 tokens and $0.02.
+
+Still to come: code exercises and flashcards (Phase 5, with the sandbox), and the tutor, memory and red-team evals
+(Phase 6). The graph, the memory layers, consent and retention, and the known limits are in
+[docs/platform/tutor.md](docs/platform/tutor.md).
+
 **YouTube and its terms.** Paths YouTube sanctions: the YouTube Data API (metadata, comments, playlists; set a
 free `YOUTUBE_API_KEY`), oEmbed, and the opt-in `gemini` transcript route (Google's official Gemini API with the
 video URL; it uses `GEMINI_API_KEY`). Paths YouTube's terms do not sanction: the default `captions` route
@@ -341,7 +357,8 @@ MCP, in its own Docker network), DeepWiki, Microsoft Learn, arXiv and Wikipedia;
 key (`CONTEXT7_API_KEY`, `GITHUB_TOKEN`). The Settings page shows each server's health and an on/off switch, and
 `python -m backend.tutor mcp-check` prints the same. The crawler also renders pages that need JavaScript through the
 browser. Known limits: the Playwright container's origin blocklist is not a security boundary (redirects, LAN
-addresses and sub-resources are covered only partly by the gateway's checks), one browser is shared by all agents,
+addresses and sub-resources are covered only partly by the gateway's checks), one browser serves all agents (one
+lease at a time, reset between owners),
 the `fetch` server is off because it follows redirects without a private-address check, and the first run of the
 `uvx` servers downloads packages. The threat model, the live check (10 of 12 servers ok; Context7 needs a key,
 Fetch is disabled) and how to add a server are in [docs/platform/mcp.md](docs/platform/mcp.md).

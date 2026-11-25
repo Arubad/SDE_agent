@@ -10,11 +10,11 @@ from __future__ import annotations
 import logging
 from collections import Counter
 
-from sqlalchemy import Engine, select, update
+from sqlalchemy import Engine, func, select, update
 from sqlalchemy.orm import Session
 
 from backend.tutor.db import session_scope
-from backend.tutor.models import AgentAction, Document, Job, Resource, Roadmap
+from backend.tutor.models import AgentAction, Document, Job, Resource, Roadmap, Section
 
 log = logging.getLogger(__name__)
 
@@ -190,6 +190,15 @@ def _agent_section(session: Session, roadmap_id) -> tuple[dict, float]:
     return {"runs": runs, "actions": actions}, sum(float(a.cost_usd or 0) for a in rows)
 
 
+def _summaries_section(session: Session, roadmap_id) -> dict:
+    total, done = session.execute(select(func.count(), func.count(Section.summary)).where(
+        Section.roadmap_id == roadmap_id)).one()
+    skipped = session.execute(select(Job.id).where(
+        Job.roadmap_id == roadmap_id, Job.type == "summarize_document",
+        Job.result["skipped"].astext == "budget").limit(1)).first() is not None
+    return {"sections": done, "of": total, "skipped_budget": skipped}
+
+
 def build_report(session: Session, roadmap: Roadmap) -> dict:
     resources, docs_by_res, failures = _gather(session, roadmap.id)
     proposals = sorted((r for r in resources if r.status == "proposed"), key=lambda r: r.key)
@@ -231,6 +240,7 @@ def build_report(session: Session, roadmap: Roadmap) -> dict:
         "rendered_by_browser": rendered,
         "summary": summary,
         "agent": agent,
+        "summaries": _summaries_section(session, roadmap.id),
         "proposals": [{"id": r.key, "skill_id": (r.skill_ids or [None])[0], "title": r.title, "url": r.url,
                        "reason": r.proposal_reason} for r in proposals],
     }

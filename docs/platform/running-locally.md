@@ -100,7 +100,7 @@ Set these in `backend/.env` (they are listed there, commented, with their defaul
 | `YOUTUBE_API_KEY` | none | Free YouTube Data API key. Official Data API for metadata, playlists and top comments (the source of comment timestamps). Without it, metadata comes from yt-dlp (title, channel, description, duration, chapters; no cookies, no download), then oEmbed (title and channel only), and no comments are read. |
 | `TRANSCRIPT_ROUTES` | `captions` | Comma list from `captions`, `ytdlp_cookies`, `gemini`, tried in order. `gemini` uses `GEMINI_API_KEY`. |
 | `YTDLP_COOKIES_BROWSER` | none | Browser whose cookies yt-dlp uses (for example `chrome`). Required when `ytdlp_cookies` is on. |
-| `INGEST_WORKERS` | `2` | Worker threads in the API. `0` starts none. |
+| `INGEST_WORKERS` | `2` | Worker threads in the API. `0` starts none (and then the tutor's curator and summaries do not run). |
 | `CRAWL_MAX_DEPTH` / `CRAWL_MAX_PAGES` | `2` / `50` | Crawl limits for one documentation resource. |
 | `DOMAIN_INTERVAL_S` | `1.0` | Minimum seconds between requests to one host. |
 | `PLAYLIST_MAX_VIDEOS` | `50` | Videos taken from one playlist. |
@@ -115,6 +115,24 @@ YouTube's terms: the default `captions` route (youtube-transcript-api reads an u
 official API), the yt-dlp metadata fallback used when no key is set, and the opt-in `ytdlp_cookies` route (yt-dlp
 with your browser's cookies). You are responsible for following YouTube's terms. To stay on official paths, set
 `YOUTUBE_API_KEY` and `TRANSCRIPT_ROUTES=gemini`.
+
+## Tutor settings
+
+Also in `backend/.env`, commented, with their defaults. How the tutor uses them is in [tutor.md](tutor.md).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TUTOR_MAX_STEPS` | `6` | Model turns in one tutor tool loop. |
+| `TUTOR_MAX_TOKENS` | `60000` | Input + output + cache tokens one turn may use. Past it the turn ends with a budget message; the session is saved. |
+| `TUTOR_MAX_USD` | `0.02` | Dollars one turn may spend, with the same message. |
+| `WORKING_MEMORY_TOKENS` | `12000` | How much of the session's conversation the tutor keeps in context before it folds the oldest turns into a summary. |
+| `INGEST_SUMMARIES` | `true` | Summarise each document's sections after ingestion and write starter quiz questions. |
+| `INGEST_SUMMARY_BUDGET_USD` | `0.50` | Per-roadmap cap on summary spend; once it is reached, summary jobs are skipped. |
+
+The teacher's and the researcher's effort is `AGENT_EFFORT` (default `low`), the setting the HF demo's agent loop
+also reads. The memory curator (`curate_session`) and the summaries run on the ingestion workers, so they need
+`INGEST_WORKERS` of at least 1. With `0` a session's summary and facts are never written, and without raw-message
+consent its messages are dropped a day after it ends.
 
 ## Command line
 

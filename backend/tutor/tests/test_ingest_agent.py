@@ -575,7 +575,8 @@ def test_agent_disabled_is_pure_pipeline(engine, tmp_path, clock):
     ], agent=settings.ingest_agent)
     _drain(ctx, rid, clock)
     assert not [j for j in _jobs(engine, rid) if j.type.startswith("agent_")]
-    assert fake_llm.requests == []
+    # no agent model call: the only requests are the ingestion-time section summaries
+    assert all("study aids" in str(r["system"]) for r in fake_llm.requests)
     rep = _report(engine, rid)
     assert rep["status"] == "ready_with_gaps"
     assert rep["summary"] == ("5 videos: 1 creator chapters, 1 comment timestamps, 1 transcript-split, 2 whole; "
@@ -626,7 +627,9 @@ def test_web_text_never_reaches_the_model_unwrapped(engine, tmp_path, clock):
         sent += [json.dumps(m["content"]) for m in req["messages"] if m["role"] == "user"]
     assert any(INJ in t for t in sent)  # the content did reach the model, wrapped
     assert not [t for t in sent if INJ in _outside_wrapping(t)]
-    assert INJ not in json.dumps(fake_llm.requests[0]["messages"][0])  # nothing web-derived in the user turn
+    assert any("study aids" in json.dumps(r["system"]) and INJ in json.dumps(r["messages"]) for r in fake_llm.requests)
+    agent_reqs = [r for r in fake_llm.requests if "study aids" not in json.dumps(r["system"])]
+    assert INJ not in json.dumps(agent_reqs[0]["messages"][0])  # nothing web-derived in the user turn
     assert {a.tool: a.outcome for a in _actions(engine, rid)}["web_search"] == "ok"  # None title/snippet tolerated
 
 
