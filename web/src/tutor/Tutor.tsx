@@ -22,13 +22,13 @@ import {
   type TurnBody,
 } from "./chat";
 import { QuizCard } from "./QuizCard";
-import { RichText } from "./RichText";
+import { allowedLinks, DraftText, RichText, urlsIn } from "./RichText";
 import { SessionStartCard } from "./SessionStartCard";
 import { Sources } from "./Sources";
 import { Timeline } from "./Timeline";
 import { TodayCard } from "./TodayCard";
 
-function Message({ m }: { m: ChatMessage }) {
+function Message({ m, learnerUrls }: { m: ChatMessage; learnerUrls: readonly string[] }) {
   if (m.role === "result" && m.quiz) {
     const { grades, mastery } = m.quiz;
     return (
@@ -50,7 +50,7 @@ function Message({ m }: { m: ChatMessage }) {
   }
   return (
     <div className={`msg msg-${m.role}`}>
-      <RichText text={m.text} />
+      <RichText text={m.text} allowed={allowedLinks(m, learnerUrls)} />
       {m.notice && <p className="notice small">{m.notice}</p>}
       {m.sources && <Sources sources={m.sources} />}
     </div>
@@ -229,6 +229,8 @@ export function Tutor({
   const pending = ended ? null : chat.pending;
   const act = (action: string) => void send(session.id, { action });
   const resume = (value: unknown) => void send(session.id, { resume: value });
+  // R16: only the reply's sources and the learner's own URLs are ever linked.
+  const learnerUrls = chat.messages.filter((m) => m.role === "user").flatMap((m) => urlsIn(m.text));
 
   return (
     <div className="stack tutor">
@@ -242,11 +244,11 @@ export function Tutor({
       <div className="chat" role="log" aria-label="Conversation">
         {chat.messages.length === 0 && !chat.streaming && <p className="muted">No messages yet.</p>}
         {chat.messages.map((m, i) => (
-          <Message key={i} m={m} />
+          <Message key={i} m={m} learnerUrls={learnerUrls} />
         ))}
         {chat.streaming && (
           <div className="msg msg-assistant" aria-live="polite">
-            <RichText text={chat.streaming} />
+            <DraftText text={chat.streaming} />
           </div>
         )}
         <div ref={endRef} />
