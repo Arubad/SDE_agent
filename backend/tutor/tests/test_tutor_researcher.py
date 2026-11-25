@@ -391,3 +391,18 @@ async def test_injected_query_host_is_scrubbed_and_the_approval_covers_the_choic
     name, args, _ = gw.calls[-1]
     assert name == "ingest.approve_roadmap" and args["choices"] == choices
     assert gw.approvals[-1][1]["args"] == card2["payload"]["args"]  # the learner approved exactly these URLs
+
+
+async def test_a_link_found_only_in_a_fetched_body_is_dropped(engine, clear_memo):  # noqa: F811
+    """R21: the researcher's allowed set is search results, fetch final_urls and Page URL lines, never page bodies."""
+    gw = _gateway(engine)
+    gw.results["web__fetch"] = {"data": {"url": wrap(GOOD), "final_url": wrap(GOOD),
+                                         "markdown": wrap("Also read " + GOOD + "/body")}}
+    md = MD + "- [Body](" + GOOD + "/body)\n"  # same host as a search result: the policy alone would pass it
+    script = [FakeReply(tool_uses=[("web__search", {"query": "probes"}), ("web__fetch", {"url": GOOD})]),
+              FakeReply(text=md)]
+    rt, sid = _rt(engine, gw), new_session(engine)
+    with fake_llm.script(script):
+        (card,) = interrupts(await run(rt, sid, {"action": "research", "topic": "probes"}))
+    src = card["payload"]["args"]["source_text"]
+    assert GOOD + "/body" not in src and "Body" in src and GOOD in src

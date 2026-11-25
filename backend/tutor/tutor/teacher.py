@@ -17,9 +17,11 @@ One turn:
   time. The policy is never stored in state.
 - Model steps: `Budget.check` before each step, then the step under `with_llm_retry`; a retry first emits a reset
   `reply_delta` so the UI drops partial text.
-- Sources (D11): roadmap sources are the loop's citations. Web sources are the URLs of this turn's web-namespace
-  tool results (WEB_NAMESPACES) that the answer mentions, in first-mention order, titled by their web.search
-  result. Links in the answer are sanitised to roadmap and web source URLs and the learner's own URLs.
+- Sources (D11 as amended by R21): roadmap sources are the loop's citations. Web sources are the source URLs of
+  this turn's tool results (`Seen`: search results of the registry's `url_sources` tools, `web.fetch`'s
+  `final_url`, browser `Page URL:` lines; never URLs inside a fetched page or snapshot) that the answer mentions,
+  in first-mention order, titled by their search result. Links in the answer are sanitised to roadmap and web
+  source URLs and the learner's own URLs.
 - With roadmap and web sources both present (and a web excerpt to compare), one low-effort WebContradiction call;
   a contradiction becomes the reply's `notice` (and `state.notice`). Its failure (budget, outage) only drops the
   notice: the answer is kept (R9).
@@ -55,12 +57,11 @@ from backend.tutor.tutor.compaction import compact
 from backend.tutor.tutor.graph import Group, node
 from backend.tutor.tutor.state import TutorState, reply_event
 from backend.tutor.tutor.toolloop import (
-    WEB_NAMESPACES,
     Seen,
     budgeted_model_turn,
-    namespace,
     seeded_policy,
     url_key,
+    url_source_names,
 )
 from backend.tutor.untrusted import unwrap, wrap
 
@@ -276,7 +277,7 @@ async def _turn(deps: TutorDeps, state: TutorState, writer: Callable[[dict], Non
 
     trace = current_trace()
     ctx = CallContext(agent="teacher", policy=policy, trace=trace, lease=session_id)
-    seen = Seen()
+    seen = Seen(url_source_names(deps.gateway))
     settings = deps.settings
     budget = Budget(settings.tutor_max_steps, settings.tutor_max_tokens, settings.tutor_max_usd)
 
@@ -287,8 +288,8 @@ async def _turn(deps: TutorDeps, state: TutorState, writer: Callable[[dict], Non
         if name == PROPOSE_TOOL["name"]:
             return await propose(args)
         out = await deps.gateway.call(name, args, ctx)
-        if namespace(name) in WEB_NAMESPACES and "data" in out:
-            seen.add(out["data"])
+        if "data" in out:
+            seen.add(name, out["data"])
         return out
 
     async def propose(args: dict) -> dict:

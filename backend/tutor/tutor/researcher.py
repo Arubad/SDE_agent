@@ -7,8 +7,9 @@ found, an error, a decline) by clearing `state.proposal`; the edges after `resea
 
 - Topic: `state.input["topic"]` (the button) or `state.input["text"]` (a `new_topic` text turn); never `state.route`.
 - `research` runs the tool loop with the `researcher` tools (`agent="researcher"`, lease released in `finally`),
-  history-free. Its answer is a Markdown roadmap; every link whose URL did not appear in a tool result this turn
-  (or fails the URL policy) is reduced to its title (links are rebuilt without title attributes), bare disallowed URLs are removed, and
+  history-free. Its answer is a Markdown roadmap; every link whose URL is not a source URL of this turn's tool
+  results (`toolloop.Seen`, R21: search results, fetch final_urls, Page URL lines; never page bodies) (or fails the
+  URL policy) is reduced to its title (links are rebuilt without title attributes), bare disallowed URLs are removed, and
   URLs beyond MAX_RESOURCES are neutralised. `state.proposal` = `{"slug", "title", "source_text", "key", "id", "allowed"}`.
 - Both approval nodes call `interrupt()` first (D8) with a card built from `state.proposal`. The gateway's `ask`
   tools get sync approvers built from the args the learner approved: `lambda p: p["args"] == approved_args`.
@@ -47,7 +48,14 @@ from backend.tutor.roadmap.parse import extract_urls, normalize_spec
 from backend.tutor.tutor.budget import Budget
 from backend.tutor.tutor.graph import Group, TutorDeps, emit, node
 from backend.tutor.tutor.state import TutorState, reply_event
-from backend.tutor.tutor.toolloop import Seen, budgeted_model_turn, namespace, seeded_policy, url_key
+from backend.tutor.tutor.toolloop import (
+    Seen,
+    budgeted_model_turn,
+    namespace,
+    seeded_policy,
+    url_key,
+    url_source_names,
+)
 from backend.tutor.untrusted import unwrap
 
 MAX_RESOURCES = 12
@@ -262,7 +270,7 @@ async def _research_markdown(deps: TutorDeps, state: TutorState, topic: str) -> 
     settings, trace = deps.settings, current_trace()
     policy = seeded_policy(deps, text_urls(topic))
     ctx = CallContext(agent="researcher", policy=policy, trace=trace, lease=state["session_id"])
-    seen = Seen()
+    seen = Seen(url_source_names(deps.gateway))
     budget = Budget(settings.tutor_max_steps, settings.tutor_max_tokens, settings.tutor_max_usd)
 
     async def swallow(event: dict) -> None:
@@ -271,7 +279,7 @@ async def _research_markdown(deps: TutorDeps, state: TutorState, topic: str) -> 
     async def call_tool(name: str, args: dict) -> dict:
         out = await deps.gateway.call(name, args, ctx)
         if "error" not in out:
-            seen.add(out.get("data", out))
+            seen.add(name, out.get("data", out))
         return out
 
     # The ingest tools are for the approval nodes: the model never sees them.

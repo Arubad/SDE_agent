@@ -70,7 +70,8 @@ def gw():
         "kb__search": {"passages": [PASSAGE]},
         "web__search": _search((K8S, "Pods", "Pods are groups of containers."),
                                (VIDEO, "Pods video", "A video about pods.")),
-        "web__fetch": {"data": {"url": wrap(K8S), "markdown": wrap("See also https://other.example/x")}},
+        "web__fetch": {"data": {"url": wrap(K8S), "final_url": wrap(K8S + "/"),
+                                "markdown": wrap("See also https://other.example/x")}},
     })
 
 
@@ -409,12 +410,37 @@ async def test_user_urls_survive_sanitizing(rt, sid):
     assert _reply(events)["sources"]["web"] == []  # the learner's own URL is not a web source
 
 
-async def test_fetched_page_urls_count_as_web_sources(rt, sid):
+async def test_fetched_body_urls_are_not_web_sources(rt, sid):
+    """R21: a fetched page's final_url is a web source; a URL inside its body is neither a source nor a link."""
     with fake_llm.script([FakeReply(tool_uses=[("web__fetch", {"url": K8S})]),
                           FakeReply(text="Read https://other.example/x and https://k8s.example/pods/")]):
         events = await run(rt, sid, {"action": "continue"})
-    assert _reply(events)["sources"]["web"] == [{"url": "https://other.example/x", "title": "https://other.example/x"},
-                                                {"url": "https://k8s.example/pods/", "title": "https://k8s.example/pods/"}]
+    reply = _reply(events)
+    assert reply["sources"]["web"] == [{"url": "https://k8s.example/pods/", "title": "https://k8s.example/pods/"}]
+    assert "`https://other.example/x`" in reply["text"] and "https://k8s.example/pods/" in reply["text"]
+    assert "`https://k8s.example/pods/`" not in reply["text"]
+
+
+async def test_browser_page_url_is_a_source_but_not_the_snapshot_links(rt, sid, gw):
+    gw.defs["teacher"] = [*DEFS, {"name": "browser__snapshot", "description": "s",
+                                  "input_schema": {"type": "object", "properties": {}}}]
+    gw.results["browser__snapshot"] = {"data": {"text": wrap(
+        "- Page URL: https://k8s.example/live\n- link \"more\" /url: https://inner.example/y")}}
+    with fake_llm.script([FakeReply(tool_uses=[("browser__snapshot", {})]),
+                          FakeReply(text="See https://k8s.example/live and https://inner.example/y")]):
+        events = await run(rt, sid, {"action": "continue"})
+    reply = _reply(events)
+    assert [w["url"] for w in reply["sources"]["web"]] == ["https://k8s.example/live"]
+    assert "`https://inner.example/y`" in reply["text"]
+
+
+async def test_only_url_source_tools_give_web_sources(rt, sid, gw):
+    """A non-search web tool's text (here web.fetch without a final_url) names no source; web.search still does."""
+    gw.results["web__fetch"] = {"data": {"text": wrap("Mirror at https://other.example/x")}}
+    with fake_llm.script([FakeReply(tool_uses=[("web__fetch", {"url": K8S}), ("web__search", {"query": "p"})]),
+                          FakeReply(text=f"See https://other.example/x and {K8S}")]):
+        events = await run(rt, sid, {"action": "continue"})
+    assert [w["url"] for w in _reply(events)["sources"]["web"]] == [K8S]
 
 
 # --- budgets, outages, the lease ----------------------------------------------------------------------------

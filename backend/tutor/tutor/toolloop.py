@@ -1,5 +1,5 @@
-"""What the model-facing agents (teacher, researcher) share around `run_tool_loop`: the web-namespace tool results
-a turn has seen (`Seen`), the seeded URL policy, and the budgeted, retried model turn."""
+"""What the model-facing agents (teacher, researcher) share around `run_tool_loop`: the source URLs a turn's tool
+results named (`Seen`), the seeded URL policy, and the budgeted, retried model turn."""
 from __future__ import annotations
 
 import re
@@ -7,11 +7,14 @@ from collections.abc import Callable, Iterable
 from typing import Any
 
 from backend.tutor.ingest.fetch import system_resolver
-from backend.tutor.mcp.policy import UrlPolicy, search_result_urls, text_urls
+from backend.tutor.mcp.gateway import wire_name
+from backend.tutor.mcp.policy import UrlPolicy, page_urls, search_result_urls, text_urls
+from backend.tutor.mcp.registry import DEFAULT_URL_SOURCES
 from backend.tutor.tutor.budget import Budget, with_llm_retry
 from backend.tutor.untrusted import unwrap
 
-WEB_NAMESPACES = frozenset({"web", "browser", "docs", "repo", "papers", "ref"})  # D11's web tool results
+FETCH_TOOLS = frozenset({"web.fetch", wire_name("web.fetch")})
+BLANK = "about:blank"
 _CITATION = re.compile(r"\[\d+\]")
 _EXCERPT_KEYS = ("snippet", "markdown", "content", "text", "summary", "description")
 
@@ -43,6 +46,15 @@ def budgeted_model_turn(step, budget: Budget, trace, emit: Callable) -> Callable
     return model_turn
 
 
+def url_source_names(gateway) -> frozenset[str]:
+    """The registry's `url_sources` (search tools), by canonical and by wire name: the tools whose result URLs are
+    sources (R21). A gateway without a registry (a test double) may carry `url_sources` itself."""
+    registry = getattr(gateway, "registry", None)
+    canonical = registry.url_sources if registry is not None else getattr(gateway, "url_sources",
+                                                                          DEFAULT_URL_SOURCES)
+    return frozenset({*canonical, *(wire_name(c) for c in canonical)})
+
+
 def url_key(url: str) -> str:
     return url.rstrip("/")
 
@@ -65,35 +77,54 @@ def _dicts(obj) -> list[dict]:
 
 
 class Seen:
-    """URLs in this turn's web-namespace tool results: every URL (first seen first), the search-result URLs, and
-    per URL a title (from a search result) and an excerpt (the text that came with it)."""
+    """The source URLs this turn's tool results named (R21, amending D11), first seen first, and per URL a title
+    and an excerpt (the text that came with it). Sources come only from:
+    - a `url_sources` tool (search): its `results[*].url`, else the URLs in its text (also in `search`, the
+      search-result URLs);
+    - `web.fetch`: its `final_url` (the page's own address; titled and excerpted by the page);
+    - `browser.*`: its `Page URL:` lines.
+    Never from URLs inside a fetched page's body or a browser snapshot: a page can name any host."""
 
-    def __init__(self) -> None:
+    def __init__(self, url_sources: Iterable[str] = DEFAULT_URL_SOURCES) -> None:
+        self.url_sources = frozenset(url_sources)
         self.urls: dict[str, str] = {}  # _key -> URL
         self.search: list[str] = []
         self.titles: dict[str, str] = {}
         self.excerpts: dict[str, str] = {}
 
-    def _add(self, url: str) -> None:
-        self.urls.setdefault(url_key(url), url)
+    def _add(self, url: str, title: Any = None, excerpt: Any = None) -> None:
+        k = url_key(url)
+        self.urls.setdefault(k, url)
+        if isinstance(title, str) and title:
+            self.titles.setdefault(k, title)
+        if isinstance(excerpt, str) and excerpt:
+            self.excerpts.setdefault(k, excerpt)
 
-    def add(self, data: Any) -> None:
-        for url in search_result_urls(data):
-            self.search.append(unwrap(url))
-        for d in _dicts(data):
-            url = next((unwrap(d[k]) for k in ("url", "final_url") if isinstance(d.get(k), str)), None)
-            if not url:
-                continue
-            if isinstance(d.get("title"), str):
-                self.titles.setdefault(url_key(url), unwrap(d["title"]))
-            text = next((unwrap(d[k]) for k in _EXCERPT_KEYS if isinstance(d.get(k), str) and d[k]), None)
-            if text:
-                self.excerpts.setdefault(url_key(url), text)
-        for s in map(unwrap, _strings(data)):
-            for url in text_urls(s):
-                self._add(url)
-                if s.strip() != url:  # a bare URL leaf is no excerpt
-                    self.excerpts.setdefault(url_key(url), s)
+    def add(self, name: str, data: Any) -> None:
+        """Record the sources of tool `name`'s (wire or canonical) non-error result `data`."""
+        if name in self.url_sources:
+            found = [unwrap(u) for u in search_result_urls(data)]
+            if found:
+                self.search.extend(found)
+                for d in _dicts(data):
+                    if isinstance(d.get("url"), str) and unwrap(d["url"]) in found:
+                        text = next((d[k] for k in _EXCERPT_KEYS if isinstance(d.get(k), str) and d[k]), None)
+                        self._add(unwrap(d["url"]), unwrap(d.get("title")), unwrap(text))
+                for url in found:
+                    self._add(url)
+                return
+            for s in map(unwrap, _strings(data)):
+                for url in text_urls(s):
+                    self._add(url, excerpt=s if s.strip() != url else None)  # a bare URL leaf is no excerpt
+        elif name in FETCH_TOOLS:
+            if isinstance(data, dict) and isinstance(data.get("final_url"), str):
+                text = next((data[k] for k in _EXCERPT_KEYS if isinstance(data.get(k), str) and data[k]), None)
+                self._add(unwrap(data["final_url"]), unwrap(data.get("title")), unwrap(text))
+        elif namespace(name) == "browser":
+            for s in map(unwrap, _strings(data)):
+                for url in page_urls(s):
+                    if url != BLANK:
+                        self._add(url, excerpt=s)
 
     def web_sources(self, answer: str) -> list[dict]:
         """The seen URLs the answer mentions, in first-mention order, deduplicated. Citation markers are dropped
