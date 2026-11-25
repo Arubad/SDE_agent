@@ -230,8 +230,9 @@ export function App() {
   const load = useCallback(async () => {
     setLoadError(null);
     try {
+      // A late success must not clear a passcode screen another request already raised; unlocking goes through
+      // the passcode form's own handler.
       setRoadmaps(await listRoadmaps());
-      setLock(null);
     } catch (err) {
       if (isAuthError(err)) showPasscode(err);
       else setLoadError(messageOf(err));

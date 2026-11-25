@@ -56,6 +56,9 @@ export default defineConfig({
     server(8765, "tutor_e2e_main", {
       PUBLIC_MODE: "false",
       INGEST_AGENT: "true",
+      // Section summaries make structured SectionNotes calls; with no fixture for them they would fall through
+      // to FAKE_LLM_SCRIPT and eat the agent's scripted tool-use lines.
+      INGEST_SUMMARIES: "false",
       FAKE_LLM_SCRIPT: path.join(webDir, "e2e", "fixtures", "agent-script.jsonl"),
     }),
     // Wrong-passcode lockout lives in the server's memory (5 failures per IP per 15 minutes). A reused
