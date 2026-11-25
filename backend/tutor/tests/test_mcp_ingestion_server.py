@@ -279,3 +279,47 @@ def test_status_change_during_resolution_is_a_conflict(clean, engine, net, setti
     monkeypatch.setattr(ingestion, "_resolve_choices", resolve_then_change)
     with pytest.raises(ValueError, match="only be approved while parsed"):
         ingestion._approve_impl(engine, net, settings, None, "k8s")
+
+
+def _resources(engine, slug="k8s"):
+    with session_scope(engine) as s:
+        return {k: (u, st) for k, u, st in s.execute(text(
+            "SELECT r.key, r.url, r.status FROM resources r JOIN roadmaps m ON m.id = r.roadmap_id "
+            "WHERE m.slug = :s"), {"s": slug})}
+
+
+async def test_approve_roadmap_with_choices_ingests_exactly_those(server, engine, monkeypatch):
+    """R18: the approver saw these choices; nothing is looked up again."""
+    async with Client(server) as c:
+        await c.call_tool("create_roadmap", _args())
+        with session_scope(engine) as s:
+            spec = s.execute(text("SELECT spec FROM roadmaps WHERE slug = 'k8s'")).scalar()
+        ids = [r["id"] for st in spec["stages"] for r in st["resources"]]
+        choices = {ids[0]: "https://chosen.example/a", **{i: None for i in ids[1:]}}
+
+        def no_resolve(*a):
+            raise AssertionError("re-resolved")
+
+        monkeypatch.setattr(ingestion, "_resolve_choices", no_resolve)
+        with pytest.raises(ToolError, match="Only http"):
+            await c.call_tool("approve_roadmap", {"slug": "k8s", "choices": {ids[0]: "ftp://x.example/"}})
+        args = {"slug": "k8s", "choices": choices, "idempotency_key": "ch-1"}
+        assert (await c.call_tool("approve_roadmap", args)).data["status"] == "ingesting"
+        with pytest.raises(ToolError, match="different arguments"):  # the choices are part of the key's args
+            await c.call_tool("approve_roadmap", {**args, "choices": {ids[0]: None}})
+    got = _resources(engine)
+    assert got[ids[0]] == ("https://chosen.example/a", "pending")
+    assert all(got[i] == (None, "skipped") for i in ids[1:])
+
+
+async def test_resolved_choices_keep_a_resource_s_own_url(engine, net):
+    """A resource with its own URL is chosen as that URL, not skipped as having no candidate."""
+    with session_scope(engine) as s:
+        from backend.tutor.repo import create_roadmap as mk
+        rm = mk(s, slug="own", title="O", source_text="see https://own.example/doc")
+        rm.status = "parsed"
+        rm.spec = {"title": "O", "goals": [], "weekly_hours": None, "stages": [
+            {"id": "s1", "title": "S", "timeframe": None, "summary": "", "practice_goals": [], "skills": [],
+             "resources": [{"id": "res-r1", "title": "Doc", "kind": "article", "url": "https://own.example/doc",
+                            "url_hint": None, "query": "q", "skill_ids": []}]}]}
+    assert ingestion.resolve_choices(engine, net, "own") == {"res-r1": "https://own.example/doc"}

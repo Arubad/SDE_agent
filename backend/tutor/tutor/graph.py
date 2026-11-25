@@ -59,6 +59,7 @@ class TutorDeps:
     enqueue: Callable[..., Any] | None = None  # `JobContext.enqueue`-shaped, or None
     tracer_provider: Any = None  # None: traces are not exported
     url_resolver: Any = None  # the agents' URL-policy DNS (`fetch.Resolver`); None: real DNS
+    net: Any = None  # the crawler's `Net`: the researcher resolves resource URLs with it (R18); None: spec URLs only
 
 
 @dataclass(frozen=True)

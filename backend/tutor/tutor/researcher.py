@@ -14,8 +14,12 @@ found, an error, a decline) by clearing `state.proposal`; the edges after `resea
   tools get sync approvers built from the args the learner approved: `lambda p: p["args"] == approved_args`.
 - `research_create` calls `ingest.create_roadmap` (it parses; the ingest server returns no spec to the gateway's
   client), then reads the parsed spec from the database (D5: deterministic reads and writes are allowed), clears every resource
-  `url` / `url_hint` outside `allowed` (R12: the URLs that survived stripping) and stores it for the second card.
-  `state.proposal` becomes `{"slug", "title", "key", "spec", "id"}`.
+  `url` / `url_hint` outside `allowed` (R12: the URLs that survived stripping), scrubs host-like tokens and search
+  operators from every resource `query` (R18: a query must not steer search to an injected host) and stores it. Then
+  it resolves each resource's URL once, deterministically (`ingestion.resolve_choices`, with `deps.net`), and the
+  second card shows that `choices` map in `approve_roadmap`'s args, so the approval covers exactly the URLs ingested
+  (`approve_roadmap` does not resolve again when given choices). `state.proposal` becomes
+  `{"slug", "title", "key", "spec", "choices", "id"}`.
 - Conversation messages: the request as sent and the final reply, nothing else (no tool messages, no source text).
 """
 from __future__ import annotations
@@ -23,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import re
+import unicodedata
 import uuid
 
 from langgraph.graph import END, StateGraph
@@ -34,10 +39,11 @@ from backend.core.trace import current_trace
 from backend.tutor.db import session_scope
 from backend.tutor.ingest.service import Conflict, update_spec
 from backend.tutor.mcp.gateway import CallContext
+from backend.tutor.mcp.servers.ingestion import resolve_choices
 from backend.tutor.mcp.policy import text_urls
 from backend.tutor.models import Roadmap
 from backend.tutor.repo import SLUG_RE, get_roadmap_by_slug
-from backend.tutor.roadmap.parse import extract_urls
+from backend.tutor.roadmap.parse import extract_urls, normalize_spec
 from backend.tutor.tutor.budget import Budget
 from backend.tutor.tutor.graph import Group, TutorDeps, emit, node
 from backend.tutor.tutor.state import TutorState, reply_event
@@ -69,6 +75,11 @@ _ANY_TAIL = re.compile(r"[a-z][a-z0-9+.-]*://\S*", re.I)  # as far as the parser
 _TRAILING = ").,;:!?]>\"'"
 _HEADING = re.compile(r"^# +(\S.*?)\s*#*\s*$", re.M)
 _SKILL = re.compile(r"^### +\S", re.M)
+# A search-query token that could steer search to a host (R18): a search operator (`site:`, `inurl:`, ...), a
+# scheme, a `www.` form, a domain-like name (`x.example`, `a.b.co.uk`) or percent-encoding.
+_QUERY_OP = re.compile(r"^[-+]?(?:site|inurl|allinurl|intitle|allintitle|intext|allintext|link|related|cache|"
+                       r"filetype|ext|source|domain|host|url):", re.I)
+_QUERY_HOST = re.compile(r"://|^\W*www\.|[\w-]\.[a-z]{2,}(?![\w])|%[0-9a-f]{2}", re.I)
 
 
 # --- the roadmap text ---------------------------------------------------------------------------------------
@@ -109,6 +120,13 @@ async def strip_links(text: str, allowed: set[str], policy) -> str:
     out = token.sub(replace, text)
     survivors = {u for u in urls if url_key(u) in kept and ok[u]}
     return _ANY_TAIL.sub(final, out).strip()
+
+
+def scrub_query(query: str) -> str:
+    """`query` (NFKC-normalised, so full-width dots count) without any token that names a host or is a search
+    operator; the other words keep their order."""
+    tokens = unicodedata.normalize("NFKC", query or "").split()
+    return " ".join(t for t in tokens if not _QUERY_OP.search(t) and not _QUERY_HOST.search(t))
 
 
 def count_skills(markdown: str) -> int:
@@ -177,7 +195,8 @@ def _create_args(proposal: dict) -> dict:
 
 
 def _approve_args(proposal: dict) -> dict:
-    return {"slug": proposal["slug"], "idempotency_key": f"{proposal['key']}:approve"}
+    return {"slug": proposal["slug"], "idempotency_key": f"{proposal['key']}:approve",
+            "choices": proposal["choices"]}
 
 
 def _spec_resources(spec: dict) -> int:
@@ -185,10 +204,12 @@ def _spec_resources(spec: dict) -> int:
 
 
 def _parsed_spec(engine, slug: str, allowed: list[str]) -> dict | None:
-    """The parsed spec with every resource `url` and `url_hint` outside `allowed` (R12) cleared and stored again.
-    The parse model can lift a link the text only hints at (`www.x/y`, `x%3A%2F%2F...`) into a hint that
-    `approve_roadmap` would fetch; only URLs this turn's tool results showed stay. A cleared resource may still be
-    resolved by search."""
+    """The parsed spec, cleaned and stored again, in its normalised form (the ids `choices` uses):
+    - every resource `url` and `url_hint` outside `allowed` is cleared (R12). The parse model can lift a link the
+      text only hints at (`www.x/y`, `x%3A%2F%2F...`) into a hint that would be fetched; only URLs this turn's tool
+      results showed stay;
+    - every resource `query` loses its host-like tokens and search operators (R18); one left empty falls back to
+      the scrubbed title."""
     keep = {url_key(u) for u in allowed}
     with session_scope(engine) as s:
         rm = get_roadmap_by_slug(s, slug)
@@ -200,10 +221,22 @@ def _parsed_spec(engine, slug: str, allowed: list[str]) -> dict | None:
                 for field in ("url", "url_hint"):
                     if res.get(field) and url_key(res[field]) not in keep:
                         res[field], changed = None, True
+                query = scrub_query(res.get("query") or "") or scrub_query(res.get("title") or "")
+                if query != res.get("query"):
+                    res["query"], changed = query, True
         try:
-            return update_spec(s, rm, spec) if changed else spec
+            return (update_spec(s, rm, spec) if changed
+                    else normalize_spec(spec, rm.source_text).model_dump(mode="json"))
         except Conflict:
             return None
+
+
+def _choices(deps: TutorDeps, slug: str, spec: dict) -> dict[str, str | None]:
+    """Each resource's URL to ingest (R18): resolved through the ingestion server's own path, without a network
+    (`deps.net` None) only the spec's own URLs."""
+    if deps.net is not None:
+        return resolve_choices(deps.engine, deps.net, slug)
+    return {r["id"]: r.get("url") or None for st in spec.get("stages") or [] for r in st.get("resources") or []}
 
 
 # --- the nodes ----------------------------------------------------------------------------------------------
@@ -277,8 +310,13 @@ def add_researcher(builder: StateGraph, deps: TutorDeps) -> Group:
         spec = await asyncio.to_thread(_parsed_spec, engine, p["slug"], p["allowed"])
         if not spec:
             return _done(state, "I couldn't create the roadmap: it was not parsed.")
+        try:
+            choices = await asyncio.to_thread(_choices, deps, p["slug"], spec)
+        except Exception:
+            return _done(state, f"I couldn't look up the resources for '{p['title']}'. It stays in Roadmaps as a "
+                                "draft you can approve later.")
         return {"proposal": {"slug": p["slug"], "title": p["title"], "key": p["key"], "spec": spec,
-                              "id": uuid.uuid4().hex}}
+                              "choices": choices, "id": uuid.uuid4().hex}}
 
     async def approve_ingest(state: TutorState) -> dict | None:
         p = state["proposal"]

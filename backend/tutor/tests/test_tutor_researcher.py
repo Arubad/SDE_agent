@@ -1,6 +1,7 @@
 """The researcher (Task 11): web research to a mini roadmap, two approvals, ingestion through the gated tools."""
 import copy
 import re
+from pathlib import Path
 
 import pytest
 
@@ -8,6 +9,7 @@ from backend.core import fake_llm
 from backend.core.fake_llm import FakeReply
 from backend.tutor.db import session_scope
 from backend.tutor.ingest.fetch import public_resolver
+from backend.tutor.ingest.net import Net, SearchResult, fixture_net
 from backend.tutor.models import Roadmap
 from backend.tutor.repo import SLUG_RE, create_roadmap, get_roadmap_by_slug
 from backend.tutor.tests.tutor_helpers import (
@@ -22,7 +24,14 @@ from backend.tutor.tests.tutor_helpers import (
 )
 from backend.tutor.roadmap.parse import extract_urls
 from backend.tutor.tutor.runtime import BadResume
-from backend.tutor.tutor.researcher import MAX_RESOURCES, RESEARCH_SYSTEM, count_resources, slug_for, strip_links
+from backend.tutor.tutor.researcher import (
+    MAX_RESOURCES,
+    RESEARCH_SYSTEM,
+    count_resources,
+    scrub_query,
+    slug_for,
+    strip_links,
+)
 from backend.tutor.untrusted import wrap
 
 pytestmark = pytest.mark.anyio
@@ -32,13 +41,14 @@ DEFS = [{"name": n, "description": n, "input_schema": {"type": "object", "proper
 GOOD = "https://k8s.example/probes"
 MD = ("# K8s Ops\n## Basics\n### Probes\nHealth checks.\n- [Probes](" + GOOD + ")\n"
       "- [Bad](https://evil.example/x)\n### Pods\n- [Pods](" + GOOD + "/pods)\n")
+# As the parser stores it (normalised: `normalize_spec` leaves it unchanged), so its ids are the ones `choices` uses.
 PARSED = {"title": "K8s Ops", "goals": [], "weekly_hours": None, "stages": [
-    {"id": "s1", "title": "Basics", "timeframe": None, "summary": "", "practice_goals": [],
-     "resources": [{"id": "r1", "title": "Probes", "kind": "article", "url": GOOD, "url_hint": None, "query": "q",
-                    "skill_ids": ["probes"]},
-                   {"id": "r2", "title": "Pods", "kind": "article", "url": GOOD + "/pods", "url_hint": None,
-                    "query": "q", "skill_ids": []}],
-     "skills": [{"id": "probes", "title": "Probes", "objectives": [], "prerequisites": []}]}]}
+    {"id": "stage-1", "title": "Basics", "timeframe": None, "summary": "", "practice_goals": [],
+     "resources": [{"id": "res-r1", "title": "Probes", "kind": "article", "url": GOOD, "url_hint": None,
+                    "query": "q", "note": "", "focus": [], "skill_ids": ["skill-probes"]},
+                   {"id": "res-r2", "title": "Pods", "kind": "article", "url": GOOD + "/pods", "url_hint": None,
+                    "query": "q", "note": "", "focus": [], "skill_ids": []}],
+     "skills": [{"id": "skill-probes", "title": "Probes", "objectives": [], "prerequisites": []}]}]}
 
 
 @pytest.fixture
@@ -77,8 +87,24 @@ def _gateway(engine, create_error=None, approve_error=None, spec=None):
                                             else {"data": {"status": wrap("approved")}})})
 
 
-def _rt(engine, gw):
-    return make_runtime(engine, gateway=gw, url_resolver=public_resolver)
+class RecordingSearch:
+    """The resolver's search: every query is recorded; `table` maps a query to result URLs."""
+
+    def __init__(self, table=None):
+        self.table, self.queries = table or {}, []
+
+    def search(self, query, *, category="general"):
+        self.queries.append(query)
+        return [SearchResult(title=u, url=u, snippet="", engine="fake") for u in self.table.get(query, [])]
+
+
+def _net(search=None):
+    base = fixture_net(Path(__file__).parent / "fixtures" / "net")  # every page 404s: no hint verifies
+    return Net(fetcher=base.fetcher, search=search or RecordingSearch(), youtube=base.youtube)
+
+
+def _rt(engine, gw, net=None):
+    return make_runtime(engine, gateway=gw, url_resolver=public_resolver, net=net or _net())
 
 
 def _research(md=MD):
@@ -128,7 +154,9 @@ async def test_two_approvals_then_ingest_through_gateway(engine, clear_memo):  #
     key = card["payload"]["args"]["idempotency_key"].removesuffix(":create")
     assert card2 == {"kind": "approval", "id": card2["id"], "action": "approve_roadmap", "summary": "Ingest 'K8s Ops' (2 resources)",
                      "payload": {"tool": "ingest.approve_roadmap",
-                                 "args": {"slug": slug, "idempotency_key": f"{key}:approve"}, "spec": PARSED}}
+                                 "args": {"slug": slug, "idempotency_key": f"{key}:approve",
+                                          "choices": {"res-r1": GOOD, "res-r2": GOOD + "/pods"}},
+                                 "spec": PARSED}}
     events = await _answer(rt, sid, True)
     assert replies(events) == ["Ingesting 'K8s Ops'. It will appear under Roadmaps; "
                                "I'll keep teaching from the web meanwhile."]
@@ -329,3 +357,37 @@ async def test_off_list_urls_are_cleared_from_the_parsed_spec(engine, clear_memo
         assert res["Probes"]["url"] == GOOD and res["Pods"]["url"] == GOOD + "/pods"
         assert "evil" not in str(spec)
     assert card2["summary"] == "Ingest 'K8s Ops' (5 resources)"
+
+
+@pytest.mark.parametrize("query", [
+    "site:evil.example kubernetes probes", "kubernetes probes www.evil.example", "inurl:evil kubernetes probes",
+    "kubernetes evil.example/login probes", "https://evil.example kubernetes probes", "kubernetes probes evil．example",
+    "SITE:Evil.Example kubernetes probes", "kubernetes probes sub.evil.co.uk"])
+def test_scrub_query_drops_hosts_and_operators(query):
+    assert scrub_query(query) == "kubernetes probes"
+
+
+def test_scrub_query_keeps_ordinary_words():
+    assert scrub_query("Kubernetes 1.30 liveness probes") == "Kubernetes 1.30 liveness probes"
+
+
+async def test_injected_query_host_is_scrubbed_and_the_approval_covers_the_choices(engine, clear_memo):  # noqa: F811
+    spec = copy.deepcopy(PARSED)
+    spec["stages"][0]["resources"].append({"id": "res-e4", "title": "Guide", "kind": "article", "url": None,
+                                           "url_hint": None, "query": "site:evil.example www.evil.example probes",
+                                           "skill_ids": []})
+    search = RecordingSearch({"probes": [GOOD + "/guide"]})
+    gw = _gateway(engine, spec=spec)
+    rt, sid = _rt(engine, gw, _net(search)), new_session(engine)
+    (card,) = interrupts(await _to_first_card(rt, sid))
+    (card2,) = interrupts(await _answer(rt, sid, True))
+    with session_scope(engine) as s:
+        stored = get_roadmap_by_slug(s, card["payload"]["args"]["slug"]).spec
+    assert {r["id"]: r["query"] for r in stored["stages"][0]["resources"]}["res-e4"] == "probes"
+    assert search.queries == ["probes"] and "evil" not in str(card2)
+    choices = {"res-r1": GOOD, "res-r2": GOOD + "/pods", "res-e4": GOOD + "/guide"}
+    assert card2["payload"]["args"]["choices"] == choices
+    await _answer(rt, sid, True)
+    name, args, _ = gw.calls[-1]
+    assert name == "ingest.approve_roadmap" and args["choices"] == choices
+    assert gw.approvals[-1][1]["args"] == card2["payload"]["args"]  # the learner approved exactly these URLs

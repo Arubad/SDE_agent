@@ -173,7 +173,7 @@ def create_app(settings: Settings, *, engine: Engine | None = None, handlers: di
                 tutor_deps = TutorDeps(engine=app.state.engine, gateway=app.state.gateway, index=index,
                                        embedder=embedder, settings=settings, saver=app.state.saver, enqueue=enqueue,
                                        tracer_provider=app.state.tracer_provider,
-                                       url_resolver=app.state.net.fetcher.resolver)
+                                       url_resolver=app.state.net.fetcher.resolver, net=app.state.net)
                 app.state.tutor_runtime = TutorRuntime(tutor_deps, build_tutor_graph(tutor_deps, tutor_groups))
                 # Startup and every RETENTION_EVERY_S: end idle sessions (R19), queue curation of ended sessions
                 # that missed it, then drop the raw threads past retention.
