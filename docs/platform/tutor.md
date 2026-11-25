@@ -86,11 +86,16 @@ learner snapshot, today's plan and passages go in the user turn.
 | `assessor_grade` | none | `Grade`, `low`, memoised, only for short answers | none |
 | `research` | `researcher` | the tool loop, `AGENT_EFFORT` (R11) | the `researcher` allow-list without `ingest.*` |
 | `research_create`, `research_ingest` | `researcher` | none | `ingest.create_roadmap`, `ingest.approve_roadmap` (ask tools, approved by the card) |
-| `curate_session` (job) | none | `SessionCurate`, `low`, memoised | none |
+| `curate_session` (job) | none | `SessionCurate` with `consent_personal`, else `SessionCurateNoFacts` (asks for no facts); `low`; not memoised (R17) | none |
 | `summarize_document` (job) | none | `SectionNotes`, `low` | none |
 
 The researcher's effort is not pinned: it follows `AGENT_EFFORT` through the frozen `default_model_turn`, so
 raising `AGENT_EFFORT` for the teacher raises the researcher too (R11).
+
+**The memo (`llm_memo`).** It holds only coordinator routes (`TutorRoute`) and quiz grades (`Grade`), keyed by a hash
+of the model, prompt, schema and effort (`tutor/memo.py`). Nothing personal is memoised: the table is outside
+consent, export and purge. The curator therefore calls `haiku_json` directly (R17), and migration `0010` deleted the
+curator replies older builds had memoised (rows whose `response` has `resolved_weak_spots`).
 
 ## Budgets and failures
 
@@ -99,21 +104,33 @@ Per turn, configurable (`backend/.env.example`):
 | Budget | Default | Where |
 | --- | --- | --- |
 | `TUTOR_MAX_STEPS` | 6 model turns in a tool loop | `settings.py:54` |
-| `TUTOR_MAX_TOKENS` | 60,000 (input + output + cache read + cache write, summed over the turn's spans) | `settings.py:55`, `tutor/budget.py:37` |
-| `TUTOR_MAX_USD` | $0.02 | `settings.py:56`, `tutor/budget.py:39` |
+| `TUTOR_MAX_TOKENS` | 60,000 (input + output + cache write + 0.1 × cache read, rounded, summed over the turn's spans; R20) | `settings.py:55`, `tutor/budget.py` |
+| `TUTOR_MAX_USD` | $0.02 (the hard limit: it prices every token kind) | `settings.py:56`, `tutor/budget.py` |
 
 Breaching tokens or dollars (strictly over) ends the turn with this exact message (`tutor/budget.py:20`):
 
 > This turn reached its {kind} budget ({used} of {limit}). Your session is saved; ask again to continue.
 
-`kind` is `token` or `cost`; used and limit are `62000 of 60000` or `$0.0213 of $0.0200`. The step limit is enforced
-by the tool loop itself. The check runs before each model step, so a turn can end over the limit by one step's
+`kind` is `token` or `cost`; used and limit are `62000 of 60000` or `$0.0213 of $0.0200`. Cache reads count a tenth
+toward the token budget (R20): a tool loop re-reads its cached prompt on every step, and counting those reads in full
+ended ordinary turns early; the dollar cap stays the hard limit. The step limit is enforced by the tool loop itself:
+its last step is forced to answer without tools, and that answer carries the notice "I reached this turn's step
+limit; the answer may be incomplete." An answer cut at the output length limit carries "The answer was cut off at
+the length limit." (M11; for the researcher the notice is appended to the first card's summary). A contradiction
+notice, when there is one, is appended after it. The check runs before each model step, so a turn can end over the limit by one step's
 cost.
 
 A model call that raises `LLMUnavailable` is retried twice, after 1 s and then 2 s (`tutor/budget.py:15`). After
 that the turn streams `{"type": "error", "message": "The model is unavailable right now. Your session is saved; try
 again in a minute."}` and ends. The checkpoint keeps the state of the last completed step. The `done` event always
-comes last and carries the redacted trace summary; the session's `cost_usd` grows by the turn's cost.
+comes last and carries the redacted trace summary; the session's `cost_usd` grows by the turn's cost and its
+`last_turn_at` is stamped.
+
+Any other exception after the stream has started is logged and ends the stream with `{"type": "error", "message":
+"Something went wrong; your session is saved."}` and no `done` (its trace summary died with the turn; the cost is
+still recorded). The UI shows that message and reloads the saved session (M2). Session ids are canonicalised
+(`str(uuid.UUID(id))`) at every runtime entry point, so an upper-case id uses the same turn lock and checkpoint
+thread; a malformed id is a 404 (M3).
 
 The contradiction check is an enhancement, not the answer (R9): when it fails (outage or budget) the finished answer
 is kept without a notice, and it is skipped when no web excerpt was found.
@@ -161,6 +178,11 @@ Memory & privacy page.
 
 **The sweep** (`tutor/retention.py`) runs at startup and every 6 h (`RETENTION_EVERY_S` = 21,600). In order:
 
+0. End every active session idle for over 6 h (`IDLE_END_S` = 21,600), measured from `last_turn_at` (stamped at the
+   end of each turn), or from `started_at` before any turn (R19). It ends them through `TutorRuntime.end_session`,
+   so the turn lock (R7), curation and D3 apply; a session whose turn is running is skipped and retried next pass,
+   and one used since it was found idle is left active. The UI reopens a roadmap's active session, so without this
+   an abandoned session would keep its raw messages forever and never be summarised.
 1. Re-enqueue `curate_session` for every ended, uncurated session, and revive jobs that died under their key (status
    queued, attempts 0), so a long model outage does not lose a session (R13).
 2. Drop the raw thread of any session that ended more than 24 h ago (`UNCURATED_GRACE_S` = 86,400) and was never
@@ -174,7 +196,11 @@ Memory & privacy page.
 **Other privacy controls.** `DELETE /api/sessions/{id}` (ended sessions only) removes the thread and the row;
 `DELETE /api/roadmaps/{slug}/progress/{skill_id}` resets a skill; `GET /api/learner/export` downloads everything
 (settings, facts without embeddings, progress, sessions, study settings, plans, and the kept raw messages) redacted, as
-`roadmap-tutor-export.json`. User text is redacted (`backend/core/redact.py`) before it enters graph state, the
+`roadmap-tutor-export.json`.
+
+**No agent remembers or forgets (M7).** The teacher has `learner.recall` only; no agent's allow-list includes
+`learner.remember` or `learner.forget`. Facts are written only by the curator when a session ends (with
+`consent_personal`), and edited or deleted only by the learner on the Memory & privacy page. User text is redacted (`backend/core/redact.py`) before it enters graph state, the
 database or a trace.
 
 ## Mastery and review
@@ -242,9 +268,16 @@ the skill with the most weak spots) and `skip`; it is answered from stored summa
 ## Sources
 
 - **Roadmap** sources are the citations `run_tool_loop` renders from `kb` passages.
-- **Web** sources are URLs that appeared in a web, browser, docs, repo, papers or ref tool result this turn **and**
-  in the answer text. They are matched by URL text, not by meaning.
+- **Web** sources (R21, amends D11) are URLs that a tool result of this turn named as a source **and** that appear in
+  the answer text. Only these count: the result URLs of the registry's `url_sources` tools (search tools: a
+  `web.search` result's `results[*].url`, else the URLs in a text result), `web.fetch`'s `final_url`, and browser
+  `Page URL:` lines. A URL inside a fetched page's body or a browser snapshot never counts: a page can name any
+  host. They are matched by URL text, not by meaning. The researcher's allowed URL set is built the same way.
 - Links in the answer are sanitised to roadmap source URLs, web source URLs and the learner's own URLs.
+- **The web UI links only those (R16).** A reply's text links only URLs in that reply's `sources` (roadmap and web)
+  or in the learner's own messages, compared after dropping a trailing `/`; any other URL stays plain text. Code
+  spans (the sanitiser's neutralised URLs among them) render as `<code>` and are never links, and the reply that is
+  still streaming (raw, unsanitised model text) renders as plain text with no links at all.
 - With both kinds present and a web excerpt to compare, one `WebContradiction` call may add a one-sentence notice to
   the reply.
 - Roadmap passages and every tool result are untrusted data; the teacher prompt says so, and passages are fenced
@@ -288,8 +321,15 @@ Safety rests on these controls:
 - **The spec is cleaned before card 2 (R12).** Scheme-less or obfuscated URLs (`www.x`, `x.example/p`, escaped,
   full-width or percent-encoded schemes) survive stripping and can reach ingestion through the parse model's
   `url_hint`. After `create_roadmap` parses, every parsed resource `url` and `url_hint` not in this turn's allowed
-  set is cleared and the spec is saved again, so `approve_roadmap`, which re-resolves from the spec, cannot ingest an
-  injected host. A cleared resource may still be found by search.
+  set is cleared and the spec is saved again. A cleared resource may still be found by search.
+- **Queries are scrubbed and the choices approved (R18).** Every resource `query` loses its host-like tokens
+  (`x.example`, `a.b.co.uk`, `www.` forms, schemes, percent-encoding; NFKC first, so full-width dots count) and its
+  search operators (`site:`, `inurl:` and the like), so search cannot be steered to an injected host. Then
+  `research_create` resolves each resource's URL once, through the ingestion server's own `resolve_choices` (a
+  resource's own URL, else its top candidate, else null), and card 2 shows that `choices` map in
+  `approve_roadmap`'s args. `approve_roadmap` given `choices` validates each URL (`validate_crawl_url`) and ingests
+  exactly those, without resolving again; `choices` is part of its idempotency args. The approver compares args, so
+  the approval covers exactly the URLs ingested.
 - **The elicitation dependency.** `create_roadmap` asks the human through MCP elicitation, and a client that accepts
   would approve and ingest the uncleaned text. The researcher is safe only because the gateway's client has **no
   elicitation handler**, so the call counts as declined and the roadmap stays `parsed`. Do not add an elicitation
@@ -308,9 +348,14 @@ Safety rests on these controls:
 - **The researcher's effort follows `AGENT_EFFORT`** (R11), not a separate setting.
 - **After a reload the chat shows reply text only**, without the sources or notices: the checkpoint stores messages,
   not the reply events.
-- **The search `query` from the parse model can still name a host.** The spec cleaning clears URLs, not queries; a
-  resource it cleared is resolved by search, and that query is the parse model's text (resolved by the search
-  service, with the crawler's own address checks).
+- **Query scrubbing drops dotted words.** A query word such as `node.js` looks like a host and is dropped (R18);
+  the rest of the query still searches.
+- **The gateway's hand-over reset is not retried.** When a new browser lease's `about:blank` reset fails, the call
+  is neither retried nor refused.
+- **Section and video summaries are stored but shown only in the ingestion report;** the model's misconceptions are
+  discarded.
+- **The checkpoint saver has no reconnect.** It holds one long-lived connection; if it drops, restart the API.
+- **Export includes messages only for ended `raw_kept` sessions**, not for the active session.
 - **Revoke is eventually complete.** A crash between a revoke's steps is finished by the next sweep, within 6 h.
 - **The summary cap is checked per batch.** Jobs running at the same time do not see each other's spend in flight,
   so the cap can be passed by up to one batch per worker.

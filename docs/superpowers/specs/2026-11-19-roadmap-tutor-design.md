@@ -551,9 +551,9 @@ building it. The details are in `docs/platform/tutor.md`.
   - **D10, summaries:** sections are summarised at ingestion in batches of up to 8, with a 1–2 sentence summary and
     2 starter questions each, plus a card for a video. Spend is capped per roadmap at
     `INGEST_SUMMARY_BUDGET_USD` ($0.50); once it is reached, jobs complete as `{"skipped": "budget"}`.
-  - **D11, sources:** roadmap sources are the loop's `kb` citations. Web sources are URLs that appeared both in a
-    web-type tool result this turn and in the answer. Links in the answer are sanitised to those and the learner's
-    own URLs.
+  - **D11, sources (amended by R21):** roadmap sources are the loop's `kb` citations. Web sources are URLs that
+    appeared both in a source position of a tool result this turn and in the answer. Links in the answer are
+    sanitised to those and the learner's own URLs.
   - **D12, the answer cache:** the semantic answer cache for factual Q&A moves to Phase 6, with the cost eval.
     Phase 4 memoises deterministic calls (`llm_memo`).
 - **Rulings made during the build:**
@@ -574,3 +574,19 @@ building it. The details are in `docs/platform/tutor.md`.
     messages are consented to.
   - **R14, state-based revocation:** threads are deleted before the settings change, and the settings save and the
     fact purge run in one transaction. The sweep finishes any partial revoke.
+- **Rulings from the final review:**
+  - **R16, links in the web UI:** a reply links only URLs in its own sources or in the learner's messages. Code spans
+    and the still-streaming draft are never linked.
+  - **R17, the curator and the memo:** the curator is not memoised, and without `consent_personal` its schema and
+    prompt ask for no facts. `llm_memo` holds only coordinator routes and grades. Migration `0010` deleted the
+    curator replies already memoised.
+  - **R18, the researcher's approval covers what is ingested:** host-like tokens and search operators are scrubbed
+    from resource queries. Each resource's URL is resolved once, and card 2 shows the `choices`.
+    `approve_roadmap` with `choices` ingests exactly those, without resolving again.
+  - **R19, idle sessions:** the sweep ends active sessions idle for over 6 h through the runtime, so they are
+    curated and their raw messages follow D3.
+  - **R20, the token budget:** cache reads count a tenth. The dollar cap stays the hard limit.
+  - **R21, amends D11:** web sources, and the researcher's allowed URLs, come only from search-tool result URLs,
+    `web.fetch`'s `final_url` and browser `Page URL:` lines, never from URLs inside a fetched page or snapshot.
+  - **M7, memory tools:** no agent can `remember` or `forget`. The teacher has `learner.recall` only. Facts are
+    written by the curator and edited by the learner.

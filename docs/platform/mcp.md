@@ -306,7 +306,9 @@ The Phase 3 reviews listed these for before any agent called a tool. All are don
 - Approvers are sync and loop-agnostic; the tutor's approval cards show the raw payload.
 - The tutor's prompts treat `kb` passages and tool results as untrusted.
 - Idempotency claims carry a token, so a stale re-claim cannot release a live one.
-- `approve_roadmap` resolves candidates before it takes the row lock.
+- `approve_roadmap` resolves candidates before it takes the row lock. Given `choices` (resource id to URL, or null to
+  skip), it resolves nothing and ingests exactly those, each URL validated; `choices` is part of its idempotency
+  args (R18).
 - `wait_for_ingestion` returns at once for a roadmap that is still only parsed.
 - Revoking personal-memory consent purges the facts; `remember` is capped at 1000 characters.
 - Re-check reports a page that was ingested through the browser as `ok` (outcome `needs_browser`), not dead.
