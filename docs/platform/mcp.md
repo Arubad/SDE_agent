@@ -64,7 +64,8 @@ called.
 | Agent | Allowed |
 | --- | --- |
 | `teacher` | `kb.*`, `web.search`, `web.fetch`, `browser.navigate`, `browser.snapshot`, `browser.navigate_back`, `docs.*`, `repo.*`, `papers.*`, `ref.*`, `learner.recall`, `learner.get_progress` |
-| `researcher` | `kb.search`, `web.search`, `web.fetch`, `browser.navigate`, `browser.snapshot`, `docs.*`, `repo.*`, `papers.*`, `ref.*` |
+| `researcher` | `kb.search`, `web.search`, `web.fetch`, `browser.navigate`, `browser.snapshot`, `docs.*`, `repo.*`, `papers.*`, `ref.*`, `ingest.create_roadmap`, `ingest.approve_roadmap`, `ingest.ingestion_status` (the model is never offered the `ingest.*` tools; the researcher's approval nodes call them after the learner approves a card, see [tutor.md](tutor.md#the-researcher-and-its-safety)) |
+| `assessor` | `kb.search` (passages for quiz questions the stored ones do not cover) |
 | `crawler` | `browser.navigate`, `browser.evaluate`, `browser.close` (raw results, no fencing, a 5 MB cap; used only by ingestion) |
 
 On top of that the registry has rules, and **deny beats ask beats allow**:
@@ -129,11 +130,32 @@ Residual risk, stated plainly:
 - LAN addresses, `[::1]` and `0.0.0.0` are covered only by the gateway's checks, not by blocked origins.
 - Sub-resource requests a page makes (images, scripts, `fetch` calls) are not seen by the gateway. A live
   `evaluate` that fetched an internal address failed, but that may be mixed-content blocking, not the blocklist.
-- One shared browser serves all agents. Phase 4 has to isolate it before tutor agents use it.
+- One browser serves all agents. The gateway hands it out one lease at a time and resets the page between owners
+  ([below](#the-browser-lease)), but it stays one browser context: the reset clears the page, not cookies or storage.
 - Rendering for the crawler re-requests the page without the crawler's per-host interval, and its sub-resources load
   under Chromium's user agent without robots checks. The page itself was robots-checked by the HTTP fetch first.
 - In v0.0.86 `navigate` links the page snapshot as a file; only `snapshot` returns it inline. Agents navigate, then
   snapshot.
+
+## The browser lease
+
+The `browser` server (Playwright MCP) has one page, so the gateway hands it out as a lease (`gateway.py`). Other
+servers ignore leases.
+
+- **Who holds it.** A browser call runs under `CallContext.lease`: a tutor turn passes its session id (teacher and
+  researcher alike), each crawler render a fresh `crawler:<hex>`, and a call without one is `anon:<agent>`.
+- **How long.** A lease ends when its holder releases it (the tutor does, when the turn ends however it ends) or
+  after 60 s without a call (`LEASE_IDLE_S`). Releasing a lease you do not hold does nothing.
+- **Waiting.** A call from another lease waits at most its own timeout (the server's `tool_timeouts` entry for the
+  tool, else its `timeout_s`: 45 s for `browser`), then gets the error `browser busy: another session is using it`
+  without the server being contacted. The refusal is traced like any refused call.
+- **One call at a time.** Browser calls run one at a time even within one lease, because a turn's tool calls are
+  issued in parallel and the page is shared state.
+- **A clean page for each owner.** A lease that takes over from a previous owner first gets an internal navigation
+  to `about:blank` (not gated, not policed, never shown), once, on its first call that connects. Releasing does
+  not navigate.
+- **The crawler under contention.** A crawler render refused as busy raises a retryable error, so the queue backs
+  off and renders the page later instead of recording a permanent skip.
 
 ## Why Fetch is off
 
@@ -157,6 +179,13 @@ Edit `backend/tutor/mcp/servers.json` (or point `MCP_REGISTRY` at another file) 
 - Allowed keys: `name`, `namespace`, `transport`, `target`, `command`, `args`, `url`, `headers`, `requires_env`,
   `enabled`, `untrusted`, `timeout_s`, `tool_timeouts`, `strip_prefix`, `note`. `${VAR}` and `${VAR:-default}` are expanded from the
   environment; a `${VAR}` without a default must be listed in `requires_env`, or the registry fails to load.
+- `tool_timeouts` (an object of numbers > 0, keyed by the server's own tool name, before `strip_prefix`) sets
+  the call budget of single tools; any other tool gets `timeout_s` (default 20). The `ingest` server uses it for
+  `create_roadmap` (120 s) and `wait_for_ingestion` (900 s).
+- Next to `servers`, `agents` and `rules`, the registry's top level takes `url_sources`: the canonical names (not
+  globs) of tools whose result URLs become allowed sources for the URL rule. The default is `["web.search"]`;
+  `servers.json` adds `docs.mslearn.microsoft_docs_search`. A source tool's `results[*].url` is read, else every
+  URL in the result's strings, from the raw result before fencing. Each name must match a server's namespace.
 - Servers are untrusted by default; leave it that way for anything you do not run.
 - Nothing is reachable by an agent until it is allowed: add globs for the namespace to the agents in `agents`, and
   add `deny` or `ask` rules for tools that write or are risky.
@@ -248,10 +277,39 @@ claude mcp add roadmap-knowledge -e PYTHONPATH=<repo> -- <repo>/backend/venv/bin
 
 ## Known limits
 
-- `learner.recall` and `learner.list_facts` return nothing while personal-memory consent is off, and a memory is at most
-  1000 characters. Revoking consent hides the stored facts; the Memory API (Phase 4) is what purges them.
-- Browser isolation per agent (see the threat model), and the residual risks listed there.
+- `learner.recall` and `learner.list_facts` return nothing while personal-memory consent is off, and a memory is at
+  most 1000 characters. Turning consent off purges every fact ([tutor.md](tutor.md#consent-and-retention)).
+- The residual risks listed in the threat model: blocked origins don't cover redirects, the API is reachable by its
+  `browser`-network IP (though `/api/*` needs a loopback Host), sub-resource requests aren't seen by the gateway, and
+  the stdio servers run as the API's user (a supply-chain risk).
+- The gateway's client has **no elicitation handler**, so `ingest.create_roadmap` called through the gateway never
+  approves by itself and the roadmap stays `parsed`. The researcher's safety depends on this (it cleans the parsed
+  spec before its second card); do not add a handler without moving that cleaning first.
+- `kb` passages reach the model as citation blocks without the untrusted fence. The tutor's prompts say they are
+  untrusted; the red-team eval of a poisoned ingested page is Phase 6.
 - `/mcp/*` is for a client on this machine; do not expose it except through the passcode-protected tunnel.
+
+### Done in Phase 4
+
+The Phase 3 reviews listed these for before any agent called a tool. All are done:
+
+- Own servers have realistic timeouts: `kb` 60 s, `ingest` 30 s with per-tool `tool_timeouts`.
+- A call timeout on an in-process server no longer drops its connection.
+- Microsoft Learn search results are allowed URLs (`url_sources`).
+- The result cap is measured on ASCII-escaped JSON, as the loop sends it.
+- DNS lookups are bounded (5 s, `DNS lookup timed out`).
+- The servers' on/off state is read in a worker thread and cached, never on the gateway loop.
+- `tool_defs` waits at most 5 s; slower servers finish connecting in the background.
+- Refused calls are traced (`refused=True` with the reason).
+- The `about:blank` reset is retried once, unless the first attempt timed out.
+- Browser isolation: a gateway-level lease ([The browser lease](#the-browser-lease)).
+- Approvers are sync and loop-agnostic; the tutor's approval cards show the raw payload.
+- The tutor's prompts treat `kb` passages and tool results as untrusted.
+- Idempotency claims carry a token, so a stale re-claim cannot release a live one.
+- `approve_roadmap` resolves candidates before it takes the row lock.
+- `wait_for_ingestion` returns at once for a roadmap that is still only parsed.
+- Revoking personal-memory consent purges the facts; `remember` is capped at 1000 characters.
+- Re-check reports a page that was ingested through the browser as `ok` (outcome `needs_browser`), not dead.
 
 ## Live check (2026-11-24)
 

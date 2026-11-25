@@ -518,3 +518,59 @@ does these before any tutor agent calls a tool:
   - the API is reachable by its browser-network IP, though `/api/*` now needs a loopback Host;
   - sub-resource requests aren't seen by the gateway;
   - stdio servers run as the API's user (a supply-chain risk).
+
+## Phase 4 amendments (from the Phase 4 build, 2026-11-25)
+The Phase 4 plan's decisions where this design is silent or leaves it to the builder, and the rulings made while
+building it. The details are in `docs/platform/tutor.md`.
+- **Plan decisions:**
+  - **D1, exercises and flashcards:** both move to Phase 5, with the sandbox and FSRS. The coordinator still
+    classifies `exercise`; it gets a fixed reply, then the teacher explains the concept.
+  - **D2, the planner (amended by R8):** it is deterministic, with no model call. It follows spec order, made
+    consistent with prerequisites, and sizes sessions to the weekly time. A replan is big when 2 or more skills of
+    the next 5 sessions were replaced, counted as max(|new − old|, |old − new|); the plan's symmetric difference
+    contradicted its own test examples. A big replan needs approval; a small one applies silently.
+  - **D3, raw messages:** the LangGraph checkpoint is the raw-message store. Without `consent_raw_messages`, a
+    session's thread is deleted once the curator has written its summary. With it, the retention sweep deletes the
+    threads of sessions that ended more than `retention_days` ago.
+  - **D4, consent revocation:** turning `consent_personal` off purges every fact, after the UI confirms.
+    `recall` and `list_facts` return nothing while it is off. This closes the Phase 3 follow-up "hide vs purge".
+  - **D5, direct vs gateway access:** deterministic code (planner, recap, mastery and curator writes) calls the
+    learner store directly. Model-chosen calls go through the gateway.
+  - **D6, background work:** the curator and the section summaries are jobs on the durable queue. With
+    `INGEST_WORKERS=0` they do not run.
+  - **D7, graph and checkpointer:** the graph is compiled once at API startup with an `AsyncPostgresSaver`. Its
+    `setup()` runs at startup, not in Alembic, because it uses `CREATE INDEX CONCURRENTLY`. State holds only
+    JSON-plain values.
+  - **D8, interrupts (amended by R10):** an interrupt node calls `interrupt()` first; the work leading up to it is
+    done in the node before and kept in state. An approval card is `{kind: "approval", id, action, summary,
+    payload}` and resumes with `{"approved": bool, "card": <its id>}`, so a replayed answer cannot approve a card
+    the learner has not seen. Gateway `ask` tools get a sync approver built from the approved payload.
+  - **D9, browser isolation:** a gateway-level browser lease, held by each tutor turn and each crawler render. It
+    ends at release or after 60 s idle. A call from another lease waits up to its timeout, then gets
+    `browser busy`. A new owner starts on `about:blank`, and calls run one at a time even within a lease (R4).
+  - **D10, summaries:** sections are summarised at ingestion in batches of up to 8, with a 1–2 sentence summary and
+    2 starter questions each, plus a card for a video. Spend is capped per roadmap at
+    `INGEST_SUMMARY_BUDGET_USD` ($0.50); once it is reached, jobs complete as `{"skipped": "budget"}`.
+  - **D11, sources:** roadmap sources are the loop's `kb` citations. Web sources are URLs that appeared both in a
+    web-type tool result this turn and in the answer. Links in the answer are sanitised to those and the learner's
+    own URLs.
+  - **D12, the answer cache:** the semantic answer cache for factual Q&A moves to Phase 6, with the cost eval.
+    Phase 4 memoises deterministic calls (`llm_memo`).
+- **Rulings made during the build:**
+  - **R5, abandoned interrupts:** a text or button turn while an interrupt is pending abandons it and keeps the
+    state from before it. Only a resume needs a pending interrupt.
+  - **R6, free Q&A mode:** there is no plan, quiz or session card. `start` ends the turn, `research` goes to the
+    researcher, and everything else goes to the teacher.
+  - **R7, ending sessions:** ending or replacing a session waits up to 120 s for its running turn, through the
+    runtime's turn lock. A partial unique index allows one active session per roadmap.
+  - **R9, the contradiction check:** when it fails (an outage or the budget), only the notice is dropped; the
+    finished answer is kept. It is skipped when no web excerpt was found.
+  - **R12, the researcher's spec:** before the second card, every parsed resource `url` and `url_hint` that is not
+    among this turn's allowed URLs is cleared. `approve_roadmap` therefore cannot ingest a host the parse model
+    lifted from an obfuscated link. The researcher's safety also depends on the gateway client having no
+    elicitation handler.
+  - **R13, curation outages:** the sweep runs at startup and every 6 h. It revives dead `curate_session` jobs, and
+    it deletes the raw thread of any session that ended more than 24 h ago without being curated, unless raw
+    messages are consented to.
+  - **R14, state-based revocation:** threads are deleted before the settings change, and the settings save and the
+    fact purge run in one transaction. The sweep finishes any partial revoke.
